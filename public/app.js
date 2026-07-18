@@ -410,8 +410,51 @@ async function ensurePeriod() {
   } catch { return { start_date: '', end_date: '', deadline: '' }; }
 }
 
+/* ============================================================
+   時間処理ヘルパ（日またぎ営業対応）
+   ・ensureBusinessHours で end < start の overnight パターンは end += 24 で拡張
+   ・extended hour 空間（0-47）で営業時間・シフト時間を扱う
+   ・表示は h % 24、日付計算は anchorDate との差分で処理
+   ============================================================ */
+function _dateDiffDays(fromStr, toStr) {
+  // "YYYY-MM-DD" 同士の日数差（to - from）。同じ日なら 0。
+  const a = new Date(fromStr + 'T00:00:00');
+  const b = new Date(toStr + 'T00:00:00');
+  return Math.round((b - a) / (24 * 60 * 60 * 1000));
+}
+
+function _extMinFromIso(iso, anchorDate) {
+  // iso を anchorDate 基準の「拡張分」に変換。翌日なら +1440。
+  const isoDate = (iso || '').slice(0, 10);
+  const h = +(iso || '').slice(11, 13);
+  const m = +(iso || '').slice(14, 16);
+  const diff = anchorDate ? _dateDiffDays(anchorDate, isoDate) : 0;
+  return (h + diff * 24) * 60 + m;
+}
+
+function _extHourLabel(h) {
+  // 拡張時間 → 表示用文字列。25時=翌1時、29時=翌5時
+  const hh = h % 24;
+  return String(hh).padStart(2, '0');
+}
+
+function _extHourToIsoTime(h, m, anchorDate) {
+  // 拡張時間(HH+日付) → { date: "YYYY-MM-DD", time: "HH:MM" }
+  const dayOffset = Math.floor(h / 24);
+  const hh = String(h % 24).padStart(2, '0');
+  const mm = String(m || 0).padStart(2, '0');
+  let dateStr = anchorDate;
+  if (dayOffset > 0) {
+    const d = new Date(anchorDate + 'T00:00:00');
+    d.setDate(d.getDate() + dayOffset);
+    dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  return { date: dateStr, time: `${hh}:${mm}` };
+}
+
 /* 店舗の営業時間をパターン（shift_patterns）の最小開始/最大終了から算出してキャッシュ。
-   タイムライン表示で「日によって時間軸が変わる」のを防ぎ、営業時間全体を固定表示する。 */
+   タイムライン表示で「日によって時間軸が変わる」のを防ぎ、営業時間全体を固定表示する。
+   【日またぎ対応】end_time <= start_time の overnight パターンは end に +24 する。 */
 async function ensureBusinessHours() {
   if (appState.businessHours && appState.patterns) return appState.businessHours;
   const fallback = { start: 9, end: 22 };
@@ -421,12 +464,16 @@ async function ensureBusinessHours() {
     const pats = d.patterns || [];
     appState.patterns = pats;
     if (!pats.length) { appState.businessHours = fallback; return fallback; }
-    let start = 24, end = 0;
+    let start = 48, end = 0;
     pats.forEach((p) => {
       const sh = +(p.start_time || '').slice(0, 2);
-      const eh = +(p.end_time || '').slice(0, 2) + (+(p.end_time || '').slice(3, 5) > 0 ? 1 : 0);
+      let peH = +(p.end_time || '').slice(0, 2);
+      const peM = +(p.end_time || '').slice(3, 5);
+      // overnight (翌日またぎ): end <= start なら翌日扱いで +24
+      if (peH < sh || (peH === sh && peM === 0)) peH += 24;
+      else if (peM > 0) peH += 1;  // 終了分がある場合は +1 時間切り上げ
       if (!isNaN(sh)) start = Math.min(start, sh);
-      if (!isNaN(eh)) end = Math.max(end, eh);
+      if (!isNaN(peH)) end = Math.max(end, peH);
     });
     if (start >= end) { appState.businessHours = fallback; return fallback; }
     appState.businessHours = { start, end };
@@ -436,17 +483,18 @@ async function ensureBusinessHours() {
 
 /* 時間帯別不足計算（タイムライン・印刷・不足通知で共通利用）
    戻り値: [{ hour, required, placed, gap }] — gap>0 の時間帯が不足
-*/
+   【日またぎ対応】hour は拡張時間（0-47）。overnight シフトも正しくカウント。 */
 function _computeHourlyGaps(shifts, dayStr) {
   const pats = appState.patterns;
   if (!pats || !pats.length) return [];
   const wd = new Date(dayStr + 'T00:00:00').getDay();
   const bh = appState.businessHours || { start: 9, end: 22 };
-  // 各パターンから曜日別必要人数を取得
-  const hourReq = {}; // hour → required
+  // 各パターンから曜日別必要人数を取得（overnight は +24 時間拡張）
+  const hourReq = {}; // 拡張hour → required
   pats.forEach((p) => {
     const ps = +(p.start_time || '').slice(0, 2);
-    const pe = +(p.end_time || '').slice(0, 2);
+    let pe = +(p.end_time || '').slice(0, 2);
+    if (pe <= ps) pe += 24;  // overnight
     const wr = (p.weekday_required || {});
     const req = wr[String(wd)] != null ? +wr[String(wd)] : (p.required_staff || 0);
     if (req <= 0) return;
@@ -454,17 +502,19 @@ function _computeHourlyGaps(shifts, dayStr) {
       hourReq[h] = Math.max(hourReq[h] || 0, req);
     }
   });
-  // confirmed シフトで各時間帯の配置人数をカウント
+  // confirmed シフトで各時間帯の配置人数をカウント（overnight は +24）
   const hourPlaced = {};
   (shifts || []).forEach((s) => {
     if (s.status !== 'confirmed' && s.status !== 'modifying') return;
-    const sh = +(s.start_datetime || '').slice(11, 13);
-    const eh = +(s.end_datetime || '').slice(11, 13) + (+(s.end_datetime || '').slice(14, 16) > 0 ? 1 : 0);
-    for (let h = sh; h < eh; h++) {
+    const sMin = _extMinFromIso(s.start_datetime, dayStr);
+    const eMin = _extMinFromIso(s.end_datetime, dayStr);
+    const sH = Math.floor(sMin / 60);
+    const eH = Math.ceil(eMin / 60);
+    for (let h = sH; h < eH; h++) {
       hourPlaced[h] = (hourPlaced[h] || 0) + 1;
     }
   });
-  // 不足時間帯を返す
+  // 不足時間帯を返す（営業時間内のみ）
   const result = [];
   for (let h = bh.start; h < bh.end; h++) {
     const req = hourReq[h] || 0;
@@ -602,11 +652,14 @@ window?.addEventListener('afterprint', () => {
 });
 
 function _tlTimeMin(iso) {
+  // 後方互換：anchor 無しの日付内ローカル分
   return +iso.slice(11, 13) * 60 + +iso.slice(14, 16);
 }
 
-function buildPrintTimelineHtml(list) {
+function buildPrintTimelineHtml(list, anchorDate) {
   // list: その日の confirmed シフト群。タイムライン（矢印バー）形式で返す。
+  // anchorDate: 拡張時間の基準日（"YYYY-MM-DD"）。指定時は翌日またぎを正しく扱う。
+  const day = anchorDate || (list.length ? list[0].start_datetime.slice(0, 10) : '');
   const order = []; const staffMap = {};
   list.forEach((s) => {
     if (!staffMap[s.staff_id]) {
@@ -619,23 +672,28 @@ function buildPrintTimelineHtml(list) {
   const bh = appState.businessHours || { start: 9, end: 22 };
   let minH = bh.start, maxH = bh.end;
   list.forEach((s) => {
-    minH = Math.min(minH, +s.start_datetime.slice(11, 13));
-    const eH = +s.end_datetime.slice(11, 13) + (+(s.end_datetime.slice(14, 16)) > 0 ? 1 : 0);
-    maxH = Math.max(maxH, eH);
+    const sMin = _extMinFromIso(s.start_datetime, day);
+    const eMin = _extMinFromIso(s.end_datetime, day);
+    minH = Math.min(minH, Math.floor(sMin / 60));
+    maxH = Math.max(maxH, Math.ceil(eMin / 60));
   });
   minH = Math.max(0, Math.floor(minH));
-  maxH = Math.min(24, Math.ceil(maxH));
+  maxH = Math.min(48, Math.ceil(maxH));  // 最大翌日の24時まで
   if (maxH <= minH) maxH = minH + 1;
   const rangeMin = minH * 60, rangeLen = (maxH - minH) * 60;
 
   const hours = [];
-  for (let h = minH; h <= maxH; h++) hours.push(`<div class="tl-hour">${h}</div>`);
+  for (let h = minH; h <= maxH; h++) {
+    const lbl = _extHourLabel(h);
+    const isNextDay = h >= 24;
+    hours.push(`<div class="tl-hour${isNextDay ? ' tl-hour-next' : ''}">${isNextDay ? '(翌)' : ''}${lbl}</div>`);
+  }
 
   const rows = order.map((sid) => {
     const st = staffMap[sid];
     const bars = st.shifts.map((s) => {
-      const sMin = _tlTimeMin(s.start_datetime);
-      let eMin = _tlTimeMin(s.end_datetime);
+      const sMin = _extMinFromIso(s.start_datetime, day);
+      let eMin = _extMinFromIso(s.end_datetime, day);
       if (eMin <= sMin) eMin = sMin + 60;
       const left = ((sMin - rangeMin) / rangeLen) * 100;
       const width = Math.max(4, ((eMin - sMin) / rangeLen) * 100);
@@ -645,16 +703,18 @@ function buildPrintTimelineHtml(list) {
     return `<div class="tl-row"><div class="tl-name">${esc(st.name)}</div><div class="tl-track">${bars}</div></div>`;
   }).join('');
 
-  // 時間帯別不足バー（印刷用）
-  const dayStr = list.length ? list[0].start_datetime.slice(0, 10) : '';
-  const gaps = dayStr ? _computeHourlyGaps(list, dayStr) : [];
+  // 時間帯別不足バー（印刷用）— anchorDate (day) を基準に計算
+  const gaps = day ? _computeHourlyGaps(list, day) : [];
   let gapRowHtml = '';
   if (gaps.length) {
     const merged = _mergeHourlyGaps(gaps);
     const gapBars = merged.map((g) => {
       const left = ((g.start * 60 - rangeMin) / rangeLen) * 100;
       const width = Math.max(4, ((g.end - g.start) * 60 / rangeLen) * 100);
-      return `<div class="tl-gap-bar" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">↓${g.gap}名不足</div>`;
+      // 表示用ラベル（拡張時間 → 翌日表記）
+      const sLbl = g.start >= 24 ? `(翌)${_extHourLabel(g.start)}` : `${_extHourLabel(g.start)}時`;
+      const eLbl = g.end >= 24 ? `(翌)${_extHourLabel(g.end)}` : `${_extHourLabel(g.end)}時`;
+      return `<div class="tl-gap-bar" title="${sLbl}〜${eLbl} あと${g.gap}名" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">↓${g.gap}名不足</div>`;
     }).join('');
     gapRowHtml = `<div class="tl-row tl-gap-row"><div class="tl-name tl-gap-name">不足</div><div class="tl-track">${gapBars}</div></div>`;
   }
@@ -713,7 +773,7 @@ async function openPrintView(start, end) {
     const pagesHtml = days.map((day) => {
       const list = byDay[day] || [];
       const wd = new Date(day + 'T00:00:00').getDay();
-      const timeline = buildPrintTimelineHtml(list);
+      const timeline = buildPrintTimelineHtml(list, day);
       return `<section class="print-page">
         <div class="print-page-header">
           <h2>${day}（${wdArr[wd]}）</h2>
@@ -737,29 +797,47 @@ async function openPrintView(start, end) {
 
 function openDayTimeline(date, allShifts, editable, onChange) {
   buzz(12);
-  const list = (allShifts || []).filter((s) => s.start_datetime.slice(0, 10) === date).sort((a, b) => a.start_datetime.localeCompare(b.start_datetime));
+  // date を anchor として、date で始まるシフトと、前日から date 早朝へまたぐ overnight シフトの両方を表示
+  // ① date で始まるシフト ②end が date に属する翌日跨ぎシフト（前日開始）
+  const list = (allShifts || []).filter((s) => {
+    const sd = s.start_datetime.slice(0, 10);
+    const ed = s.end_datetime.slice(0, 10);
+    return sd === date || ed === date;  // start または end が date に属する
+  }).sort((a, b) => a.start_datetime.localeCompare(b.start_datetime));
   const order = []; const staffMap = {};
   list.forEach((s) => { if (!staffMap[s.staff_id]) { staffMap[s.staff_id] = { name: s.staff_name || ('#' + s.staff_id), shifts: [] }; order.push(s.staff_id); } staffMap[s.staff_id].shifts.push(s); });
   // 時間軸は「営業時間」をベースにし、シフトが営業時間外にはみ出す場合のみ拡張。
   // これにより「シフトが無い時間帯が消える」「日によって軸が変わる」を防ぐ。
+  // 【日またぎ】anchor=date で拡張分計算。前日から date 早朝へ跨ぐシフトは負の拡張時間になるが
+  // ここでは date で始まるシフトのみを可視化範囲のベースとし、不足バー計算は date 基準で行う。
   const bh = appState.businessHours || { start: 9, end: 22 };
   let minH = bh.start, maxH = bh.end;
-  list.forEach((s) => {
-    minH = Math.min(minH, +s.start_datetime.slice(11, 13));
-    const eH = +s.end_datetime.slice(11, 13) + (+(s.end_datetime.slice(14,16)) > 0 ? 1 : 0);
-    maxH = Math.max(maxH, eH);
+  // date で始まるシフトで範囲拡張を判定
+  list.filter((s) => s.start_datetime.slice(0, 10) === date).forEach((s) => {
+    const sMin = _extMinFromIso(s.start_datetime, date);
+    const eMin = _extMinFromIso(s.end_datetime, date);
+    minH = Math.min(minH, Math.floor(sMin / 60));
+    maxH = Math.max(maxH, Math.ceil(eMin / 60));
   });
-  minH = Math.max(0, Math.floor(minH)); maxH = Math.min(24, Math.ceil(maxH));
+  minH = Math.max(0, Math.floor(minH));
+  maxH = Math.min(48, Math.ceil(maxH));  // 最大翌日の24時まで
   if (maxH <= minH) maxH = minH + 1;
   const rangeMin = minH * 60, rangeLen = (maxH - minH) * 60;
-  const hours = []; for (let h = minH; h <= maxH; h++) hours.push(`<div class="tl-hour">${h}</div>`);
+  const hours = [];
+  for (let h = minH; h <= maxH; h++) {
+    const lbl = _extHourLabel(h);
+    const isNextDay = h >= 24;
+    hours.push(`<div class="tl-hour${isNextDay ? ' tl-hour-next' : ''}">${isNextDay ? '(翌)' : ''}${lbl}</div>`);
+  }
   const rows = order.map((sid) => {
     const st = staffMap[sid];
     const bars = st.shifts.map((s) => {
-      const sMin = +s.start_datetime.slice(11, 13) * 60 + +s.start_datetime.slice(14, 16);
-      let eMin = +s.end_datetime.slice(11, 13) * 60 + +s.end_datetime.slice(14, 16);
+      // date を anchor にして拡張分計算。前日から跨ぐシフトは負の left になるので date 起点のバーを描画
+      const sMin = _extMinFromIso(s.start_datetime, date);
+      let eMin = _extMinFromIso(s.end_datetime, date);
       if (eMin <= sMin) eMin = sMin + 60;
-      const left = ((sMin - rangeMin) / rangeLen) * 100, width = Math.max(3, ((eMin - sMin) / rangeLen) * 100);
+      const left = ((sMin - rangeMin) / rangeLen) * 100;
+      const width = Math.max(3, ((eMin - sMin) / rangeLen) * 100);
       const lbl = width > 12 ? `${hm(s.start_datetime)}-${hm(s.end_datetime)}` : '';
       return `<div class="tl-bar ${slotClass(s.start_datetime)}" data-id="${s.id}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
     }).join('');
@@ -774,7 +852,9 @@ function openDayTimeline(date, allShifts, editable, onChange) {
     const gapBars = merged.map((g) => {
       const left = ((g.start * 60 - rangeMin) / rangeLen) * 100;
       const width = Math.max(4, ((g.end - g.start) * 60 / rangeLen) * 100);
-      return `<div class="tl-gap-bar" data-start="${g.start}" data-end="${g.end}" data-gap="${g.gap}" title="${editable ? 'クリックして配置' : ''}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">↓${g.gap}名不足</div>`;
+      const sLbl = g.start >= 24 ? `(翌)${_extHourLabel(g.start)}` : `${_extHourLabel(g.start)}時`;
+      const eLbl = g.end >= 24 ? `(翌)${_extHourLabel(g.end)}` : `${_extHourLabel(g.end)}時`;
+      return `<div class="tl-gap-bar" data-start="${g.start}" data-end="${g.end}" data-gap="${g.gap}" title="${editable ? 'クリックして配置' : ''} ${sLbl}〜${eLbl}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">↓${g.gap}名不足</div>`;
     }).join('');
     gapRow = `<div class="tl-row tl-gap-row"><div class="tl-name tl-gap-name">不足</div><div class="tl-track">${gapBars}</div></div>`;
   }
@@ -799,20 +879,24 @@ function openDayTimeline(date, allShifts, editable, onChange) {
         if (e.target.closest('.tl-bar') || e.target.closest('.tl-gap-bar')) return; // バー/不足バーのクリックは別処理
         const staffId = track.dataset.staffId;
         const staffName = track.closest('.tl-row').dataset.staffName;
-        // クリックX座標から時間を計算
+        // クリックX座標から時間を計算（拡張時間 0-47）
         const rect = track.getBoundingClientRect();
         const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
         const clickMin = rangeMin + ratio * rangeLen;
         const startHour = Math.max(minH, Math.min(maxH - 1, Math.floor(clickMin / 60)));
         const endHour = Math.min(maxH, startHour + 4); // デフォルト4h
-        const fmtH = (h) => `${String(h).padStart(2, '0')}:00`;
+        // 拡張時間 → { date, time }。翌日またぎは date に1日加算
+        const sInfo = _extHourToIsoTime(startHour, 0, date);
+        const eInfo = _extHourToIsoTime(endHour, 0, date);
+        const isOvernight = sInfo.date !== date || eInfo.date !== date;
+        const datePrefix = isOvernight ? `${sInfo.date} ` : '';
         buzz(10);
-        const addW = openModal(`<i class="bi bi-plus-lg"></i> シフト追加 — ${esc(staffName)} ${date}`,
+        const addW = openModal(`<i class="bi bi-plus-lg"></i> シフト追加 — ${esc(staffName)} ${sInfo.date}`,
           `<div class="row">
-             <div class="col-6"><label class="form-label" for="qStart">開始</label><input type="time" id="qStart" class="form-control" value="${fmtH(startHour)}"></div>
-             <div class="col-6"><label class="form-label" for="qEnd">終了</label><input type="time" id="qEnd" class="form-control" value="${fmtH(endHour)}"></div>
+             <div class="col-6"><label class="form-label" for="qStart">開始</label><input type="time" id="qStart" class="form-control" value="${sInfo.time}"></div>
+             <div class="col-6"><label class="form-label" for="qEnd">終了</label><input type="time" id="qEnd" class="form-control" value="${eInfo.time}"></div>
            </div>
-           <div class="small text-secondary mt-2">時間を調整して「保存」を押してください。上限人数を超える場合は自動調整します。</div>`,
+           <div class="small text-secondary mt-2">${isOvernight ? `※翌日またぎのシフトです（開始: ${sInfo.date} / 終了: ${eInfo.date}）。` : ''}時間を調整して「保存」を押してください。上限人数を超える場合は自動調整します。</div>`,
           async (w2, close) => {
             const st = w2.querySelector('#qStart').value;
             const en = w2.querySelector('#qEnd').value;
@@ -820,8 +904,8 @@ function openDayTimeline(date, allShifts, editable, onChange) {
             try {
               const r = await api('/shop/shifts', { method: 'POST', body: JSON.stringify({
                 staff_id: +staffId,
-                start_datetime: `${date}T${st}:00`,
-                end_datetime: `${date}T${en}:00`,
+                start_datetime: `${sInfo.date}T${st}:00`,
+                end_datetime: `${eInfo.date}T${en}:00`,
                 auto_adjust: true,
               })});
               close();
@@ -846,10 +930,13 @@ function openDayTimeline(date, allShifts, editable, onChange) {
     w.querySelectorAll('.tl-gap-bar').forEach((bar) => {
       bar?.addEventListener('click', async (e) => {
         e.stopPropagation();
-        const startH = +bar.dataset.start;
+        const startH = +bar.dataset.start;  // 拡張時間 (0-47)
         const endH = +bar.dataset.end;
         const gap = +bar.dataset.gap;
-        const fmtH = (h) => `${String(h).padStart(2, '0')}:00`;
+        // 拡張時間 → 実際の {date, time}
+        const sInfo = _extHourToIsoTime(startH, 0, date);
+        const eInfo = _extHourToIsoTime(endH, 0, date);
+        const isOvernight = sInfo.date !== date || eInfo.date !== date;
         buzz(10);
         // スタッフリストを取得
         let opts = '';
@@ -858,22 +945,25 @@ function openDayTimeline(date, allShifts, editable, onChange) {
           const active = (sd.staffs || []).filter((s) => !s.is_resigned);
           opts = active.map((s) => `<option value="${s.id}">${esc(s.name)}（${roleLabel(s.role)}）</option>`).join('');
         } catch (err) { toast('スタッフ一覧の取得に失敗', 'error'); return; }
-        const addW = openModal(`<i class="bi bi-person-plus"></i> 不足枠に配置 — ${date} ${fmtH(startH)}〜${fmtH(endH)}`,
+        const addW = openModal(`<i class="bi bi-person-plus"></i> 不足枠に配置 — ${sInfo.date} ${sInfo.time}〜${eInfo.date === sInfo.date ? '' : eInfo.date + ' '}${eInfo.time}`,
           `<div class="alert alert-warning py-2 mb-3"><i class="bi bi-exclamation-triangle"></i> この時間帯は<strong>${gap}名</strong>不足中。1名ずつ追加できます。</div>
            <label class="form-label" for="gapStaff">スタッフを選択</label>
            <select id="gapStaff" class="form-select mb-2">${opts}</select>
            <div class="row">
-             <div class="col-6"><label class="form-label" for="gapStart">開始</label><input type="time" id="gapStart" class="form-control" value="${fmtH(startH)}"></div>
-             <div class="col-6"><label class="form-label" for="gapEnd">終了</label><input type="time" id="gapEnd" class="form-control" value="${fmtH(endH)}"></div>
+             <div class="col-6"><label class="form-label" for="gapStart">開始 (${sInfo.date})</label><input type="time" id="gapStart" class="form-control" value="${sInfo.time}"></div>
+             <div class="col-6"><label class="form-label" for="gapEnd">終了 (${eInfo.date})</label><input type="time" id="gapEnd" class="form-control" value="${eInfo.time}"></div>
            </div>
-           <div class="small text-secondary mt-2">残り${gap - 1}名の不足がある場合は、追加後に再度クリックしてください。</div>`,
+           <div class="small text-secondary mt-2">${isOvernight ? '※翌日またぎのシフトです。' : ''}残り${gap - 1}名の不足がある場合は、追加後に再度クリックしてください。</div>`,
           async (w2, close) => {
             const staffId = +w2.querySelector('#gapStaff').value;
             const st = w2.querySelector('#gapStart').value;
             const en = w2.querySelector('#gapEnd').value;
             try {
               const r = await api('/shop/shifts', { method: 'POST', body: JSON.stringify({
-                staff_id: staffId, start_datetime: `${date}T${st}:00`, end_datetime: `${date}T${en}:00`, auto_adjust: true,
+                staff_id: staffId,
+                start_datetime: `${sInfo.date}T${st}:00`,
+                end_datetime: `${eInfo.date}T${en}:00`,
+                auto_adjust: true,
               })});
               close();
               if (r.adjustments && r.adjustments.length) {
@@ -882,7 +972,11 @@ function openDayTimeline(date, allShifts, editable, onChange) {
                 toast('配置しました', 'success');
               }
               w.remove();
-              const sd2 = await api(`/shop/shifts?start=${date}&end=${date}`);
+              // 前日・当日・翌日のいずれかを含む範囲で再取得（overnight表示のため）
+              const prevDay = new Date(date + 'T00:00:00'); prevDay.setDate(prevDay.getDate() - 1);
+              const nextDay = new Date(date + 'T00:00:00'); nextDay.setDate(nextDay.getDate() + 1);
+              const fmtD = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+              const sd2 = await api(`/shop/shifts?start=${fmtD(prevDay)}&end=${fmtD(nextDay)}`);
               openDayTimeline(date, sd2.shifts, editable, onChange);
             } catch (err) { toast(err.message, 'error'); }
           });

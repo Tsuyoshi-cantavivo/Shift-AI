@@ -630,6 +630,7 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 .tl-name { width: 52px; flex: 0 0 52px; font-size: .68rem; font-weight: 700; color: var(--t-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tl-axis { flex: 1 1 auto; display: flex; min-width: 0; height: 10px; }
 .tl-hour { flex: 1 1 0; font-size: .5rem; color: var(--t-dim); text-align: left; border-left: 1px solid var(--line); padding-left: 1px; }
+.tl-hour-next { color: var(--indigo); font-weight: 700; }
 .tl-row { display: flex; align-items: center; margin-bottom: 6px; }
 .tl-track { flex: 1 1 auto; position: relative; height: 28px; background: var(--card-2); border-radius: 8px; min-width: 0; cursor: pointer; }
 .tl-track:hover { background: var(--card-3); }
