@@ -11,6 +11,7 @@
   - 例外伝播
 """
 import json
+import os
 import threading
 import pytest
 
@@ -184,42 +185,76 @@ class TestConcurrency:
         NOTE: 共有インメモリ SQLite (DB_PATH=:memory:, check_same_thread=False) は
         Cレベルでスレッドセーフではないため、ファイルベースの一時DBで検証する。
         本番環境でも SQLite の WAL モードまたは PostgreSQL 等への移行を推奨。
-        """
-        # テスト用にファイルベース DB に切り替え
-        import db as dbmod
-        import os
-        original_path = dbmod.DB_PATH
-        test_db = str(tmp_path / "concurrent.db")
-        dbmod.DB_PATH = test_db
-        try:
-            from auth import hash_password
-            dbmod.init_schema(os.path.join(os.path.dirname(os.path.dirname(__file__)), "schema.sql"))
-            results = []
-            errors = []
-            lock = threading.Lock()
 
-            def make(idx):
+        ★ dbmod.DB_PATH を変更すると共有接続(他テストで使用)が破壊されるため、
+        dbmod には触れず sqlite3 を直接操作して独立した接続で検証する。
+        """
+        import sqlite3
+        import secrets
+        from datetime import timedelta
+        from auth import hash_password
+        from utils import jst_now
+
+        test_db = str(tmp_path / "concurrent.db")
+
+        # スキーマをファイルDBに初期化（独立接続）
+        schema_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "schema.sql"
+        )
+        setup_conn = sqlite3.connect(test_db, check_same_thread=False)
+        setup_conn.row_factory = sqlite3.Row
+        setup_conn.execute("PRAGMA foreign_keys = ON")
+        with open(schema_path, "r", encoding="utf-8") as f:
+            setup_conn.executescript(f.read())
+        setup_conn.commit()
+        setup_conn.close()
+
+        results = []
+        errors = []
+        lock = threading.Lock()
+
+        def make(idx):
+            try:
+                # 各スレッドが独立した接続で書き込み（タイムアウト付きで競合回避）
+                conn = sqlite3.connect(test_db, timeout=30, check_same_thread=False)
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA foreign_keys = ON")
                 try:
-                    # 各スレッドが独立したレコードを作成
-                    meta = dbmod.execute(
-                        "INSERT INTO shops (shop_code, shop_name, password_hash, settings) VALUES (?,?,?,?)",
+                    cur = conn.execute(
+                        "INSERT INTO shops (shop_code, shop_name, password_hash, settings) "
+                        "VALUES (?,?,?,?)",
                         (f"PAR-{idx}", f"店舗{idx}", hash_password(f"pw{idx}"), "{}"),
                     )
-                    shop_id = meta["last_row_id"]
-                    tok = make_session("shop", shop_id, shop_id)
+                    shop_id = cur.lastrowid
+                    token = "tok_" + secrets.token_hex(12)
+                    expires = (jst_now() + timedelta(days=7)).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    conn.execute(
+                        "INSERT INTO sessions (token, role, user_id, shop_id, expires_at) "
+                        "VALUES (?,?,?,?,?)",
+                        (token, "shop", shop_id, shop_id, expires),
+                    )
+                    conn.commit()
                     with lock:
-                        results.append(tok)
-                except Exception as e:
-                    with lock:
-                        errors.append(e)
-            threads = [threading.Thread(target=make, args=(i,)) for i in range(10)]
-            for t in threads: t.start()
-            for t in threads: t.join()
-            # 成功したトークンはすべてユニーク
-            assert len(set(results)) == len(results)
-            # ★ 本番DBでは並行書き込みの競合が起きない設計（PostgreSQL/WAL等）が必要
-        finally:
-            dbmod.DB_PATH = original_path
+                        results.append(token)
+                finally:
+                    conn.close()
+            except Exception as e:
+                with lock:
+                    errors.append(e)
+
+        threads = [threading.Thread(target=make, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # 並行書き込みのエラー無し
+        assert not errors, f"並行書き込みでエラー発生: {errors}"
+        # 成功したトークンはすべてユニーク
+        assert len(set(results)) == len(results)
+        assert len(results) == 10
 
 
 class TestErrorPropagation:

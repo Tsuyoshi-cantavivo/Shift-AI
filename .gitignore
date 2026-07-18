@@ -19,6 +19,9 @@ htmlcov/
 # Playwright
 .playwright-mcp/
 
+# Cloudflare Wrangler ローカル状態
+.wrangler/
+
 # OS
 .DS_Store
 Thumbs.db
