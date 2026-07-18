@@ -913,6 +913,25 @@ class TestOvernightPattern:
         assert len(res["confirmed"]) >= 1
         assert res["shortage"] == []
 
+    def test_overnight_shortage_correct_for_multi_day_range(self, client):
+        """【回帰】overnight パターンで多日数の不足集計が日付単位で正しく出る。
+
+        旧バグ: compute_shortage が日付の開始境界を誤って認識し、
+        前月末日（例: 7/31）の不足が8月ビューに混じることがあった。
+        本テストでは8/1〜8/3の範囲で7/31が絶対に現れないことを保証する。
+        """
+        shop_id = insert_shop(code="OVN_MULTI", settings={"min_daily_hours": 4})
+        insert_pattern(shop_id, "深夜", "06:00", "05:00", 2)  # 6:00-翌5:00
+        # スタッフ0名（全日不足）
+        token = make_session("shop", shop_id, shop_id)
+        r = client.get("/api/shop/shortage?start=2026-08-01&end=2026-08-03",
+                       headers=auth(token))
+        assert r.status_code == 200
+        dates = [s["date"] for s in r.get_json()["shortage"]]
+        assert "2026-07-31" not in dates, f"前月末が混入: {dates}"
+        assert "2026-08-01" in dates
+        assert "2026-08-03" in dates
+
 
 # ============================================================
 # 2b. シフトAPI統合テスト（dry_run / 手動作成の上限チェック）
