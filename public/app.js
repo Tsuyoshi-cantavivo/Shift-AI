@@ -465,7 +465,9 @@ function _extHourToIsoTime(h, m, anchorDate) {
    タイムライン表示で「日によって時間軸が変わる」のを防ぎ、営業時間全体を固定表示する。
    【日またぎ対応】end_time <= start_time の overnight パターンは end に +24 する。 */
 async function ensureBusinessHours() {
-  if (appState.businessHours && appState.patterns) return appState.businessHours;
+  // 【キャッシュ戦略】毎回 /shop/patterns を取り直して計算する。
+  // パターン編集後にキャッシュが古くなり「9-19」等の古い表示に固定される
+  // デグレを防ぐため。API は軽量なので毎回呼び出しでも実用上問題ない。
   const fallback = { start: 9, end: 22 };
   if (currentRole !== 'shop' && currentRole !== 'staff') return fallback;
   try {
