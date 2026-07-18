@@ -625,15 +625,22 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 .staff-cell .staff-sub { font-size: .72rem; color: var(--t-muted); margin-top: 1px; }
 
 /* ---------- 20. Timeline (Gantt) ---------- */
-.tl-wrap { padding: 2px 0; }
-.tl-axis-row { display: flex; align-items: flex-end; margin-bottom: 4px; }
+.tl-wrap { padding: 2px 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.tl-axis-row { display: flex; align-items: flex-end; margin-bottom: 4px; min-width: 480px; }
 .tl-name { width: 52px; flex: 0 0 52px; font-size: .68rem; font-weight: 700; color: var(--t-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tl-axis { flex: 1 1 auto; display: flex; min-width: 0; height: 10px; }
 .tl-hour { flex: 1 1 0; font-size: .5rem; color: var(--t-dim); text-align: left; border-left: 1px solid var(--line); padding-left: 1px; }
 .tl-hour-next { color: var(--indigo); font-weight: 700; }
-.tl-row { display: flex; align-items: center; margin-bottom: 6px; }
+.tl-row { display: flex; align-items: center; margin-bottom: 6px; min-width: 480px; }
 .tl-track { flex: 1 1 auto; position: relative; height: 28px; background: var(--card-2); border-radius: 8px; min-width: 0; cursor: pointer; }
 .tl-track:hover { background: var(--card-3); }
+
+/* スマホ向け: タイムライン圧縮・横スクロールで対応 */
+@media (max-width: 575px) {
+  .tl-axis-row, .tl-row { min-width: 420px; }
+  .tl-name { width: 44px; flex: 0 0 44px; font-size: .6rem; }
+  .tl-hour { font-size: .42rem; }
+}
 .tl-bar {
   position: absolute; top: 3px; height: 22px; border-radius: 6px; color: #fff;
   font-size: .56rem; font-weight: 700; display: flex; align-items: center; padding: 0 4px;

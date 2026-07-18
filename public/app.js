@@ -915,7 +915,9 @@ function openDayTimeline(date, allShifts, editable, onChange) {
      ${emptyNotice}
      <div class="tl-legend"><span><i style="background:#F59E0B"></i>朝</span><span><i style="background:#10B981"></i>昼</span><span><i style="background:#6366F1"></i>夜</span><span><i style="background:#EF4444"></i>不足</span>${editable ? '<span><i class="bi bi-hand-index" style="font-style:normal;font-size:.7rem"></i>空きをクリックで追加</span>' : ''}<span>バーをタップで${editable ? '編集' : '詳細'}</span></div>
      ${manualAddBtn}`;
-  const w = openModal(`<i class="bi bi-diagram-3"></i> ${esc(date)}（${wdName(date)}）のシフト表`, body, null);
+  // PC版は広め(800px)、スマホは画面幅で横スクロール対応
+  const modalWidth = window.matchMedia('(min-width: 768px)').matches ? 800 : undefined;
+  const w = openModal(`<i class="bi bi-diagram-3"></i> ${esc(date)}（${wdName(date)}）のシフト表`, body, null, { width: modalWidth });
   w.querySelectorAll('.tl-bar').forEach((bar) => bar?.addEventListener('click', (ev) => {
     ev.stopPropagation();
     buzz(10);
