@@ -352,7 +352,7 @@ function renderNav() {
   const bn = document.getElementById('bottomNav');
   bn.innerHTML = mobileDefs.map((it) => `
     <button class="bn-item" data-screen="${it.key}">
-      <i class="bi ${it.icon}"></i><span>${it.label.replace('シフト作成', 'AI作成').replace('ダッシュボード', 'ホーム')}</span>
+      <i class="bi ${it.icon}"></i><span>${it.label.replace('AIシフト作成', 'AI作成').replace('ダッシュボード', 'ホーム')}</span>
     </button>`).join('');
   bn.querySelectorAll('.bn-item').forEach((b) => b?.addEventListener('click', () => navigateTo(b.dataset.screen)));
 }
