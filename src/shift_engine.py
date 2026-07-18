@@ -16,8 +16,8 @@
 from datetime import datetime
 from db import query_all
 from utils import (
-    weekday_sun0, combine_dt, minutes_between, compute_break_minutes,
-    add_days, max_consecutive_run, _hhmm_to_min,
+    weekday_sun0, combine_dt, combine_dt_overnight, minutes_between, compute_break_minutes,
+    add_days, max_consecutive_run, _hhmm_to_min, parse_iso,
 )
 
 # スロット粒度(分)。1時間単位より細かくしておき、検証Aは時間単位で保証する。
@@ -32,12 +32,43 @@ def _min_to_hhmm(m):
     return f"{m // 60:02d}:{m % 60:02d}"
 
 
-def _day_requirements(patterns, gran=GRAN, weekday=None, weekday_overrides=None):
+def _min_to_iso(day, m):
+    """拡張分(0-2879) を day 基準の ISO datetime に変換。
+
+    m >= 1440 は翌日扱い（深夜営業のスロット表現用）。
+    """
+    if m >= 1440:
+        return f"{add_days(day, 1)}T{_min_to_hhmm(m - 1440)}:00"
+    return f"{day}T{_min_to_hhmm(m)}:00"
+
+
+def _pat_end_min(pat_or_start, pat_end=None):
+    """パターンの終了分を返す。end <= start なら翌日 (+1440) 扱い。
+
+    引数は (pat_dict) または (start_time, end_time) のいずれか。
+    """
+    if pat_end is None:
+        ps = _hhmm_to_min(pat_or_start["start_time"])
+        pe = _hhmm_to_min(pat_or_start["end_time"])
+    else:
+        ps = _hhmm_to_min(pat_or_start)
+        pe = _hhmm_to_min(pat_end)
+    return pe + 1440 if pe <= ps else pe
+
+
+def _day_requirements(patterns, gran=GRAN, weekday=None, weekday_overrides=None, prev_weekday=None):
     """パターン群から {slot_min: required_count} の要件マップを構築。
 
     同一スロットに複数パターンが重なる場合は最大値（最も厳しい要件）を採用。
     weekday と weekday_overrides({(pattern_id, weekday): required_staff}) を渡すと、
     該当曜日の曜日別必要人数で pattern の required_staff を上書きする。
+
+    【日またぎ(overnight)対応・拡張スロットモデル】
+      end_time <= start_time のパターンは翌日またぎとみなし、pe に +1440 して
+      当日のスロット空間を [0, 2880) に拡張する。これにより:
+        - 当日 07:00〜翌日 05:00 = スロット 420 〜 1740
+        - overnight シフトも同様に拡張スロットで表現され、カバレッジが直接比較できる
+      ※ prev_weekday は後方互換のため残しているが使用しない（拡張スロットで統一）。
     """
     req = {}
     for pat in patterns:
@@ -50,6 +81,8 @@ def _day_requirements(patterns, gran=GRAN, weekday=None, weekday_overrides=None)
                 needed = ov
         if needed <= 0:
             continue
+        if pe <= ps:
+            pe += 1440  # overnight: 当日ベースで +1440 した拡張スロットに
         s = (ps // gran) * gran
         while s < pe:
             if needed > req.get(s, 0):
@@ -67,9 +100,22 @@ def load_weekday_overrides(shop_id):
 
 
 def _shift_slots(start_iso, end_iso, gran=GRAN):
-    """シフト [start, end) が覆盖するスロット(分)のリスト。"""
+    """シフト [start, end) が覆盖するスロット(分)のリスト。
+
+    【日またぎ対応】ISO datetime を基準に経過分で計算するため、start と end が
+    異なる日でも正しいスロットが得られる。例えば start="D T22:00" / end="D+1 T05:00"
+    は [1320, 1380, ..., 1740) を返す（翌日分は +1440 の拡張スロット）。
+    """
+    try:
+        s_dt = parse_iso(start_iso)
+        e_dt = parse_iso(end_iso)
+    except Exception:
+        return []
+    if e_dt <= s_dt:
+        return []
     s_min = _hhmm_to_min(start_iso[11:16])
-    e_min = _hhmm_to_min(end_iso[11:16])
+    total_min = int((e_dt - s_dt).total_seconds() // 60)
+    e_min = s_min + total_min
     slots = []
     s = (s_min // gran) * gran
     while s < e_min:
@@ -83,9 +129,10 @@ def _shortage_segments_in_pattern(req_map, coverage, pat, gran=GRAN):
 
     戻り値: [(start_min, end_min, max_deficit), ...]
     end_min は排他（シフト終了時刻として使用可能）。
+    【日またぎ対応】overnight パターンは start_time から翌日 end_time(+1440) まで走査。
     """
     ps = _hhmm_to_min(pat["start_time"])
-    pe = _hhmm_to_min(pat["end_time"])
+    pe = _pat_end_min(pat)
     segs = []
     cur_start = None
     cur_end = None
@@ -162,9 +209,12 @@ def _day_shortage_segments(req_map, coverage, gran=GRAN):
 
 
 def _pattern_min_coverage(req_map, coverage, pat, gran=GRAN):
-    """パターン内の最小カバー人数と要件を返す（不足集計用）。"""
+    """パターン内の最小カバー人数と要件を返す（不足集計用）。
+
+    【日またぎ対応】overnight パターンは拡張スロット([ps, pe+1440))を走査。
+    """
     ps = _hhmm_to_min(pat["start_time"])
-    pe = _hhmm_to_min(pat["end_time"])
+    pe = _pat_end_min(pat)
     s = (ps // gran) * gran
     min_cov = None
     has_slot = False
@@ -230,7 +280,8 @@ def auto_generate(shop_id, settings, start_date, end_date):
     def req_map_for(day):
         if day not in req_map_cache:
             wd = weekday_sun0(datetime.strptime(day, "%Y-%m-%d").date())
-            req_map_cache[day] = _day_requirements(patterns_for_weekday(wd), GRAN, wd, weekday_overrides)
+            req_map_cache[day] = _day_requirements(
+                patterns_for_weekday(wd), GRAN, wd, weekday_overrides)
         return req_map_cache[day]
 
     monthly_cap = {s["id"]: (s.get("max_hours_per_month") or 0) for s in staffs}
@@ -269,6 +320,7 @@ def auto_generate(shop_id, settings, start_date, end_date):
         社員はフルタイム柔軟稼動が前提のため、最低時間では縛らない
         （短い穴埋め・夜を含む長時間シフトの両方を許容）。
         ※ 1日複数シフト(中抜け)禁止・上限人数・月間上限は全スタッフ共通で厳守。
+        【日またぎ対応】翌日にまたがる場合、翌日の staff_busy もチェックする。
         """
         work = minutes_between(start_iso, end_iso)
         is_pt = staff_role.get(staff_id) == "part_time"
@@ -277,6 +329,11 @@ def auto_generate(shop_id, settings, start_date, end_date):
         _, sw = state(day)
         if staff_id in sw:
             return False, "already_working"
+        # 翌日またぎの場合、翌日も business として記録されているか確認
+        if end_iso[:10] != day:
+            _, sw_next = state(end_iso[:10])
+            if staff_id in sw_next:
+                return False, "already_working"
         cap_h = monthly_cap.get(staff_id) or 0
         if cap_h and minutes_by_staff[staff_id] + work > cap_h * 60:
             return False, "monthly_cap"
@@ -294,6 +351,10 @@ def auto_generate(shop_id, settings, start_date, end_date):
         _, sw = state(day)
         if staff_id in sw:
             return False, "already_working"
+        if end_iso[:10] != day:
+            _, sw_next = state(end_iso[:10])
+            if staff_id in sw_next:
+                return False, "already_working"
         if not cap_ok(day, start_iso, end_iso):
             return False, "cap"
         return True, None
@@ -309,7 +370,18 @@ def auto_generate(shop_id, settings, start_date, end_date):
         cov, sw = state(day)
         for sl in _shift_slots(start_iso, end_iso, GRAN):
             cov[sl] = cov.get(sl, 0) + 1
-        sw[staff_id] = (_hhmm_to_min(start_iso[11:16]), _hhmm_to_min(end_iso[11:16]))
+        s_min = _hhmm_to_min(start_iso[11:16])
+        end_date = end_iso[:10]
+        # 当日の busy 窓（翌日またぎなら当日は 24:00 まで busy）
+        if end_date == day:
+            busy_end = _hhmm_to_min(end_iso[11:16])
+        else:
+            busy_end = 1440
+        sw[staff_id] = (s_min, busy_end)
+        # 翌日も busy として記録（中抜け・重複防止）
+        if end_date != day:
+            _, sw_next = state(end_date)
+            sw_next[staff_id] = (0, _hhmm_to_min(end_iso[11:16]))
         staff_days[staff_id].add(day)
 
     def fill_shortage_with(staff_id, day, pat, reason):
@@ -317,9 +389,9 @@ def auto_generate(shop_id, settings, start_date, end_date):
 
         まずパターン全体を試し、上限に触れる場合は不足セグメント単位で最小時間を満たすものを配置する。
         配置できれば True。
+        【日またぎ対応】パターンが overnight の場合、終了時刻は翌日になるよう combine_dt_overnight で生成。
         """
-        pat_s_iso = combine_dt(day, pat["start_time"])
-        pat_e_iso = combine_dt(day, pat["end_time"])
+        pat_s_iso, pat_e_iso = combine_dt_overnight(day, pat["start_time"], pat["end_time"])
         ok, _ = can_place(staff_id, day, pat_s_iso, pat_e_iso)
         if ok:
             place(staff_id, day, pat_s_iso, pat_e_iso, reason)
@@ -329,8 +401,9 @@ def auto_generate(shop_id, settings, start_date, end_date):
             # セグメント長の最低時間チェックはアルバイトのみ（社員は柔軟）
             if deficit <= 0 or (staff_role.get(staff_id) == "part_time" and e_min - s_min < min_daily):
                 continue
-            s_iso = combine_dt(day, _min_to_hhmm(s_min))
-            e_iso = combine_dt(day, _min_to_hhmm(e_min))
+            # 拡張スロット(s_min/e_min >= 1440)は翌日の時刻 → _min_to_iso で正しいISO生成
+            s_iso = _min_to_iso(day, s_min)
+            e_iso = _min_to_iso(day, e_min)
             ok2, _ = can_place(staff_id, day, s_iso, e_iso)
             if ok2:
                 place(staff_id, day, s_iso, e_iso, reason)
@@ -471,8 +544,8 @@ def auto_generate(shop_id, settings, start_date, end_date):
             _, sw = state(cur)
             if f["staff_id"] in sw:
                 continue  # 既に配置済（他の処理で）
-            s_iso = combine_dt(cur, f["start_time"])
-            e_iso = combine_dt(cur, f["end_time"])
+            # 【日またぎ対応】固定シフトが overnight の場合、終了時刻は翌日
+            s_iso, e_iso = combine_dt_overnight(cur, f["start_time"], f["end_time"])
             if minutes_between(s_iso, e_iso) <= 0:
                 continue
             # cap 内なら固定時間をそのまま配置（候補として採用）
@@ -515,8 +588,9 @@ def auto_generate(shop_id, settings, start_date, end_date):
                 if win_len <= 0:
                     continue
                 win_end = s_min + win_len
-                s_iso = combine_dt(cur, _min_to_hhmm(s_min))
-                e_iso = combine_dt(cur, _min_to_hhmm(win_end))
+                # 【日またぎ対応】拡張スロット(s_min/win_end >= 1440)は翌日の時刻として ISO を生成
+                s_iso = _min_to_iso(cur, s_min)
+                e_iso = _min_to_iso(cur, win_end)
                 for emp in avail:
                     _, sw2 = state(cur)
                     if emp["id"] in sw2:

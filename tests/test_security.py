@@ -153,6 +153,18 @@ class TestIDOR:
         row = dbmod.query_one("SELECT pattern_name FROM shift_patterns WHERE id=?", (pat_b["id"],))
         assert row["pattern_name"] == "朝B", "他店舗パターンが変更された (=IDOR)"
 
+    def test_shop_a_cannot_delete_shop_b_staff(self, client):
+        """店舗Aが店舗Bのスタッフを削除できない（WHERE shop_id=? 保護・404 マスク）。"""
+        shop_a, shop_b, sa, sb = self._setup_two_shops()
+        tok_a = make_session("shop", shop_a, shop_a)
+        # 店舗Bのスタッフを削除試行 → 404
+        r = client.delete(f"/api/shop/staffs/{sb}", headers=auth(tok_a))
+        assert r.status_code == 404, "他店舗スタッフ削除は404でマスクされるべき"
+        # 店舗Bのスタッフは残っている
+        row = dbmod.query_one("SELECT name FROM staffs WHERE id=?", (sb,))
+        assert row is not None and row["name"] == "店舗Bスタッフ", \
+            "他店舗スタッフが削除された (=IDOR)"
+
     def test_staff_a_cannot_see_shop_b_data(self, client):
         """スタッフAは店舗Bの募集期間を取得できない（自身の店舗のみ）。"""
         shop_a, shop_b, sa, sb = self._setup_two_shops()

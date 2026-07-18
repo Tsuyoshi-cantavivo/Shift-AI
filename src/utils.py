@@ -20,6 +20,21 @@ def combine_dt(date_s, time_s):
     return f"{date_s}T{time_s}:00"
 
 
+def combine_dt_overnight(date_s, start_time_s, end_time_s):
+    """パターン/固定シフト用 combine。end_time が start_time 以前なら翌日扱い。
+
+    例: combine_dt_overnight("2026-08-03", "22:00", "05:00")
+      → ("2026-08-03T22:00:00", "2026-08-04T05:00:00")
+    戻り値: (start_iso, end_iso)
+    """
+    ps = _hhmm_to_min(start_time_s)
+    pe = _hhmm_to_min(end_time_s)
+    if pe <= ps:
+        next_day = add_days(date_s, 1)
+        return f"{date_s}T{start_time_s}:00", f"{next_day}T{end_time_s}:00"
+    return f"{date_s}T{start_time_s}:00", f"{date_s}T{end_time_s}:00"
+
+
 def parse_iso(s):
     """ISO日時をパース。秒なし(YYYY-MM-DDTHH:MM) と秒あり(YYYY-MM-DDTHH:MM:SS) の両方を許容。"""
     if not s:

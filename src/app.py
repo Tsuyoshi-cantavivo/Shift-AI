@@ -804,6 +804,30 @@ def shop_staffs_put(sid):
     return jsonify({"ok": True})
 
 
+@app.delete("/api/shop/staffs/<int:sid>")
+def shop_staffs_del(sid):
+    """スタッフ削除（ハード削除・カスケード）。
+
+    関連データも全て削除し、参照整合性を保つ:
+      - fixed_shifts / shifts / change_requests / wish_history / notifications
+      - 当該スタッフのセッション（ログイン無効化）
+    shop_id で絞り込むことで他店舗スタッフの IDOR も防ぐ。
+    存在しない / 他店舗の場合は 404 を返す。
+    """
+    shop, shop_id, _ = _shop_ctx()
+    row = query_one("SELECT id FROM staffs WHERE id=? AND shop_id=?", (sid, shop_id))
+    if not row:
+        abort(404, description="スタッフが見つかりません")
+    execute("DELETE FROM fixed_shifts WHERE staff_id=?", (sid,))
+    execute("DELETE FROM shifts WHERE staff_id=?", (sid,))
+    execute("DELETE FROM change_requests WHERE staff_id=?", (sid,))
+    execute("DELETE FROM wish_history WHERE staff_id=?", (sid,))
+    execute("DELETE FROM notifications WHERE staff_id=?", (sid,))
+    execute("DELETE FROM sessions WHERE role='staff' AND user_id=?", (sid,))
+    execute("DELETE FROM staffs WHERE id=? AND shop_id=?", (sid, shop_id))
+    return jsonify({"ok": True})
+
+
 # --- シフトパターン ---
 @app.get("/api/shop/patterns")
 def shop_patterns():

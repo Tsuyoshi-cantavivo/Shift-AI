@@ -19,7 +19,7 @@ from utils import compute_break_minutes, minutes_between
 
 from helpers import (
     insert_admin, insert_shop, insert_staff, insert_pattern, insert_fixed,
-    insert_request, make_session, auth, count_staff_in_hour,
+    insert_request, insert_wish, insert_wish_overnight, make_session, auth, count_staff_in_hour,
 )
 
 # 2026-08-03 = 月曜。08-03..08-07 = 月〜金。
@@ -146,6 +146,81 @@ class TestAuthAndCrud:
         insert_admin("admin", "admin123")
         r = client.post("/api/login", json={"id": "admin", "password": "wrong"})
         assert r.status_code == 400
+
+    # ---- スタッフ削除 (DELETE /api/shop/staffs/<sid>) ----
+    def test_shop_deletes_own_staff(self, client):
+        """店舗が自店舗スタッフを削除できる（ハード削除）。"""
+        shop_id = insert_shop()
+        token = make_session("shop", shop_id, shop_id)
+        sid = insert_staff(shop_id, "D1", "削除対象")
+        r = client.delete(f"/api/shop/staffs/{sid}", headers=auth(token))
+        assert r.status_code == 200, r.get_json()
+        assert r.get_json()["ok"] is True
+        assert dbmod.query_one("SELECT id FROM staffs WHERE id=?", (sid,)) is None
+
+    def test_delete_staff_cascades_related_records(self, client):
+        """スタッフ削除で固定/シフト/変更申請/希望履歴/通知が全て消える。"""
+        shop_id = insert_shop()
+        token = make_session("shop", shop_id, shop_id)
+        sid = insert_staff(shop_id, "D2", "削除対象2")
+        insert_fixed(sid, 1, "09:00", "13:00")
+        shift_id = insert_request(shop_id, sid, MON, "09:00", "13:00")
+        dbmod.execute(
+            "INSERT INTO change_requests (shop_id, staff_id, shift_id, request_type, status) "
+            "VALUES (?,?,?,?, 'pending')",
+            (shop_id, sid, shift_id, "change"))
+        dbmod.execute(
+            "INSERT INTO wish_history (shop_id, staff_id, start_datetime, end_datetime) "
+            "VALUES (?,?,?,?)",
+            (shop_id, sid, f"{MON}T09:00:00", f"{MON}T13:00:00"))
+        dbmod.execute(
+            "INSERT INTO notifications (shop_id, staff_id, type, title, body) VALUES (?,?,?,?,?)",
+            (shop_id, sid, "info", "テスト", "本文"))
+        r = client.delete(f"/api/shop/staffs/{sid}", headers=auth(token))
+        assert r.status_code == 200
+        # staffs 自体
+        assert dbmod.query_one("SELECT id FROM staffs WHERE id=?", (sid,)) is None
+        # 関連テーブルは全て staff_id で孤立行なし
+        for table in ["fixed_shifts", "shifts", "change_requests", "wish_history", "notifications"]:
+            row = dbmod.query_one(f"SELECT COUNT(*) AS c FROM {table} WHERE staff_id=?", (sid,))
+            assert row["c"] == 0, f"{table} に staff_id={sid} の孤立行が残っている"
+
+    def test_delete_staff_invalidates_session(self, client):
+        """スタッフ削除で当該スタッフのセッションが無効化される（ログイン状態保持を防ぐ）。"""
+        shop_id = insert_shop()
+        shop_token = make_session("shop", shop_id, shop_id)
+        sid = insert_staff(shop_id, "D3", "削除対象3")
+        staff_token = make_session("staff", sid, shop_id)
+        # 削除前はスタッフトークンが有効
+        assert client.get("/api/staff/dashboard", headers=auth(staff_token)).status_code == 200
+        client.delete(f"/api/shop/staffs/{sid}", headers=auth(shop_token))
+        # 削除後は無効（401）
+        assert client.get("/api/staff/dashboard", headers=auth(staff_token)).status_code == 401
+
+    def test_delete_staff_not_found_returns_404(self, client):
+        """存在しない sid は 404。"""
+        shop_id = insert_shop()
+        token = make_session("shop", shop_id, shop_id)
+        r = client.delete("/api/shop/staffs/999999", headers=auth(token))
+        assert r.status_code == 404
+
+    def test_non_shop_cannot_delete_staff(self, client):
+        """店舗ロール以外は削除不可 (403)。"""
+        shop_id = insert_shop()
+        sid = insert_staff(shop_id, "D4", "対象")
+        admin_id = insert_admin()
+        admin_token = make_session("admin", admin_id)
+        r = client.delete(f"/api/shop/staffs/{sid}", headers=auth(admin_token))
+        assert r.status_code == 403
+        # データは残っている
+        assert dbmod.query_one("SELECT id FROM staffs WHERE id=?", (sid,)) is not None
+
+    def test_unauth_cannot_delete_staff(self, client):
+        """認証なしは 401。"""
+        shop_id = insert_shop()
+        sid = insert_staff(shop_id, "D5", "対象")
+        r = client.delete(f"/api/shop/staffs/{sid}")
+        assert r.status_code == 401
 
 
 # ============================================================
@@ -584,6 +659,97 @@ class TestWeekdayOverride:
             "end_datetime": f"{MON}T18:00:00"}, headers=h)
         assert r.status_code == 400
         assert r.get_json().get("over_cap") is True
+
+
+# ============================================================
+# 2a. 深夜営業（日またぎ）パターンの自動生成
+#   営業 7:00〜翌 5:00 のような end_time < start_time のパターンを扱う。
+#   旧実装では _day_requirements の while s < pe が即終了し、
+#   req_map が空になって「シフトが作れない」状態だった。
+# ============================================================
+class TestOvernightPattern:
+    def _setup_shop(self, start="07:00", end="05:00", required=2):
+        shop_id = insert_shop(settings={"min_daily_hours": 4})
+        insert_pattern(shop_id, "終日", start, end, required)
+        # 社員2名（不足補填用）+ バイト4名
+        emp1 = insert_staff(shop_id, "E1", "社員1", "employee", 2000, 160, 200)
+        emp2 = insert_staff(shop_id, "E2", "社員2", "employee", 2000, 160, 200)
+        pt1 = insert_staff(shop_id, "P1", "バイト1", "part_time", 1100, 0, 160)
+        pt2 = insert_staff(shop_id, "P2", "バイト2", "part_time", 1100, 0, 160)
+        return shop_id, emp1, emp2, pt1, pt2
+
+    def test_overnight_pattern_generates_shifts(self):
+        """7:00〜翌5:00 営業パターンでシフトが生成される（空結果にならない）。"""
+        shop_id, *_ = self._setup_shop()
+        res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 4}, MON, MON)
+        assert len(res["confirmed"]) > 0, "overnight パターンでシフトが生成されない（旧バグ）"
+
+    def test_overnight_pattern_no_shortage_with_enough_staff(self):
+        """必要人数分の社員がいれば overnight パターンでも shortage なし。"""
+        shop_id, emp1, emp2, *_ = self._setup_shop(required=2)
+        res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 4}, MON, MON)
+        assert res["shortage"] == [], f"社員2名で不足解消できるはず: {res['shortage']}"
+
+    def test_overnight_pattern_respects_cap_at_3am_next_day(self):
+        """翌日 03:00 (拡張スロット=1620) で必要人数を満たしている。"""
+        shop_id, *_ = self._setup_shop(required=2)
+        res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 4}, MON, MON)
+        # 翌日早朝（03:00）の稼働人数を数える
+        # confirmed の start/end は ISO datetime。翌日T03:00 を含むシフトを数える。
+        from utils import parse_iso
+        target = parse_iso(f"{TUE}T03:30:00")  # 火曜 03:30
+        cnt = 0
+        for s in res["confirmed"]:
+            ss = parse_iso(s["start"]); ee = parse_iso(s["end"])
+            if ss <= target < ee:
+                cnt += 1
+        assert cnt == 2, f"火曜03:30の人数={cnt}（要求2）"
+
+    def test_overnight_pattern_cap_not_exceeded(self):
+        """overnight パターンでも上限人数を厳守する（検証A相当）。"""
+        shop_id, *_ = self._setup_shop(required=2)
+        res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 4}, MON, MON)
+        from utils import parse_iso
+        # 当日 07:00〜翌日 05:00 まで 30分刻みで cap チェック
+        t = parse_iso(f"{MON}T07:00:00")
+        end = parse_iso(f"{TUE}T05:00:00")
+        while t < end:
+            cnt = sum(1 for s in res["confirmed"]
+                      if parse_iso(s["start"]) <= t < parse_iso(s["end"]))
+            assert cnt <= 2, f"{t}: {cnt}人 (上限2超過)"
+            from datetime import timedelta
+            t = t + timedelta(minutes=30)
+
+    def test_overnight_wish_is_placed_correctly(self):
+        """22:00〜翌05:00 の希望シフトが正しく配置される。"""
+        shop_id, emp1, emp2, pt1, pt2 = self._setup_shop(required=2)
+        # バイト1が月曜 22:00〜翌05:00 の希望を出す（DBには正しいISOで保存）
+        insert_wish_overnight(shop_id, pt1, MON, "22:00", TUE, "05:00")
+        res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 4}, MON, MON)
+        # pt1 のシフトが 22:00-翌05:00 で配置されている
+        pt1_shifts = [s for s in res["confirmed"] if s["staff_id"] == pt1]
+        assert any(s["start"] == f"{MON}T22:00:00" and s["end"] == f"{TUE}T05:00:00"
+                   for s in pt1_shifts), f"pt1の希望が反映されていない: {pt1_shifts}"
+
+    def test_overnight_staff_blocked_from_next_day_morning(self):
+        """22:00〜翌05:00 勤務のスタッフは翌朝に別シフトを入れない（中抜け・重複防止）。"""
+        shop_id, emp1, emp2, pt1, pt2 = self._setup_shop(required=1)
+        # pt1 が月曜 22:00〜翌05:00 希望で、さらに火曜 06:00〜10:00 も希望
+        insert_wish_overnight(shop_id, pt1, MON, "22:00", TUE, "05:00")
+        insert_wish(shop_id, pt1, TUE, "06:00", "10:00")
+        res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 4}, MON, TUE)
+        # pt1 は月曜 overnight を持つ → 火曜のシフトは cap 内でも配置されない
+        tue_shifts = [s for s in res["confirmed"] if s["staff_id"] == pt1 and s["start"][:10] == TUE]
+        assert tue_shifts == [], f"overnight スタッフの翌日シフトが入ってしまった: {tue_shifts}"
+
+    def test_overnight_within_day_pattern_unaffected(self):
+        """通常（日中）パターンは overnight 修正の影響を受けない（回帰）。"""
+        shop_id = insert_shop(settings={"min_daily_hours": 4})
+        insert_pattern(shop_id, "通", "09:00", "18:00", 1)  # 日中
+        emp = insert_staff(shop_id, "E1", "社員1", "employee", 2000, 160, 200)
+        res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 4}, MON, MON)
+        assert len(res["confirmed"]) >= 1
+        assert res["shortage"] == []
 
 
 # ============================================================

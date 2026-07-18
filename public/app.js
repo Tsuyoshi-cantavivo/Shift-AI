@@ -144,6 +144,7 @@ function openModal(title, bodyHtml, onSave, opts = {}) {
   const wrap = document.createElement('div');
   wrap.className = 'modal-overlay';
   const saveLabel = opts.saveLabel || '保存';
+  const btnClass = opts.btnClass || 'btn-primary';
   wrap.innerHTML = `
     <div class="modal-box" style="${opts.width ? 'max-width:' + opts.width + 'px' : ''}">
       <div class="modal-header">
@@ -153,7 +154,7 @@ function openModal(title, bodyHtml, onSave, opts = {}) {
       <div class="modal-body">${bodyHtml}</div>
       <div class="modal-footer">
         <button class="btn btn-light" data-x>キャンセル</button>
-        ${onSave ? `<button class="btn btn-primary" data-save>${saveLabel}</button>` : ''}
+        ${onSave ? `<button class="btn ${btnClass}" data-save>${saveLabel}</button>` : ''}
       </div>
     </div>`;
   document.body.appendChild(wrap);
@@ -1472,11 +1473,13 @@ async function loadStaffList() {
         </div>
         <div class="flex gap-1">
           <button class="btn btn-sm btn-light" data-fix="${s.id}" data-name="${esc(s.name)}" title="固定シフト"><i class="bi bi-calendar-week"></i></button>
-          <button class="btn btn-sm btn-light" data-edit="${s.id}"><i class="bi bi-pencil"></i></button>
+          <button class="btn btn-sm btn-light" data-edit="${s.id}" title="編集"><i class="bi bi-pencil"></i></button>
+          <button class="btn btn-sm btn-outline-danger" data-del="${s.id}" data-name="${esc(s.name)}" title="削除"><i class="bi bi-trash"></i></button>
         </div>
       </div>`).join('');
     list.querySelectorAll('[data-edit]').forEach((b) => b?.addEventListener('click', () => showStaffForm(data.staffs.find((x) => x.id == b.dataset.edit))));
     list.querySelectorAll('[data-fix]').forEach((b) => b?.addEventListener('click', () => showFixedShiftModal(+b.dataset.fix, b.dataset.name)));
+    list.querySelectorAll('[data-del]').forEach((b) => b?.addEventListener('click', () => confirmDeleteStaff(+b.dataset.del, b.dataset.name)));
   } catch (e) { document.getElementById('staffList').innerHTML = `<div class="text-danger">${esc(e.message)}</div>`; }
 }
 function showStaffForm(s) {
@@ -1505,6 +1508,21 @@ function showStaffForm(s) {
         close(); toast('保存しました', 'success'); navigateTo('staffs');
       } catch (e) { toast(e.message, 'error'); }
     });
+}
+function confirmDeleteStaff(staffId, staffName) {
+  openModal(`<i class="bi bi-trash text-danger"></i> スタッフ削除`,
+    `<div class="text-center py-2">
+      <div class="mb-2"><i class="bi bi-exclamation-triangle-fill text-danger" style="font-size:2.2rem"></i></div>
+      <p class="mb-1"><strong>${esc(staffName)}</strong> を削除しますか？</p>
+      <p class="small text-secondary mb-0">このスタッフの固定シフト・シフト実績・希望履歴・変更申請・通知も全て削除されます。<br>この操作は取り消せません。退職として残す場合は「編集」からステータスを退職にしてください。</p>
+    </div>`,
+    async (w, close) => {
+      try {
+        await api(`/shop/staffs/${staffId}`, { method: 'DELETE' });
+        close(); toast('削除しました', 'success'); navigateTo('staffs');
+      } catch (e) { toast(e.message, 'error'); close(); }
+    },
+    { saveLabel: '削除する', btnClass: 'btn-danger' });
 }
 function showFixedShiftModal(staffId, staffName) {
   api('/shop/fixed-shifts').then((d) => {
