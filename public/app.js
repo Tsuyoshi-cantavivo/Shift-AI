@@ -79,6 +79,15 @@ function todayStr() { const d = new Date(); return `${d.getFullYear()}-${String(
 function plusMonths(n) { const d = new Date(); d.setMonth(d.getMonth() + n); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 function isPC() { return window.matchMedia('(min-width: 992px)').matches; }
 
+/* Date をローカル日付の "YYYY-MM-DD" で返す（toISOString は UTC になるので NG）。 */
+function _localDateStr(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+/* 拡張時間（0-47）を表示用文字列に。翌日なら "(翌)HH"。 */
+function _fmtExtHour(h) {
+  return h >= 24 ? `(翌)${String(h - 24).padStart(2, '0')}` : String(h).padStart(2, '0');
+}
+
 /* Toast */
 function toast(msg, type = 'info') {
   const wrap = document.getElementById('toastWrap');
@@ -577,7 +586,7 @@ function createCalendar(mountEl, opts) {
     const bd = byDay();
     const startWd = new Date(state.y, state.m, 1).getDay();
     const dim = new Date(state.y, state.m + 1, 0).getDate();
-    const todayStr = today.toISOString().slice(0, 10);
+    const todayStr = _localDateStr(today);
     let cells = '';
     for (let i = 0; i < startWd; i++) cells += '<div class="cal-cell empty"></div>';
     for (let d = 1; d <= dim; d++) {
@@ -859,9 +868,20 @@ function openDayTimeline(date, allShifts, editable, onChange) {
     gapRow = `<div class="tl-row tl-gap-row"><div class="tl-name tl-gap-name">不足</div><div class="tl-track">${gapBars}</div></div>`;
   }
 
-  const body = !list.length ? emptyState('bi-cup-hot', 'この日にシフトはありません') :
+  // 【日またぎ/空日対応】シフトが無い日でも営業時間の空タイムライン＋不足バーを表示。
+  // emptyState で隠すと「その日の不足が分からない」問題があるため。
+  const emptyNotice = !list.length
+    ? `<div class="alert alert-info py-2 mb-2 small"><i class="bi bi-info-circle"></i> この日はまだシフトがありません。赤い不足バーをクリックするか、下部の「手動追加」ボタンから登録してください。</div>`
+    : '';
+  // 編集モードではフッター相当の手動追加ボタンをタイムライン下に置く
+  const manualAddBtn = editable
+    ? `<button class="btn btn-outline-primary btn-sm mt-2" id="tlManualAdd"><i class="bi bi-plus-lg"></i> 手動追加</button>`
+    : '';
+  const body =
     `<div class="tl-wrap"><div class="tl-axis-row"><div class="tl-name"></div><div class="tl-axis">${hours.join('')}</div></div>${rows}${gapRow}</div>
-     <div class="tl-legend"><span><i style="background:#F59E0B"></i>朝</span><span><i style="background:#10B981"></i>昼</span><span><i style="background:#6366F1"></i>夜</span><span><i style="background:#EF4444"></i>不足</span>${editable ? '<span><i class="bi bi-hand-index" style="font-style:normal;font-size:.7rem"></i>空きをクリックで追加</span>' : ''}<span>バーをタップで${editable ? '編集' : '詳細'}</span></div>`;
+     ${emptyNotice}
+     <div class="tl-legend"><span><i style="background:#F59E0B"></i>朝</span><span><i style="background:#10B981"></i>昼</span><span><i style="background:#6366F1"></i>夜</span><span><i style="background:#EF4444"></i>不足</span>${editable ? '<span><i class="bi bi-hand-index" style="font-style:normal;font-size:.7rem"></i>空きをクリックで追加</span>' : ''}<span>バーをタップで${editable ? '編集' : '詳細'}</span></div>
+     ${manualAddBtn}`;
   const w = openModal(`<i class="bi bi-diagram-3"></i> ${esc(date)}（${wdName(date)}）のシフト表`, body, null);
   w.querySelectorAll('.tl-bar').forEach((bar) => bar?.addEventListener('click', (ev) => {
     ev.stopPropagation();
@@ -872,6 +892,61 @@ function openDayTimeline(date, allShifts, editable, onChange) {
     if (editable && s) showEditModal(s);
     else if (onChange && s) onChange(s);
   }));
+  // 手動追加ボタン → スタッフを選んで時間自由入力で新規シフト
+  if (editable) {
+    w.querySelector('#tlManualAdd')?.addEventListener('click', async () => {
+      buzz(10);
+      // スタッフ一覧を取得
+      let opts = '';
+      try {
+        const sd = await api('/shop/staffs');
+        const active = (sd.staffs || []).filter((s) => !s.is_resigned);
+        opts = active.map((s) => `<option value="${s.id}">${esc(s.name)}（${roleLabel(s.role)}）</option>`).join('');
+      } catch (err) { toast('スタッフ一覧の取得に失敗', 'error'); return; }
+      // デフォルト時間: 営業開始時刻〜+4h（翌日またぎも考慮）
+      const bh = appState.businessHours || { start: 9, end: 22 };
+      const sExt = bh.start;
+      const eExt = Math.min(bh.end, sExt + 4);
+      const sInfo = _extHourToIsoTime(sExt, 0, date);
+      const eInfo = _extHourToIsoTime(eExt, 0, date);
+      const isOvernight = sInfo.date !== date || eInfo.date !== date;
+      const addW = openModal(`<i class="bi bi-plus-lg"></i> シフト追加 — ${date}`,
+        `<label class="form-label" for="mStaff">スタッフ</label>
+         <select id="mStaff" class="form-select mb-2">${opts}</select>
+         <div class="row">
+           <div class="col-6"><label class="form-label" for="mStart">開始 (${sInfo.date})</label><input type="time" id="mStart" class="form-control" value="${sInfo.time}"></div>
+           <div class="col-6"><label class="form-label" for="mEnd">終了 (${eInfo.date})</label><input type="time" id="mEnd" class="form-control" value="${eInfo.time}"></div>
+         </div>
+         <div class="small text-secondary mt-2">${isOvernight ? '※翌日またぎのシフトです。' : ''}上限人数を超える場合は自動調整されます。</div>`,
+        async (w2, close) => {
+          const staffId = +w2.querySelector('#mStaff').value;
+          const st = w2.querySelector('#mStart').value;
+          const en = w2.querySelector('#mEnd').value;
+          if (!st || !en) { toast('時間を入力してください', 'error'); return; }
+          try {
+            const r = await api('/shop/shifts', { method: 'POST', body: JSON.stringify({
+              staff_id: staffId,
+              start_datetime: `${sInfo.date}T${st}:00`,
+              end_datetime: `${eInfo.date}T${en}:00`,
+              auto_adjust: true,
+            })});
+            close();
+            if (r.adjustments && r.adjustments.length) {
+              toast(`追加しました（${r.adjustments.length}件自動調整）`, 'success');
+            } else {
+              toast('追加しました', 'success');
+            }
+            // タイムラインを再描画（前日〜翌日の範囲で取得してovernightも拾う）
+            w.remove();
+            const prevDay = new Date(date + 'T00:00:00'); prevDay.setDate(prevDay.getDate() - 1);
+            const nextDay = new Date(date + 'T00:00:00'); nextDay.setDate(nextDay.getDate() + 1);
+            const sd2 = await api(`/shop/shifts?start=${_localDateStr(prevDay)}&end=${_localDateStr(nextDay)}`);
+            openDayTimeline(date, sd2.shifts, editable, onChange);
+          } catch (err) { toast(err.message, 'error'); }
+        });
+      addW.querySelector('[data-save]').textContent = '追加';
+    });
+  }
   // 空き部分クリック → そのスタッフ＋クリック位置の時間帯で追加
   if (editable) {
     w.querySelectorAll('.tl-track').forEach((track) => {
@@ -1080,8 +1155,8 @@ async function loadShortage(box, start, end) {
       if (!gaps.length) return;
       const merged = _mergeHourlyGaps(gaps);
       merged.forEach((g) => {
-        const sH = String(g.start).padStart(2, '0');
-        const eH = String(g.end).padStart(2, '0');
+        const sH = _fmtExtHour(g.start);
+        const eH = _fmtExtHour(g.end);
         chips.push(`<span class="shortage-chip"><i class="bi bi-exclamation-triangle"></i> ${day.slice(5)} ${sH}:00〜${eH}:00 <strong>あと${g.gap}名</strong></span>`);
       });
     });
@@ -1091,7 +1166,7 @@ async function loadShortage(box, start, end) {
       const cur = new Date(start + 'T00:00:00');
       const endD = new Date(end + 'T00:00:00');
       while (cur <= endD) {
-        const ds = cur.toISOString().slice(0, 10);
+        const ds = _localDateStr(cur);  // toISOString は UTC で日付がズレる
         if (!byDay[ds]) days.push(ds);
         cur.setDate(cur.getDate() + 1);
       }
@@ -1099,8 +1174,8 @@ async function loadShortage(box, start, end) {
         const gaps = _computeHourlyGaps([], day);
         const merged = _mergeHourlyGaps(gaps);
         merged.forEach((g) => {
-          const sH = String(g.start).padStart(2, '0');
-          const eH = String(g.end).padStart(2, '0');
+          const sH = _fmtExtHour(g.start);
+          const eH = _fmtExtHour(g.end);
           chips.push(`<span class="shortage-chip"><i class="bi bi-exclamation-triangle"></i> ${day.slice(5)} ${sH}:00〜${eH}:00 <strong>あと${g.gap}名</strong></span>`);
         });
       });
@@ -1448,7 +1523,7 @@ SCREENS.shifts = function (el) {
         const fs = m.querySelector('#cpFrom').value, fe = m.querySelector('#cpFromEnd').value, ts = m.querySelector('#cpTo').value;
         if (fs && fe && ts) {
           const days = (new Date(fe) - new Date(fs)) / 86400000;
-          const te = new Date(new Date(ts).getTime() + days * 86400000).toISOString().slice(0, 10);
+          const te = _localDateStr(new Date(new Date(ts).getTime() + days * 86400000));
           m.querySelector('#cpPreview').textContent = `貼り付け先終了日（自動）: ${te}`;
         }
       };
