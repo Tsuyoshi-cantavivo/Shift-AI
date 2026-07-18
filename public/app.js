@@ -213,7 +213,7 @@ document.getElementById('notifBtn')?.addEventListener('click', () => openNotific
 /* ============================================================
    Theme (dark/light) toggle
    ============================================================ */
-function currentTheme() { return document.documentElement.getAttribute('data-theme') || 'dark'; }
+function currentTheme() { return document.documentElement.getAttribute('data-theme') || 'light'; }
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
   try { localStorage.setItem('shiftai_theme', t); } catch (e) {}

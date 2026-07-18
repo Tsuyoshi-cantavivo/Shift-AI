@@ -220,7 +220,7 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--t-primary); letter-spacing: -
 }
 .side-overlay {
   position: fixed; inset: var(--header-h) 0 0 0;
-  background: rgba(0,0,0,.5); backdrop-filter: blur(4px);
+  background: rgba(0,0,0,.5);
   z-index: 998; cursor: pointer;
 }
 
