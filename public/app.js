@@ -234,7 +234,10 @@ document.getElementById('loginBtn')?.addEventListener('click', async () => {
   finally { setLoading(false); }
 });
 ['loginShopCode', 'loginUserCode', 'loginPassword'].forEach((id) => {
-  document.getElementById(id)?.addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('loginBtn').click(); });
+  document.getElementById(id)?.addEventListener('keydown', (e) => {
+    // IME変換中のEnterは確定扱いとして送信しない（念のため）
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) document.getElementById('loginBtn').click();
+  });
 });
 document.getElementById('logoutBtn')?.addEventListener('click', async () => { try { await api('/logout', { method: 'POST' }); } catch {} logoutLocal(); });
 document.getElementById('notifBtn')?.addEventListener('click', () => openNotifications());
@@ -1397,7 +1400,10 @@ function renderShopChatTab(body) {
     }
   }
   const input = document.getElementById('shopChatInput');
-  input?.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendShopChat(); } });
+  input?.addEventListener('keydown', (e) => {
+    // IME変換中（isComposing / keyCode 229）のEnterは確定扱いとして送信しない
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); sendShopChat(); }
+  });
   input?.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 120) + 'px'; });
   document.getElementById('shopChatSend')?.addEventListener('click', sendShopChat);
   renderMsgs();
@@ -2216,7 +2222,10 @@ SCREENS.staffDashboard = async function (el) {
     renderMini();
   }
   document.getElementById('miniChatSend')?.addEventListener('click', sendMini);
-  document.getElementById('miniChatInput')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMini(); });
+  document.getElementById('miniChatInput')?.addEventListener('keydown', (e) => {
+    // IME変換中のEnterは確定扱いとして送信しない
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) sendMini();
+  });
   renderMini(); renderSug();
 };
 
