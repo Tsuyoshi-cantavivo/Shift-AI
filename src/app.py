@@ -1677,14 +1677,30 @@ def staff_periods():
 
 @app.get("/api/staff/shifts")
 def staff_shifts():
+    """スタッフのシフト一覧。
+
+    自分のシフト（全ステータス）＋同店舗の他スタッフの確定シフトを返す。
+    他スタッフのシフトは「谁が出勤するか」の確認用（個人情報は含まない）。
+    """
     require_auth(["staff"]); staff = g.user
     start_d, end_d = request.args.get("start"), request.args.get("end")
-    sql = "SELECT id, shop_id, start_datetime, end_datetime, break_time_minutes, status, reason FROM shifts WHERE staff_id=?"
-    params = [staff["id"]]
+    date_clause = ""
+    date_params = []
     if start_d and end_d:
-        sql += " AND start_datetime>=? AND start_datetime<=?"; params += [start_d + "T00:00:00", end_d + "T23:59:59"]
-    sql += " ORDER BY start_datetime"
-    return jsonify({"shifts": query_all(sql, tuple(params))})
+        date_clause = " AND start_datetime>=? AND start_datetime<=?"
+        date_params = [start_d + "T00:00:00", end_d + "T23:59:59"]
+    # SQL の ? の順序: shop_id → date_range → staff_id
+    sql = (
+        "SELECT sh.id, sh.shop_id, sh.staff_id, sh.start_datetime, sh.end_datetime, "
+        "sh.break_time_minutes, sh.status, sh.reason, s.name as staff_name, s.role as staff_role "
+        "FROM shifts sh JOIN staffs s ON sh.staff_id=s.id "
+        "WHERE sh.shop_id=? "
+        f"{date_clause} "
+        "AND (sh.staff_id=? OR sh.status='confirmed') "
+        "ORDER BY sh.start_datetime"
+    )
+    all_params = [staff["shop_id"]] + date_params + [staff["id"]]
+    return jsonify({"shifts": query_all(sql, tuple(all_params))})
 
 
 @app.get("/api/staff/notifications")
