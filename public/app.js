@@ -704,10 +704,25 @@ function buildPrintTimelineHtml(list, anchorDate) {
       const sMin = _extMinFromIso(s.start_datetime, day);
       let eMin = _extMinFromIso(s.end_datetime, day);
       if (eMin <= sMin) eMin = sMin + 60;
-      const left = ((sMin - rangeMin) / rangeLen) * 100;
-      const width = Math.max(4, ((eMin - sMin) / rangeLen) * 100);
-      const lbl = width > 14 ? `${hm(s.start_datetime)}-${hm(s.end_datetime)}` : `${hm(s.start_datetime)}`;
-      return `<div class="tl-bar ${slotClass(s.start_datetime)}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
+      // 表示範囲 [0%, 100%] にクリップ（前日/翌日へのはみ出し防止）
+      const rawLeft = ((sMin - rangeMin) / rangeLen) * 100;
+      const rawRight = ((eMin - rangeMin) / rangeLen) * 100;
+      const left = Math.max(0, rawLeft);
+      const right = Math.min(100, rawRight);
+      const width = Math.max(3, right - left);
+      const continued = rawLeft < 0;
+      const endsOff = rawRight > 100;
+      let lbl = '';
+      if (width > 14) {
+        if (continued && !endsOff) lbl = `→${hm(s.end_datetime)}`;
+        else if (!continued && endsOff) lbl = `${hm(s.start_datetime)}→`;
+        else if (continued && endsOff) lbl = `→→`;
+        else lbl = `${hm(s.start_datetime)}-${hm(s.end_datetime)}`;
+      } else if (width > 6) {
+        lbl = `${hm(s.start_datetime)}`;
+      }
+      const contCls = continued ? ' tl-bar-continued' : '';
+      return `<div class="tl-bar ${slotClass(s.start_datetime)}${contCls}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
     }).join('');
     return `<div class="tl-row"><div class="tl-name">${esc(st.name)}</div><div class="tl-track">${bars}</div></div>`;
   }).join('');
@@ -806,19 +821,18 @@ async function openPrintView(start, end) {
 
 function openDayTimeline(date, allShifts, editable, onChange) {
   buzz(12);
-  // date を anchor として、date で始まるシフトと、前日から date 早朝へまたぐ overnight シフトの両方を表示
-  // ① date で始まるシフト ②end が date に属する翌日跨ぎシフト（前日開始）
-  const list = (allShifts || []).filter((s) => {
-    const sd = s.start_datetime.slice(0, 10);
-    const ed = s.end_datetime.slice(0, 10);
-    return sd === date || ed === date;  // start または end が date に属する
-  }).sort((a, b) => a.start_datetime.localeCompare(b.start_datetime));
+  // date を anchor として表示。当日タイムラインには「date で始まるシフト」のみ表示。
+  // 【理由】営業日は pattern.start_time（例: 6:00）に始まるので、
+  //   前日の overnight シフト（前日6:00〜当日5:00）は前日のタイムラインで見れば十分。
+  //   当日のタイムラインに混ぜると左に突き抜けて名前カラムに被る問題があった。
+  //   前日シフトは前日詳細画面で確認する設計。
+  const list = (allShifts || []).filter((s) => s.start_datetime.slice(0, 10) === date)
+    .sort((a, b) => a.start_datetime.localeCompare(b.start_datetime));
   const order = []; const staffMap = {};
   list.forEach((s) => { if (!staffMap[s.staff_id]) { staffMap[s.staff_id] = { name: s.staff_name || ('#' + s.staff_id), shifts: [] }; order.push(s.staff_id); } staffMap[s.staff_id].shifts.push(s); });
   // 時間軸は「営業時間」をベースにし、シフトが営業時間外にはみ出す場合のみ拡張。
   // これにより「シフトが無い時間帯が消える」「日によって軸が変わる」を防ぐ。
-  // 【日またぎ】anchor=date で拡張分計算。前日から date 早朝へ跨ぐシフトは負の拡張時間になるが
-  // ここでは date で始まるシフトのみを可視化範囲のベースとし、不足バー計算は date 基準で行う。
+  // 【日またぎ】anchor=date で拡張分計算。翌日へ延びるシフトは +1440 分で計算。
   const bh = appState.businessHours || { start: 9, end: 22 };
   let minH = bh.start, maxH = bh.end;
   // date で始まるシフトで範囲拡張を判定
@@ -841,14 +855,28 @@ function openDayTimeline(date, allShifts, editable, onChange) {
   const rows = order.map((sid) => {
     const st = staffMap[sid];
     const bars = st.shifts.map((s) => {
-      // date を anchor にして拡張分計算。前日から跨ぐシフトは負の left になるので date 起点のバーを描画
+      // date を anchor にして拡張分計算。前日から跨ぐシフトは負の left になるので
+      // 表示範囲 [0%, 100%] にクリップし、「前日から継続」マークを付ける。
       const sMin = _extMinFromIso(s.start_datetime, date);
       let eMin = _extMinFromIso(s.end_datetime, date);
       if (eMin <= sMin) eMin = sMin + 60;
-      const left = ((sMin - rangeMin) / rangeLen) * 100;
-      const width = Math.max(3, ((eMin - sMin) / rangeLen) * 100);
-      const lbl = width > 12 ? `${hm(s.start_datetime)}-${hm(s.end_datetime)}` : '';
-      return `<div class="tl-bar ${slotClass(s.start_datetime)}" data-id="${s.id}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
+      const rawLeft = ((sMin - rangeMin) / rangeLen) * 100;
+      const rawRight = ((eMin - rangeMin) / rangeLen) * 100;
+      const left = Math.max(0, rawLeft);
+      const right = Math.min(100, rawRight);
+      const width = Math.max(2, right - left);
+      const continued = rawLeft < 0;  // 前日から継続（左がクリップされた）
+      const endsOff = rawRight > 100; // 翌日へ延長（右がクリップされた）
+      // ラベル: クリップ時は矢印で継続を表現
+      let lbl = '';
+      if (width > 12) {
+        if (continued && !endsOff) lbl = `→${hm(s.end_datetime)}`;
+        else if (!continued && endsOff) lbl = `${hm(s.start_datetime)}→`;
+        else if (continued && endsOff) lbl = `→→`;
+        else lbl = `${hm(s.start_datetime)}-${hm(s.end_datetime)}`;
+      }
+      const contCls = continued ? ' tl-bar-continued' : '';
+      return `<div class="tl-bar ${slotClass(s.start_datetime)}${contCls}" data-id="${s.id}" title="${continued ? '前日から継続: ' : ''}${hm(s.start_datetime)}-${hm(s.end_datetime)}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
     }).join('');
     return `<div class="tl-row" data-staff-id="${sid}" data-staff-name="${esc(st.name)}"><div class="tl-name">${esc(st.name)}</div><div class="tl-track" data-staff-id="${sid}" title="${editable ? '空き部分をクリックで追加' : ''}">${bars}</div></div>`;
   }).join('');

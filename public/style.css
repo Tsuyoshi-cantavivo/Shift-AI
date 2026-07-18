@@ -645,6 +645,8 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 .tl-bar.noon    { background: #10B981; }
 .tl-bar.evening { background: #6366F1; }
 .tl-bar.selected { outline: 2px solid #fff; outline-offset: 1px; box-shadow: 0 0 0 3px var(--indigo); z-index: 3; }
+/* 前日から継続シフト: 左端に縦線を入れて「左に続いている」ことを視覚化 */
+.tl-bar.tl-bar-continued { box-shadow: inset 4px 0 0 rgba(255,255,255,.7); }
 .tl-legend { display: flex; gap: 10px; font-size: .66rem; color: var(--t-muted); margin-top: 6px; flex-wrap: wrap; }
 .tl-legend span { display: inline-flex; align-items: center; gap: 4px; }
 .tl-legend i { width: 8px; height: 8px; border-radius: 3px; display: inline-block; }
