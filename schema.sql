@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS staffs (
   password_hash         TEXT NOT NULL,
   name                  TEXT NOT NULL,
   role                  TEXT DEFAULT 'part_time'
-                          CHECK(role IN ('employee','part_time')),
+                          CHECK(role IN ('employee','part_time','manager')),
   hourly_wage           INTEGER DEFAULT 1000,
   min_hours_per_month   INTEGER DEFAULT 0,
   max_hours_per_month   INTEGER DEFAULT 160,

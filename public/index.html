@@ -34,22 +34,32 @@
         <h3 class="mb-0">ShiftAI</h3>
         <p class="text-secondary small mb-0">AI活用型シフト自動作成</p>
       </div>
-      <div class="card-body p-4">
-        <div class="mb-3">
-          <label class="form-label" for="loginId">ID</label>
-          <div class="input-group input-group-lg">
-            <span class="input-group-text"><i class="bi bi-person"></i></span>
-            <input type="text" id="loginId" class="form-control" placeholder="IDを入力" autocomplete="username" />
+      <div class="card-body login-form">
+        <div class="form-field">
+          <label class="form-label" for="loginShopCode">店舗コード</label>
+          <div class="input-group">
+            <span class="input-group-text"><i class="bi bi-shop"></i></span>
+            <input type="text" id="loginShopCode" class="form-control" placeholder="例: SHOP001" autocomplete="organization" />
           </div>
         </div>
-        <div class="mb-4">
+        <div class="form-field">
+          <label class="form-label" for="loginUserCode">ユーザーコード</label>
+          <div class="input-group">
+            <span class="input-group-text"><i class="bi bi-person"></i></span>
+            <input type="text" id="loginUserCode" class="form-control" placeholder="例: P001" autocomplete="username" />
+          </div>
+        </div>
+        <div class="form-field">
           <label class="form-label" for="loginPassword">パスワード</label>
-          <div class="input-group input-group-lg">
+          <div class="input-group">
             <span class="input-group-text"><i class="bi bi-lock"></i></span>
             <input type="password" id="loginPassword" class="form-control" placeholder="パスワード" autocomplete="current-password" />
           </div>
-          <div class="form-text">IDで自動的に店舗・スタッフ・管理者を判別します</div>
         </div>
+        <!-- <div class="form-text login-hint">
+          <i class="bi bi-info-circle"></i>
+          店舗管理者は「manager」、システム管理者は「admin」を入力。
+        </div> -->
         <button id="loginBtn" class="btn btn-primary btn-lg w-100">ログイン <i class="bi bi-arrow-right-circle ms-1"></i></button>
         <div id="loginError" class="text-danger text-center mt-3 small"></div>
       </div>

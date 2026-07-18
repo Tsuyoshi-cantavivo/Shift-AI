@@ -15,6 +15,7 @@ import pytest
 import db as dbmod
 import shift_engine
 import ai
+from auth import hash_password
 from utils import compute_break_minutes, minutes_between
 
 from helpers import (
@@ -129,23 +130,184 @@ class TestAuthAndCrud:
             headers=auth(admin_token))
         assert r.status_code == 403
 
+    def test_create_staff_duplicate_code_returns_friendly_error(self, client):
+        """同一 staff_code の追加は親切なメッセージで 400。"""
+        shop_id = insert_shop()
+        token = make_session("shop", shop_id, shop_id)
+        insert_staff(shop_id, "DUP", "先にいる人")
+        r = client.post("/api/shop/staffs", json={
+            "staff_code": "DUP", "name": "後から的人", "password": "Password1"},
+            headers=auth(token))
+        assert r.status_code == 400
+        msg = r.get_json()["error"]
+        assert "DUP" in msg, f"コード値がメッセージに含まれるべき: {msg}"
+        assert "既に" in msg or "存在" in msg, f"重複を示す言葉が必要: {msg}"
+
+    def test_create_staff_weak_password_returns_specific_error(self, client):
+        """パスワード強度不足は何が不足か分かるメッセージを返す。"""
+        shop_id = insert_shop()
+        token = make_session("shop", shop_id, shop_id)
+        cases = [
+            ("abc12", "8文字"),        # 文字数不足
+            ("12345678", "英字"),       # 英字なし
+            ("abcdefgh", "数字"),       # 数字なし
+        ]
+        for pw, expected_hint in cases:
+            r = client.post("/api/shop/staffs", json={
+                "staff_code": "P" + pw[:3], "name": "X", "password": pw},
+                headers=auth(token))
+            assert r.status_code == 400, f"弱パスワード{pw}は拒否されるべき"
+            msg = r.get_json()["error"]
+            assert expected_hint in msg, f"{pw}: メッセージ'{msg}'に'{expected_hint}'がない"
+
+    def test_create_staff_missing_code_returns_400(self, client):
+        """staff_code 欠落は 400（UNIQUE制約の技術的エラーではなく）。"""
+        shop_id = insert_shop()
+        token = make_session("shop", shop_id, shop_id)
+        r = client.post("/api/shop/staffs", json={
+            "staff_code": "", "name": "X", "password": "Password1"},
+            headers=auth(token))
+        assert r.status_code == 400
+        assert "コード" in r.get_json()["error"]
+
     def test_login_returns_token_and_role(self, client):
+        """新仕様: 単一フォーム（shop_code + user_code + password）で全ロールログイン。"""
         insert_admin("admin", "admin123")
         shop_id = insert_shop(code="SHOP1", password="shop123")
-        r = client.post("/api/login", json={"id": "admin", "password": "admin123"})
-        assert r.status_code == 200
+        # システム管理者: user_code="admin"
+        r = client.post("/api/login", json={
+            "shop_code": "SHOP1", "user_code": "admin", "password": "admin123"})
+        assert r.status_code == 200, r.get_json()
         assert r.get_json()["role"] == "admin"
         assert r.get_json()["token"]
         # パスワードがレスポンスに含まれないこと
         assert "password_hash" not in r.get_json()["user"]
 
-        r = client.post("/api/login", json={"id": "SHOP1", "password": "shop123"})
-        assert r.get_json()["role"] == "shop"
-
     def test_login_wrong_password_rejected(self, client):
         insert_admin("admin", "admin123")
-        r = client.post("/api/login", json={"id": "admin", "password": "wrong"})
+        r = client.post("/api/login", json={
+            "shop_code": "any", "user_code": "admin", "password": "wrong"})
         assert r.status_code == 400
+
+    # ---- スタッフログイン: 店舗コード+スタッフコードで一意特定（旧バグ対策）----
+    def test_staff_login_with_shop_code_and_staff_code(self, client):
+        """【旧バグ対策】別店舗で同 staff_code が存在しても shop_code 指定で正しくログインできる。"""
+        shop_a = insert_shop(code="SHOP_A")
+        shop_b = insert_shop(code="SHOP_B")
+        # 両店舗に同じ staff_code "P1" を作成（異なるパスワードで識別可能に）
+        sa = insert_staff(shop_a, "P1", "店舗AのP1", password="passA123")
+        sb = insert_staff(shop_b, "P1", "店舗BのP1", password="passB123")
+        # 店舗Aとしてログイン
+        r = client.post("/api/login", json={
+            "shop_code": "SHOP_A", "user_code": "P1", "password": "passA123"})
+        assert r.status_code == 200, r.get_json()
+        data = r.get_json()
+        assert data["role"] == "staff"
+        assert data["user"]["id"] == sa
+        assert data["user"]["shop_id"] == shop_a
+        # 店舗Bとしてログイン（同じ P1 でも shop_code で正しくBに飞ぶ）
+        r = client.post("/api/login", json={
+            "shop_code": "SHOP_B", "user_code": "P1", "password": "passB123"})
+        assert r.status_code == 200
+        data = r.get_json()
+        assert data["user"]["id"] == sb
+        assert data["user"]["shop_id"] == shop_b
+
+    def test_staff_login_wrong_shop_password_rejected(self, client):
+        """店舗Aのスタッフを店舗Bのパスワードではログインできない。"""
+        shop_a = insert_shop(code="SHOP_A")
+        shop_b = insert_shop(code="SHOP_B")
+        insert_staff(shop_a, "P1", "AのP1", password="passA123")
+        insert_staff(shop_b, "P1", "BのP1", password="passB123")
+        # 店舗A指定で店舗Bのパスワード → 失敗
+        r = client.post("/api/login", json={
+            "shop_code": "SHOP_A", "user_code": "P1", "password": "passB123"})
+        assert r.status_code == 400
+
+    def test_staff_login_missing_shop_code_returns_400(self, client):
+        """shop_code 無しで user_code+password を送っても 400。"""
+        shop_a = insert_shop(code="SHOP_A")
+        insert_staff(shop_a, "P1", "AのP1", password="passA123")
+        r = client.post("/api/login", json={
+            "user_code": "P1", "password": "passA123"})  # shop_code 無し
+        assert r.status_code == 400
+        assert "店舗コード" in r.get_json()["error"]
+
+    def test_staff_login_nonexistent_shop_returns_400(self, client):
+        """存在しない店舗コードではログイン不可。"""
+        shop_a = insert_shop(code="SHOP_A")
+        insert_staff(shop_a, "P1", "AのP1", password="passA123")
+        r = client.post("/api/login", json={
+            "shop_code": "GHOST", "user_code": "P1", "password": "passA123"})
+        assert r.status_code == 400
+
+    # ---- manager ロール: 店舗権限でのログイン ----
+    def test_manager_role_logs_in_as_shop(self, client):
+        """staffs.role='manager' でログインすると role='shop' セッションが付与される。"""
+        shop_id = insert_shop(code="SHOP_M", password="shop123")
+        # manager ロールのスタッフを作成
+        mid = dbmod.execute(
+            "INSERT INTO staffs (shop_id, staff_code, password_hash, name, role) "
+            "VALUES (?,?,?,?,?)",
+            (shop_id, "manager", hash_password("Manager1"), "店主", "manager"),
+        )["last_row_id"]
+        r = client.post("/api/login", json={
+            "shop_code": "SHOP_M", "user_code": "manager", "password": "Manager1"})
+        assert r.status_code == 200, r.get_json()
+        data = r.get_json()
+        assert data["role"] == "shop", "manager ロールは shop 権限でログイン"
+        assert data["user"]["id"] == shop_id  # user は shops 行として取得される
+        assert data["user"]["shop_code"] == "SHOP_M"
+
+    def test_manager_can_access_shop_endpoints(self, client):
+        """manager ログイン後のセッションで /api/shop/* が使える。"""
+        shop_id = insert_shop(code="SHOP_M2")
+        dbmod.execute(
+            "INSERT INTO staffs (shop_id, staff_code, password_hash, name, role) "
+            "VALUES (?,?,?,?,?)",
+            (shop_id, "manager", hash_password("Manager1"), "店主", "manager"),
+        )
+        r = client.post("/api/login", json={
+            "shop_code": "SHOP_M2", "user_code": "manager", "password": "Manager1"})
+        token = r.get_json()["token"]
+        # 店舗エンドポイントにアクセス
+        r = client.get("/api/shop/dashboard", headers=auth(token))
+        assert r.status_code == 200, "manager は店舗権限で API 利用可能"
+
+    def test_manager_role_treated_like_employee_in_engine(self, client):
+        """manager ロールはシフトエンジンで employee 相当（不足補填可能）。"""
+        shop_id = insert_shop(settings={"min_daily_hours": 4})
+        insert_pattern(shop_id, "通", "09:00", "18:00", 1)
+        # manager 1名だけ（社員・バイトなし）
+        dbmod.execute(
+            "INSERT INTO staffs (shop_id, staff_code, password_hash, name, role) "
+            "VALUES (?,?,?,?,?)",
+            (shop_id, "manager", hash_password("Manager1"), "店主", "manager"),
+        )
+        res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 4}, MON, MON)
+        # manager が不足補填される（role='employee' と同じ挙動）
+        assert any(c["reason"] and "補填" in c["reason"] for c in res["confirmed"]), \
+            "manager は employee 相当として不足補填されるべき"
+
+    def test_admin_magic_word_works_either_field(self, client):
+        """shop_code / user_code どちらに "admin" を入れてもシステム管理者ログイン。"""
+        insert_admin("admin", "admin123")
+        # user_code 側に admin
+        r = client.post("/api/login", json={
+            "shop_code": "any", "user_code": "admin", "password": "admin123"})
+        assert r.status_code == 200 and r.get_json()["role"] == "admin"
+        # shop_code 側に admin
+        r = client.post("/api/login", json={
+            "shop_code": "admin", "user_code": "any", "password": "admin123"})
+        assert r.status_code == 200 and r.get_json()["role"] == "admin"
+
+    def test_admin_with_custom_id_via_other_field(self, client):
+        """admin_id が "admin" 以外の場合、もう片方のフィールドで指定可能。"""
+        insert_admin("superroot", "super123")
+        r = client.post("/api/login", json={
+            "shop_code": "superroot", "user_code": "admin", "password": "super123"})
+        assert r.status_code == 200
+        assert r.get_json()["user"]["admin_id"] == "superroot"
 
     # ---- スタッフ削除 (DELETE /api/shop/staffs/<sid>) ----
     def test_shop_deletes_own_staff(self, client):

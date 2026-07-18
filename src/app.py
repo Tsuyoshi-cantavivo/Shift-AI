@@ -97,7 +97,13 @@ def require_auth(allowed):
     if role == "admin":
         user = query_one("SELECT id, admin_id, name FROM system_admins WHERE id=?", (session["user_id"],))
     elif role == "shop":
-        user = query_one("SELECT * FROM shops WHERE id=?", (session["user_id"],))
+        # user_id は従来 shops.id（旧店主）または staffs.id（manager ロール）。
+        # shop_id を使って店舗情報を取得する方がロバスト。
+        shop = query_one("SELECT * FROM shops WHERE id=?", (session.get("shop_id"),))
+        if shop is None:
+            # フォールバック: user_id を shops.id とみなす（後方互換）
+            shop = query_one("SELECT * FROM shops WHERE id=?", (session["user_id"],))
+        user = shop
     else:
         user = query_one("SELECT * FROM staffs WHERE id=?", (session["user_id"],))
     g.role = role
@@ -520,21 +526,63 @@ def handle_init():
 # ===========================================================
 @app.post("/api/login")
 def login():
+    """統一ログイン（店舗コード + ユーザーコード + パスワード）。
+
+    【仕様】
+      - システム管理者: ユーザーコード に "admin" を指定（店舗コードは任意）。
+        ※ admin_id が "admin" 以外の場合は、店舗コード側に admin_id を入れてもOK。
+      - 店舗管理者: staffs.role='manager' のスタッフ → role='shop' セッション。
+      - 一般スタッフ: staffs.role='employee'/'part_time' → role='staff' セッション。
+      - 後方互換: user_code == shop_code の場合、shops テーブルでの旧店主ログイン可。
+
+    【背景】
+      かつて staff_code 単独で検索したため別店舗同コードで誤ログインする致命的
+      バグがあった。本仕様では (shop_code, staff_code) の複合キーで一意特定し、
+      さらに 'manager' ロールで店舗権限も一本化する。
+    """
     body = request.get_json(silent=True) or {}
-    uid = (body.get("id") or "").strip()
+    shop_code = (body.get("shop_code") or body.get("id") or "").strip()
+    user_code = (body.get("user_code") or body.get("staff_code") or "").strip()
     pw = body.get("password") or ""
-    if not uid or not pw:
-        raise ValueError("IDとパスワードを入力してください")
-    admin = query_one("SELECT * FROM system_admins WHERE admin_id=?", (uid,))
-    if admin and verify_password(pw, admin["password_hash"]):
-        return jsonify(_create_session("admin", admin["id"], None, admin))
-    shop = query_one("SELECT * FROM shops WHERE shop_code=? AND is_active=1", (uid,))
-    if shop and verify_password(pw, shop["password_hash"]):
-        return jsonify(_create_session("shop", shop["id"], shop["id"], shop))
-    staff = query_one("SELECT * FROM staffs WHERE staff_code=? AND is_resigned=0", (uid,))
+    if not pw:
+        raise ValueError("パスワードを入力してください")
+
+    # ---- システム管理者 ("admin" マジックワード) ----
+    if user_code == "admin" or shop_code == "admin":
+        # もう片方のフィールドが "admin" 以外の値なら、それを admin_id として試す。
+        # 見つからなければ "admin" にフォールバック（「どちらかに admin を入れるだけ」の体験）。
+        other = user_code if user_code != "admin" else shop_code
+        admin_id_guess = other if other and other != "admin" else "admin"
+        admin = query_one("SELECT * FROM system_admins WHERE admin_id=?", (admin_id_guess,))
+        if not admin and admin_id_guess != "admin":
+            admin = query_one("SELECT * FROM system_admins WHERE admin_id=?", ("admin",))
+        if admin and verify_password(pw, admin["password_hash"]):
+            return jsonify(_create_session("admin", admin["id"], None, admin))
+        raise ValueError("管理者IDまたはパスワードが正しくありません")
+
+    if not shop_code or not user_code:
+        raise ValueError("店舗コードとユーザーコードを入力してください")
+
+    # ---- 店舗管理者 / スタッフ: (shop_code, user_code) で一意検索 ----
+    staff = query_one(
+        "SELECT s.* FROM staffs s JOIN shops sh ON s.shop_id=sh.id "
+        "WHERE sh.shop_code=? AND s.staff_code=? AND s.is_resigned=0 AND sh.is_active=1",
+        (shop_code, user_code))
     if staff and verify_password(pw, staff["password_hash"]):
+        if staff["role"] == "manager":
+            # manager は店舗権限(shopping) → user オブジェクトは shops 行を返す
+            shop = query_one("SELECT * FROM shops WHERE id=?", (staff["shop_id"],))
+            return jsonify(_create_session("shop", staff["id"], staff["shop_id"], shop))
+        # 一般スタッフ
         return jsonify(_create_session("staff", staff["id"], staff["shop_id"], staff))
-    raise ValueError("IDまたはパスワードが正しくありません")
+
+    # ---- 後方互換: shops テーブルによる旧店主ログイン（user_code == shop_code の場合） ----
+    if user_code == shop_code:
+        shop = query_one("SELECT * FROM shops WHERE shop_code=? AND is_active=1", (shop_code,))
+        if shop and verify_password(pw, shop["password_hash"]):
+            return jsonify(_create_session("shop", shop["id"], shop["id"], shop))
+
+    raise ValueError("店舗コード・ユーザーコードまたはパスワードが正しくありません")
 
 
 def _create_session(role, user_id, shop_id, user):
@@ -696,8 +744,9 @@ def shop_dashboard():
         "month_cost": total_cost,
         "month_hours": round(total_hours, 1),
         "staff_count": len(active_staff),
-        "employee_count": sum(1 for s in active_staff if s["role"] == "employee"),
+        "employee_count": sum(1 for s in active_staff if s["role"] in ("employee", "manager")),
         "part_time_count": sum(1 for s in active_staff if s["role"] == "part_time"),
+        "manager_count": sum(1 for s in active_staff if s["role"] == "manager"),
         "pending_requests": len(req_shifts),
         "pending_approvals": len(creq),
         "unread_notifications": len(notif),
@@ -778,12 +827,24 @@ def shop_staffs():
 def shop_staffs_post():
     shop, shop_id, settings = _shop_ctx()
     body = request.get_json(silent=True) or {}
+    if not body.get("staff_code"):
+        abort(400, description="コードを入力してください")
+    if not body.get("name"):
+        abort(400, description="氏名を入力してください")
     pw = body.get("password") or "password"
     err = validate_password(pw)
     if err:
         abort(400, description=err)
+    # 重複チェック（UNIQUE制約を分かりやすいメッセージで事前検知）
+    dup = query_one("SELECT id FROM staffs WHERE shop_id=? AND staff_code=?", (shop_id, body["staff_code"]))
+    if dup:
+        abort(400, description=f"コード '{body['staff_code']}' は既に存在します。別のコードを指定してください。")
+    # role のバリデーション（'employee' / 'part_time' / 'manager' 以外は拒否）
+    role = body.get("role") or "part_time"
+    if role not in ("employee", "part_time", "manager"):
+        abort(400, description="ロールは employee / part_time / manager のいずれかを指定してください")
     meta = execute("INSERT INTO staffs (shop_id, staff_code, password_hash, name, role, hourly_wage, min_hours_per_month, max_hours_per_month) VALUES (?,?,?,?,?,?,?,?)",
-                   (shop_id, body["staff_code"], hash_password(pw), body["name"], body.get("role") or "part_time",
+                   (shop_id, body["staff_code"], hash_password(pw), body["name"], role,
                     body.get("hourly_wage") or settings.get("default_hourly_wage") or 1000,
                     body.get("min_hours_per_month") or 0, body.get("max_hours_per_month") or 160))
     return jsonify({"ok": True, "id": meta["last_row_id"]})
@@ -1578,8 +1639,9 @@ def shop_ai_chat():
         "shop_name": shop.get("shop_name") or "店舗",
         "today": today,
         "staff_count": len(active_staff),
-        "employee_count": sum(1 for s in active_staff if s["role"] == "employee"),
+        "employee_count": sum(1 for s in active_staff if s["role"] in ("employee", "manager")),
         "part_time_count": sum(1 for s in active_staff if s["role"] == "part_time"),
+        "manager_count": sum(1 for s in active_staff if s["role"] == "manager"),
         "staff_names": [s["name"] for s in active_staff],
         "patterns": [{"name": p["pattern_name"], "time": f"{p['start_time']}-{p['end_time']}", "required": p["required_staff"]} for p in patterns],
         "has_weekday_overrides": len(overrides) > 0,

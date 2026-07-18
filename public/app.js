@@ -139,6 +139,11 @@ function badge(text, variant = 'muted') {
   return `<span class="badge-soft ${variant}">${esc(text)}</span>`;
 }
 
+/* ロールコード → 日本語表示（manager/employee/part_time に対応） */
+function roleLabel(role) {
+  return role === 'manager' ? '店舗管理者' : role === 'employee' ? '社員' : 'アルバイト';
+}
+
 /* Modal */
 function openModal(title, bodyHtml, onSave, opts = {}) {
   const wrap = document.createElement('div');
@@ -190,15 +195,27 @@ function defaultScreen() {
   return 'dashboard';
 }
 
+/* ============================================================
+   Login (単一フォーム: 店舗コード + ユーザーコード + パスワード)
+   - ユーザーコード "admin" → システム管理者
+   - ユーザーコード "manager" (role='manager') → 店舗管理者
+   - その他 → 一般スタッフ
+   ============================================================ */
 document.getElementById('loginBtn')?.addEventListener('click', async () => {
-  const id = document.getElementById('loginId').value.trim();
+  const shopCode = document.getElementById('loginShopCode').value.trim();
+  const userCode = document.getElementById('loginUserCode').value.trim();
   const pw = document.getElementById('loginPassword').value;
   const errEl = document.getElementById('loginError');
   errEl.textContent = ''; setLoading(true);
   try {
-    const data = await api('/login', { method: 'POST', body: JSON.stringify({ id, password: pw }) });
+    if (!shopCode || !userCode || !pw) {
+      throw new Error('店舗コード・ユーザーコード・パスワードを入力してください');
+    }
+    const data = await api('/login', {
+      method: 'POST',
+      body: JSON.stringify({ shop_code: shopCode, user_code: userCode, password: pw })
+    });
     authToken = data.token; currentUser = data.user; currentRole = data.role;
-    // ★ ログイン時に前ユーザーの状態を確実にクリア（ログアウト漏れ対策の二重 defence）
     window._miniChat = null;
     window._shopChat = null;
     window._shiftCalCtrl = null;
@@ -207,7 +224,9 @@ document.getElementById('loginBtn')?.addEventListener('click', async () => {
   } catch (e) { errEl.textContent = e.message; }
   finally { setLoading(false); }
 });
-document.getElementById('loginPassword')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('loginBtn').click(); });
+['loginShopCode', 'loginUserCode', 'loginPassword'].forEach((id) => {
+  document.getElementById(id)?.addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('loginBtn').click(); });
+});
 document.getElementById('logoutBtn')?.addEventListener('click', async () => { try { await api('/logout', { method: 'POST' }); } catch {} logoutLocal(); });
 document.getElementById('notifBtn')?.addEventListener('click', () => openNotifications());
 
@@ -837,7 +856,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
         try {
           const sd = await api('/shop/staffs');
           const active = (sd.staffs || []).filter((s) => !s.is_resigned);
-          opts = active.map((s) => `<option value="${s.id}">${esc(s.name)}（${s.role === 'employee' ? '社員' : 'バイト'}）</option>`).join('');
+          opts = active.map((s) => `<option value="${s.id}">${esc(s.name)}（${roleLabel(s.role)}）</option>`).join('');
         } catch (err) { toast('スタッフ一覧の取得に失敗', 'error'); return; }
         const addW = openModal(`<i class="bi bi-person-plus"></i> 不足枠に配置 — ${date} ${fmtH(startH)}〜${fmtH(endH)}`,
           `<div class="alert alert-warning py-2 mb-3"><i class="bi bi-exclamation-triangle"></i> この時間帯は<strong>${gap}名</strong>不足中。1名ずつ追加できます。</div>
@@ -1296,7 +1315,7 @@ SCREENS.shifts = function (el) {
       const d = await api(`/shop/summary?start=${start}&end=${end}`);
       if (!d.staff.length) { box.innerHTML = '<div class="text-muted small">確定シフトがありません</div>'; return; }
       box.innerHTML = `<div class="table-wrap"><table class="data-table"><thead><tr><th>氏名</th><th>日</th><th class="t-num">確定</th><th class="t-num">見込</th><th class="t-num">深夜</th><th class="t-num">給与</th></tr></thead>
-        <tbody>${d.staff.map((s) => `<tr><td><div class="staff-cell"><span class="staff-name">${esc(s.name)}</span><span class="staff-sub">${s.role === 'employee' ? '社員' : 'バイト'}</span></div></td><td>${s.days}</td><td class="t-num num">${s.confirmed_hours}h</td><td class="t-num num">${s.projected_hours}h</td><td class="t-num num">${s.night_hours}h</td><td class="t-num num">${yen(s.pay)}</td></tr>`).join('')}
+        <tbody>${d.staff.map((s) => `<tr><td><div class="staff-cell"><span class="staff-name">${esc(s.name)}</span><span class="staff-sub">${roleLabel(s.role)}</span></div></td><td>${s.days}</td><td class="t-num num">${s.confirmed_hours}h</td><td class="t-num num">${s.projected_hours}h</td><td class="t-num num">${s.night_hours}h</td><td class="t-num num">${yen(s.pay)}</td></tr>`).join('')}
         <tr style="font-weight:800;color:var(--indigo-l)"><td>合計</td><td></td><td class="t-num num">${d.total_hours}h</td><td class="t-num num">${d.total_projected_hours}h</td><td></td><td class="t-num num">${yen(d.total_pay)}</td></tr>
         </tbody></table></div>`;
     } catch (e) { box.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`; }
@@ -1424,7 +1443,7 @@ function openAddShiftModal() {
   const defDate = p.start_date || todayStr();
   api('/shop/staffs').then((sd) => {
     const active = (sd.staffs || []).filter((s) => !s.is_resigned);
-    const opts = active.map((s) => `<option value="${s.id}">${esc(s.name)}（${s.role === 'employee' ? '社員' : 'バイト'}）</option>`).join('');
+    const opts = active.map((s) => `<option value="${s.id}">${esc(s.name)}（${roleLabel(s.role)}）</option>`).join('');
     openModal('<i class="bi bi-plus-lg"></i> 手動シフト追加',
       `<label class="form-label" for="adStaff">スタッフ</label><select id="adStaff" class="form-select mb-2">${opts}</select>
        <div class="row">
@@ -1468,7 +1487,7 @@ async function loadStaffList() {
           <span class="dot ${s.role === 'employee' ? 'evening' : 'noon'}"></span>
           <div>
             <strong>${esc(s.name)}</strong> <span class="text-secondary">${esc(s.staff_code)}</span>${s.is_resigned ? badge('退職', 'warning') : ''}
-            <div class="small text-secondary">${s.role === 'employee' ? '社員' : 'アルバイト'} ・ 時給${s.hourly_wage}円 ・ 月${s.min_hours_per_month}-${s.max_hours_per_month}h</div>
+            <div class="small text-secondary">${roleLabel(s.role)} ・ 時給${s.hourly_wage}円 ・ 月${s.min_hours_per_month}-${s.max_hours_per_month}h</div>
           </div>
         </div>
         <div class="flex gap-1">
@@ -1484,21 +1503,45 @@ async function loadStaffList() {
 }
 function showStaffForm(s) {
   const isEdit = !!s;
-  openModal(`<i class="bi bi-person-plus"></i> ${isEdit ? 'スタッフ編集' : 'スタッフ追加'}`,
+  const wrap = openModal(`<i class="bi bi-person-plus"></i> ${isEdit ? 'スタッフ編集' : 'スタッフ追加'}`,
     `<div class="row">
       <div class="col-6"><label class="form-label" for="f_code">コード</label><input id="f_code" class="form-control" value="${s ? esc(s.staff_code) : ''}" ${isEdit ? 'disabled' : ''}></div>
       <div class="col-6"><label class="form-label" for="f_name">氏名</label><input id="f_name" class="form-control" value="${s ? esc(s.name) : ''}"></div>
     </div>
-    <label class="form-label mt-2">ロール</label><select id="f_role" class="form-select"><option value="part_time" ${s && s.role === 'part_time' ? 'selected' : ''}>アルバイト</option><option value="employee" ${s && s.role === 'employee' ? 'selected' : ''}>社員</option></select>
+    <label class="form-label mt-2">ロール</label><select id="f_role" class="form-select"><option value="part_time" ${s && s.role === 'part_time' ? 'selected' : ''}>アルバイト</option><option value="employee" ${s && s.role === 'employee' ? 'selected' : ''}>社員</option><option value="manager" ${s && s.role === 'manager' ? 'selected' : ''}>店舗管理者（店舗権限）</option></select>
     <div class="row mt-2">
       <div class="col-4"><label class="form-label" for="f_wage">時給</label><input id="f_wage" type="number" class="form-control" value="${s ? s.hourly_wage : 1100}"></div>
       <div class="col-4"><label class="form-label" for="f_min">最低h</label><input id="f_min" type="number" class="form-control" value="${s ? s.min_hours_per_month : 0}"></div>
       <div class="col-4"><label class="form-label" for="f_max">上限h</label><input id="f_max" type="number" class="form-control" value="${s ? s.max_hours_per_month : 160}"></div>
     </div>
     <label class="form-label mt-2">ステータス</label><select id="f_resign" class="form-select"><option value="0" ${!s || !s.is_resigned ? 'selected' : ''}>在籍</option><option value="1" ${s && s.is_resigned ? 'selected' : ''}>退職</option></select>
-    <label class="form-label mt-2">パスワード ${isEdit ? '（変更時のみ・8文字以上）' : '（8文字以上・英数字）'}</label><input id="f_pw" class="form-control" placeholder="${isEdit ? '空欄で変更なし' : 'パスワード'}">`,
+    <label class="form-label mt-2">パスワード ${isEdit ? '（変更時のみ・8文字以上）' : '（8文字以上・英数字）'}</label>
+    <input id="f_pw" type="password" class="form-control" placeholder="${isEdit ? '空欄で変更なし' : 'パスワード'}" autocomplete="new-password">
+    <div class="pw-rules" id="pwRules">
+      <span class="pw-rule" data-rule="len"><i class="bi bi-circle"></i>8文字以上</span>
+      <span class="pw-rule" data-rule="alpha"><i class="bi bi-circle"></i>英字を含む</span>
+      <span class="pw-rule" data-rule="digit"><i class="bi bi-circle"></i>数字を含む</span>
+    </div>
+    <div class="form-error" id="f_err"></div>`,
     async (w, close) => {
       const g = (id) => w.querySelector(id).value;
+      const errBox = w.querySelector('#f_err');
+      const showErr = (msg) => {
+        errBox.innerHTML = msg ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(msg)}` : '';
+        if (msg) w.querySelector('#f_pw').classList.add('is-invalid');
+        else w.querySelector('#f_pw').classList.remove('is-invalid');
+      };
+      // クライアント側事前バリデーション（API通信せず即座に回答）
+      const pwVal = g('#f_pw');
+      const pwRequired = !isEdit || pwVal.length > 0;
+      if (pwRequired) {
+        const verr = validatePassword(pwVal);
+        if (verr) { showErr(verr); return; }
+      }
+      // 必須項目
+      if (!isEdit && !g('#f_code')) { showErr('コードを入力してください'); return; }
+      if (!g('#f_name')) { showErr('氏名を入力してください'); return; }
+      showErr('');
       try {
         if (isEdit) {
           await api(`/shop/staffs/${s.id}`, { method: 'PUT', body: JSON.stringify({ name: g('#f_name'), hourly_wage: +g('#f_wage'), min_hours_per_month: +g('#f_min'), max_hours_per_month: +g('#f_max'), is_resigned: !!+g('#f_resign'), password: g('#f_pw') || undefined }) });
@@ -1506,8 +1549,43 @@ function showStaffForm(s) {
           await api('/shop/staffs', { method: 'POST', body: JSON.stringify({ staff_code: g('#f_code'), name: g('#f_name'), password: g('#f_pw'), role: g('#f_role'), hourly_wage: +g('#f_wage'), min_hours_per_month: +g('#f_min'), max_hours_per_month: +g('#f_max') }) });
         }
         close(); toast('保存しました', 'success'); navigateTo('staffs');
-      } catch (e) { toast(e.message, 'error'); }
+      } catch (e) {
+        // APIのエラーメッセージ（例: "パスワードは8文字以上で設定してください"）をインライン表示
+        showErr(e.message || '保存に失敗しました');
+      }
     });
+  // リアルタイム検証: 入力ごとにルールの check/cross を切替
+  const pwInput = wrap.querySelector('#f_pw');
+  const ruleEls = wrap.querySelectorAll('.pw-rule');
+  const updateRules = () => {
+    const v = pwInput.value || '';
+    const checks = {
+      len: v.length >= 8,
+      alpha: /[A-Za-z]/.test(v),
+      digit: /[0-9]/.test(v),
+    };
+    ruleEls.forEach((el) => {
+      const k = el.dataset.rule;
+      const ok = checks[k];
+      el.classList.toggle('ok', !!ok && v.length > 0);
+      el.classList.toggle('ng', !ok && v.length > 0);
+      el.querySelector('i').className = ok ? 'bi bi-check-circle-fill' : 'bi bi-x-circle-fill';
+    });
+  };
+  pwInput?.addEventListener('input', () => {
+    updateRules();
+    wrap.querySelector('#f_err').innerHTML = '';
+    pwInput.classList.remove('is-invalid');
+  });
+  updateRules();
+}
+
+/* クライアント側パスワードバリデーション（src/utils.validate_password と同要件） */
+function validatePassword(pw) {
+  if (!pw || pw.length < 8) return 'パスワードは8文字以上で設定してください';
+  if (!/[A-Za-z]/.test(pw)) return 'パスワードに英字を含めてください';
+  if (!/[0-9]/.test(pw)) return 'パスワードに数字を含めてください';
+  return null;
 }
 function confirmDeleteStaff(staffId, staffName) {
   openModal(`<i class="bi bi-trash text-danger"></i> スタッフ削除`,
@@ -2165,7 +2243,7 @@ SCREENS.adminShopDetail = async function (el) {
     try {
       const [sum, st] = await Promise.all([api(`/admin/shops/summary/${sid}?start=${start}&end=${end}`), api(`/admin/shops/staffs/${sid}`)]);
       const tbl = sum.staff.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>氏名</th><th>日</th><th class="t-num">確定</th><th class="t-num">給与</th></tr></thead><tbody>${sum.staff.map((s) => `<tr><td>${esc(s.name)}</td><td>${s.days}</td><td class="t-num num">${s.confirmed_hours}h</td><td class="t-num num">${yen(s.pay)}</td></tr>`).join('')}<tr style="font-weight:800;color:var(--indigo-l)"><td>合計</td><td></td><td class="t-num num">${sum.total_hours}h</td><td class="t-num num">${yen(sum.total_pay)}</td></tr></tbody></table></div>` : '<div class="small text-secondary">確定シフトなし</div>';
-      const slist = st.staffs.map((s) => `<div class="list-row"><div class="staff-cell"><span class="staff-name">${esc(s.name)}</span><span class="staff-sub">${esc(s.staff_code)} ・ ${s.role === 'employee' ? '社員' : 'バイト'}${s.is_resigned ? ' ・ 退職' : ''}</span></div></div>`).join('');
+      const slist = st.staffs.map((s) => `<div class="list-row"><div class="staff-cell"><span class="staff-name">${esc(s.name)}</span><span class="staff-sub">${esc(s.staff_code)} ・ ${roleLabel(s.role)}${s.is_resigned ? ' ・ 退職' : ''}</span></div></div>`).join('');
       body.innerHTML = sectionTitle('bi-people', `スタッフ（${st.staffs.length}名）`) + slist + `<hr style="border-color:var(--line);margin:16px 0">` + sectionTitle('bi-bar-chart', `集計（${start}〜${end}）`) + tbl;
     } catch (e) { body.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`; }
   }

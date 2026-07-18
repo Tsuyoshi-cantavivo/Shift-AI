@@ -573,7 +573,7 @@ def auto_generate(shop_id, settings, start_date, end_date):
             day_segs = _day_shortage_segments(req_map_for(cur), cov, GRAN)
             if not day_segs:
                 break
-            avail = [s for s in staffs if s["role"] == "employee" and s["id"] not in sw]
+            avail = [s for s in staffs if s["role"] in ("employee", "manager") and s["id"] not in sw]
             if not avail:
                 break
             avail.sort(key=lambda s: minutes_by_staff.get(s["id"], 0))

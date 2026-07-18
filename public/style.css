@@ -287,6 +287,27 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--t-primary); letter-spacing: -
   font-size: 1.6rem; color: #fff; box-shadow: var(--sh-indigo);
 }
 .login-hero h3 { font-weight: 800; letter-spacing: -.02em; }
+
+/* ---- 単一ログインフォーム（縦並び・コンパクト） ---- */
+.login-form { padding: 20px 24px 24px; }
+.login-form .form-field { margin-bottom: 14px; }
+.login-form .form-field:last-of-type { margin-bottom: 6px; }
+.login-form .form-label { font-size: .72rem; margin-bottom: 3px; }
+.login-form .input-group .input-group-text {
+  min-height: 38px; padding: 0 10px; font-size: .82rem;
+}
+.login-form .form-control {
+  min-height: 38px; font-size: .85rem; padding: 6px 10px;
+}
+.login-form .form-control::placeholder { font-size: .78rem; }
+.login-hint {
+  display: flex; align-items: center; gap: 5px;
+  font-size: .72rem; margin: 4px 0 14px;
+  color: var(--t-muted);
+}
+.login-hint i { font-size: .78rem; }
+.login-form .btn-lg { min-height: 42px; font-size: .9rem; margin-top: 4px; }
+
 .divider { display: flex; align-items: center; color: var(--t-muted); }
 .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--line); }
 .divider span { padding: 0 12px; font-size: .75rem; }
@@ -339,6 +360,27 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--t-primary); letter-spacing: -
   background: var(--card-2); border: 1px solid var(--line-2); color: var(--t-muted);
   border-radius: var(--radius);
 }
+
+/* パスワード強度ルール表示（スタッフ追加・編集） */
+.pw-rules { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 6px; }
+.pw-rule {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: .72rem; color: var(--t-muted);
+  transition: var(--dur) var(--ease);
+}
+.pw-rule i { font-size: .8rem; }
+.pw-rule.ok { color: var(--success); }
+.pw-rule.ng { color: var(--danger); }
+/* 入力欄をエラー状態にする */
+.form-control.is-invalid { border-color: var(--danger); box-shadow: 0 0 0 3px rgba(239,68,68,.15); }
+/* モーダル内インラインエラー */
+.form-error {
+  background: rgba(239,68,68,.10); color: var(--danger);
+  border: 1px solid rgba(239,68,68,.35); border-radius: var(--radius);
+  padding: 8px 12px; margin-top: 10px; font-size: .82rem;
+  display: flex; align-items: center; gap: 6px;
+}
+.form-error:empty { display: none; }
 
 /* ---------- 8. Components: Cards ---------- */
 .card-base {
