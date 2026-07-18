@@ -620,8 +620,10 @@ class TestFlow_AuthBoundaries:
             "current_password": "shop123", "new_password": "NewPass1",
         }, headers=auth(tok))
         assert r.status_code == 200
-        # 新パスワードでログイン
-        r = client.post("/api/login", json={"id": "FLOW", "password": "NewPass1"})
+        # 新パスワードでログイン（新仕様: shop_code + user_code + password）
+        # 店主（後方互換）ログイン: user_code に shop_code と同じ値を指定
+        r = client.post("/api/login", json={
+            "shop_code": "FLOW", "user_code": "FLOW", "password": "NewPass1"})
         assert r.status_code == 200
 
     def test_expired_session_rejected(self, client):
