@@ -1,0 +1,6 @@
+# Cloudflare D1 データベース設定
+# wrangler d1 create shift-db 実行後に表示される database_id に置き換えてください
+[[d1_databases]]
+binding = "DB"
+database_name = "shift-db"
+database_id = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"

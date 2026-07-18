@@ -1,0 +1,28 @@
+# 環境変数（API キー等のシークレット）
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# SQLite ローカルDB
+shift.db
+*.db
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Playwright
+.playwright-mcp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# エディタ
+.vscode/
+.idea/

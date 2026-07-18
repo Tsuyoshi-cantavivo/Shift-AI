@@ -1,0 +1,8 @@
+{
+  "name": "shift-saas",
+  "build": {
+    "command": "",
+    "output_directory": "public"
+  },
+  "vars": {}
+}

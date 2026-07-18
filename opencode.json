@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "test-runner": {
+      "type": "local",
+      "command": [".venv/bin/python", "mcp_servers/test_runner.py"],
+      "enabled": true,
+      "env": {}
+    },
+    "playwright": {
+      "type": "local",
+      "command": ["npx", "@playwright/mcp@latest", "--browser", "chromium"],
+      "enabled": true,
+      "env": {}
+    }
+  },
+  "permission": {
+    "bash": {
+      "*.venv/bin/python -m pytest*": "allow",
+      "*.venv/bin/python tests/run_tests.py*": "allow",
+      "*.venv/bin/python mcp_servers/*": "allow",
+      "node --check*": "allow",
+      "npx playwright*": "allow"
+    }
+  }
+}
