@@ -1262,6 +1262,61 @@ def _shop_ctx():
     return g.user, g.user["id"], parse_settings(g.user.get("settings"))
 
 
+def _get_shop_shift_end_time(shop_id):
+    """店舗のシフト終了時刻を取得（shift_hours優先 → shift_patterns → 22:00）。
+
+    「いつでも」希望のデフォルト終了時刻等で使う。
+    """
+    try:
+        shop = query_one("SELECT settings FROM shops WHERE id=?", (shop_id,))
+        if shop:
+            settings = parse_settings(shop["settings"])
+            sh = settings.get("shift_hours") or {}
+            bulk = sh.get("bulk") or {}
+            if bulk.get("end_time"):
+                return bulk["end_time"]
+            # 曜日別設定の場合は最大を探す
+            days = sh.get("days") or {}
+            end_times = [d.get("end_time") for d in days.values() if d.get("end_time")]
+            if end_times:
+                return max(end_times)
+    except Exception:
+        pass
+    # shift_patterns の最遅終了時刻
+    try:
+        rows = query_all("SELECT end_time FROM shift_patterns WHERE shop_id=?", (shop_id,))
+        if rows:
+            return max(r["end_time"] for r in rows if r.get("end_time"))
+    except Exception:
+        pass
+    return "22:00"
+
+
+def _get_shop_shift_start_time(shop_id):
+    """店舗のシフト開始時刻を取得（shift_hours優先 → shift_patterns → 09:00）。"""
+    try:
+        shop = query_one("SELECT settings FROM shops WHERE id=?", (shop_id,))
+        if shop:
+            settings = parse_settings(shop["settings"])
+            sh = settings.get("shift_hours") or {}
+            bulk = sh.get("bulk") or {}
+            if bulk.get("start_time"):
+                return bulk["start_time"]
+            days = sh.get("days") or {}
+            start_times = [d.get("start_time") for d in days.values() if d.get("start_time")]
+            if start_times:
+                return min(start_times)
+    except Exception:
+        pass
+    try:
+        rows = query_all("SELECT start_time FROM shift_patterns WHERE shop_id=?", (shop_id,))
+        if rows:
+            return min(r["start_time"] for r in rows if r.get("start_time"))
+    except Exception:
+        pass
+    return "09:00"
+
+
 def _check_student_only_shift(shop_id, staff_id, start_iso, exclude_id=None):
     """学生アルバイトのみで構成されるシフトになるかをチェック。
 
@@ -1509,7 +1564,9 @@ def shop_my_requests_post():
             # 休希望: 終日扱い（00:00〜23:59）
             end_dt = normalize_iso(sh.get("end_datetime")) or (start_dt[:10] + "T23:59:59")
         elif avail:
-            end_dt = normalize_iso(sh.get("end_datetime")) or (start_dt[:10] + "T22:00:00")
+            # 「いつでも/早番/遅番」: 終了時刻が未指定なら店舗のシフト時間設定から取得
+            shop_end = _get_shop_shift_end_time(staff["shop_id"])
+            end_dt = normalize_iso(sh.get("end_datetime")) or (start_dt[:10] + f"T{shop_end}:00")
         else:
             end_dt = normalize_iso(sh["end_datetime"])
         # 重複チェック（自身の confirmed + 既存希望）。ただし rest 希望は重複OK
@@ -2165,10 +2222,21 @@ def shop_periods_del(pid):
 
 @app.post("/api/shop/shifts/auto")
 def shop_shifts_auto():
+    """AI自動生成。
+
+    body:
+      - dry_run: true ならプレビュー（保存しない）
+      - draft: true ならドラフト保存（status='requested', reason='AIドラフト'）
+              ※ デフォルト: true（即確定しない）
+              ※ false なら即 confirmed で保存（従来動作）
+    """
     shop, shop_id, settings = _shop_ctx()
     body = request.get_json(silent=True) or {}
     start_d, end_d = body.get("start_date"), body.get("end_date")
     dry = bool(body.get("dry_run"))
+    # draft オプション（デフォルト False = 後方互換・即確定）
+    # UI の「ドラフト保存」ボタンから draft=true が明示的に渡される
+    draft = bool(body.get("draft", False))
     if not start_d or not end_d:
         abort(400, description="start_date, end_date が必要です")
     result = shift_engine.auto_generate(shop_id, settings, start_d, end_d)
@@ -2198,10 +2266,15 @@ def shop_shifts_auto():
     # confirmed/modifying/requested を全て削除して再配置
     execute("DELETE FROM shifts WHERE shop_id=? AND status IN ('confirmed','modifying','requested') AND start_datetime>=? AND start_datetime<=?",
             (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
+    # draft モード: confirmed を requested + reason='AIドラフト' で保存（確定通知しない）
+    # 即確定モード: confirmed をそのまま保存（従来通り）
+    insert_status = "requested" if draft else "confirmed"
+    insert_reason_suffix = "" if draft else ""
     placed = set()
     for s in result["confirmed"]:
+        reason = ("AIドラフト: " + s["reason"]) if draft else s["reason"]
         execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason) VALUES (?,?,?,?,?,?,?)",
-                (s["shop_id"], s["staff_id"], s["start"], s["end"], s["break"], s["status"], s["reason"]))
+                (s["shop_id"], s["staff_id"], s["start"], s["end"], s["break"], insert_status, reason))
         placed.add(s["staff_id"])
     # 手動配置の confirmed を再INSERT（auto_generateが再配置したものと重複しないもののみ）
     auto_keys = set((s["staff_id"], s["start"]) for s in result["confirmed"])
@@ -2215,12 +2288,65 @@ def shop_shifts_auto():
             execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason, availability) VALUES (?,?,?,?,?,?,?,?)",
                     (p["shop_id"], p["staff_id"], p["start"], p["end"], p["break"], p["status"], p["reason"], p.get("availability")))
             pending_count += 1
-    for sid in placed:
-        notify(shop_id, sid, "confirmed", "シフトが確定しました", f"{start_d}〜{end_d}のシフトが確定しました。")
-    return jsonify({"ok": True, "confirmed_count": len(result["confirmed"]), "pending_count": pending_count,
+    # 通知は確定時のみ（draft モードでは送らない）
+    if not draft:
+        for sid in placed:
+            notify(shop_id, sid, "confirmed", "シフトが確定しました", f"{start_d}〜{end_d}のシフトが確定しました。")
+    draft_msg = "（ドラフト保存・確定前）" if draft else ""
+    return jsonify({"ok": True, "draft": draft,
+                    "confirmed_count": len(result["confirmed"]), "pending_count": pending_count,
                     "minutes_by_staff": result["minutes_by_staff"], "shortage": result.get("shortage", []),
                     "warnings": result.get("warnings", []),
-                    "explanations": result.get("explanations", [])})
+                    "explanations": result.get("explanations", []),
+                    "message": f"AI生成完了{draft_msg}。{'確定ボタンで通知が飛びます。' if draft else 'スタッフに確定通知を送信しました。'}"})
+
+
+@app.post("/api/shop/shifts/finalize")
+def shop_shifts_finalize():
+    """ドラフト状態のシフト（reason LIKE 'AIドラフト%'）を一括確定。
+
+    body:
+      - start_date, end_date: 期間指定
+    戻り値: {ok, finalized, notified_staff, message}
+    """
+    shop, shop_id, _ = _shop_ctx()
+    body = request.get_json(silent=True) or {}
+    start_d = body.get("start_date")
+    end_d = body.get("end_date")
+    if not start_d or not end_d:
+        abort(400, description="start_date, end_date が必要です")
+    # 対象のドラフトを取得（AIドラフト理由のもの）
+    drafts = query_all(
+        "SELECT id, staff_id, start_datetime, end_datetime FROM shifts "
+        "WHERE shop_id=? AND status='requested' AND reason LIKE 'AIドラフト%' "
+        "AND start_datetime>=? AND start_datetime<=?",
+        (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
+    if not drafts:
+        # 念のため status='requested' で「スタッフ希望」以外のものも確定候補に
+        drafts = query_all(
+            "SELECT id, staff_id, start_datetime, end_datetime FROM shifts "
+            "WHERE shop_id=? AND status='requested' "
+            "AND (reason LIKE 'AI%' OR reason LIKE '%ドラフト%') "
+            "AND start_datetime>=? AND start_datetime<=?",
+            (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
+    if not drafts:
+        return jsonify({"ok": True, "finalized": 0, "notified_staff": 0,
+                        "message": "確定対象のドラフトがありません。AI生成を実行してください。"})
+    # 一括確定
+    finalized_staff = set()
+    for d in drafts:
+        execute("UPDATE shifts SET status='confirmed' WHERE id=? AND shop_id=?",
+                (d["id"], shop_id))
+        finalized_staff.add(d["staff_id"])
+    # スタッフに通知
+    for sid in finalized_staff:
+        notify(shop_id, sid, "confirmed", "シフトが確定しました", f"{start_d}〜{end_d}のシフトが確定しました。")
+    # 店舗にも通知
+    notify(shop_id, None, "info", "シフト確定完了",
+           f"{start_d}〜{end_d}のシフトを {len(drafts)} 件確定し、{len(finalized_staff)} 名に通知しました。")
+    return jsonify({"ok": True, "finalized": len(drafts),
+                    "notified_staff": len(finalized_staff),
+                    "message": f"{len(drafts)} 件のシフトを確定し、{len(finalized_staff)} 名のスタッフに通知しました。"})
 
 
 # --- シフト コピー ---
@@ -2885,7 +3011,9 @@ def staff_requests_post():
         # 秒なし datetime を正規化（"YYYY-MM-DDTHH:MM" → "...HH:MM:00"）
         start_dt = normalize_iso(sh["start_datetime"])
         if avail:
-            end_dt = normalize_iso(sh.get("end_datetime")) or (start_dt[:10] + "T22:00:00")
+            # 店舗のシフト時間設定から終了時刻デフォルトを取得
+            shop_end = _get_shop_shift_end_time(staff["shop_id"])
+            end_dt = normalize_iso(sh.get("end_datetime")) or (start_dt[:10] + f"T{shop_end}:00")
         else:
             end_dt = normalize_iso(sh["end_datetime"])
         # 同一スタッフの同日内で、確定シフト OR 既に出している希望と時間帯が重なる場合はスキップ（重複防止）

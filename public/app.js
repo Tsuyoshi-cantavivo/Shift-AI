@@ -1575,17 +1575,33 @@ async function runGenerate() {
       `<div class="explanation-list">${explanations}</div>`) +
     card(sectionTitle('bi-people', 'スタッフ別 想定労働時間') + `<div class="preview-grid">${topList || '<span class="small text-secondary">なし</span>'}</div>`) +
     card(
-      `<div class="text-center">
-        <button class="btn btn-primary btn-lg" style="min-width:260px" id="confirmGen"><i class="bi bi-check-lg"></i> この内容で確定</button>
-        <div class="small text-secondary mt-2">※確定すると期間内の「確定シフト」を上書きします</div>
+      `<div class="gen-actions">
+        <button class="btn btn-primary btn-lg" style="min-width:260px" id="saveDraftBtn"><i class="bi bi-pencil-square"></i> ドラフト保存（後で調整）</button>
+        <div class="small text-secondary mt-2 mb-3">ドラフト保存後、シフト画面で調整 → 「確定」ボタンでスタッフに通知</div>
+        <details class="mt-2">
+          <summary class="small text-secondary cursor-pointer">即確定（従来動作）</summary>
+          <button class="btn btn-outline-secondary btn-sm mt-2" id="confirmGen"><i class="bi bi-check-lg"></i> 今すぐ確定・通知</button>
+        </details>
       </div>`);
 
-    document.getElementById('confirmGen')?.addEventListener('click', async () => {
-      setLoading(true, 'シフトを確定中...');
+    // ドラフト保存（推奨・デフォルト）
+    document.getElementById('saveDraftBtn')?.addEventListener('click', async () => {
+      setLoading(true, 'ドラフト保存中...');
       try {
-        const d = await api('/shop/shifts/auto', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end }) });
+        const d = await api('/shop/shifts/auto', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end, draft: true }) });
         setLoading(false);
-        toast(`${d.confirmed_count}件のシフトを確定しました`, 'success');
+        toast(`${d.confirmed_count}件をドラフト保存しました（確定前）`, 'success');
+        navigateTo('shifts');
+      } catch (e) { setLoading(false); toast(e.message, 'error'); }
+    });
+    // 即確定（従来動作・折りたたみ）
+    document.getElementById('confirmGen')?.addEventListener('click', async () => {
+      if (!confirm('今すぐ確定して全スタッフに通知を送りますか？\n（推奨: 一旦ドラフト保存して調整→確定）')) return;
+      setLoading(true, 'シフトを確定・通知中...');
+      try {
+        const d = await api('/shop/shifts/auto', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end, draft: false }) });
+        setLoading(false);
+        toast(`${d.confirmed_count}件のシフトを確定・通知しました`, 'success');
         navigateTo('shifts');
       } catch (e) { setLoading(false); toast(e.message, 'error'); }
     });
@@ -1608,7 +1624,8 @@ SCREENS.shifts = function (el) {
         <button class="btn btn-light flex-grow" id="addShiftBtn"><i class="bi bi-plus-lg"></i> 手動追加</button>
         <button class="btn btn-light flex-grow" id="copyBtn"><i class="bi bi-files"></i> コピー</button>
         <button class="btn btn-light" id="printBtn"><i class="bi bi-printer"></i></button>
-        <button class="btn btn-ai" id="autoConfirmBtn" title="調整待ち（requested）のシフトを自動調整で一括確定"><i class="bi bi-check2-all"></i> 一括確定</button>
+        <button class="btn btn-success flex-grow" id="finalizeDraftBtn" title="AIドラフト保存中のシフトを一括確定して通知"><i class="bi bi-megaphone"></i> ドラフトを確定・通知</button>
+        <button class="btn btn-ai" id="autoConfirmBtn" title="調整待ち（requested）のシフトを自動調整で一括確定"><i class="bi bi-check2-all"></i> 一括確定（auto）</button>
       </div>
       <div id="genResult" class="mt-2"></div>`) +
     card(sectionTitle('bi-calendar3', '確定シフトカレンダー') + `<div id="calMount"></div>`) +
@@ -1684,6 +1701,21 @@ SCREENS.shifts = function (el) {
     openPrintView(start, end);
   });
   document.getElementById('openCreq2')?.addEventListener('click', () => openChangeRequests());
+
+  // ドラフト保存中のシフトを一括確定して通知
+  document.getElementById('finalizeDraftBtn')?.addEventListener('click', async () => {
+    const { start, end } = cur();
+    if (!start || !end) { toast('期間を指定してください', 'error'); return; }
+    if (!confirm(`${start} 〜 ${end} のドラフト保存シフトを確定し、全スタッフに通知しますか？\n\n・シフトが「確定」状態になります\n・スタッフに「シフト確定」通知が届きます`)) return;
+    setLoading(true, '確定・通知中...');
+    try {
+      const r = await api('/shop/shifts/finalize', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end }) });
+      setLoading(false);
+      toast(r.message || `${r.finalized}件を確定しました`, 'success');
+      loadSummary();
+      refreshShortage();
+    } catch (e) { setLoading(false); toast(e.message, 'error'); }
+  });
 
   // 調整待ち（requested）を一括で自動調整して確定
   document.getElementById('autoConfirmBtn')?.addEventListener('click', async () => {

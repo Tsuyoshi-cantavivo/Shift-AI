@@ -482,6 +482,7 @@ def auto_generate(shop_id, settings, start_date, end_date):
             "  SELECT sh.staff_id, sh.start_datetime, sh.end_datetime, sh.availability, s.role "
             "  FROM shifts sh JOIN staffs s ON sh.staff_id=s.id "
             "  WHERE sh.shop_id=? AND sh.status='requested' AND sh.start_datetime>=? AND sh.start_datetime<=?"
+            "    AND (sh.reason NOT LIKE 'AIドラフト%' OR sh.reason IS NULL)"
             ") ORDER BY start_datetime",
             (shop_id, start_date + "T00:00:00", end_date + "T23:59:59",
              shop_id, start_date + "T00:00:00", end_date + "T23:59:59"))
@@ -489,7 +490,8 @@ def auto_generate(shop_id, settings, start_date, end_date):
         # wish_history テーブルが未作成の場合のフォールバック（後方互換）
         requests = query_all(
             "SELECT sh.*, s.role FROM shifts sh JOIN staffs s ON sh.staff_id=s.id "
-            "WHERE sh.shop_id=? AND sh.status='requested' AND sh.start_datetime>=? AND sh.start_datetime<=?",
+            "WHERE sh.shop_id=? AND sh.status='requested' AND sh.start_datetime>=? AND sh.start_datetime<=? "
+            "AND (sh.reason NOT LIKE 'AIドラフト%' OR sh.reason IS NULL)",
             (shop_id, start_date + "T00:00:00", end_date + "T23:59:59"))
 
     # 休希望（availability='rest'）のスタッフ/日付のセットを作成
