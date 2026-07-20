@@ -378,6 +378,7 @@ const NAV_DEFS = {
     { key: 'shifts', icon: 'bi-calendar3', label: 'シフト', mobile: true },
     { key: 'aiGenerate', icon: 'bi-stars', label: 'AIシフト作成', mobile: true, ai: true },
     { key: 'staffs', icon: 'bi-people', label: 'スタッフ管理', mobile: true },
+    { key: 'myshift', icon: 'bi-person-calendar', label: 'マイシフト・希望' },
     { key: 'requests', icon: 'bi-inbox', label: '希望休管理' },
     { key: 'analytics', icon: 'bi-graph-up-arrow', label: '人件費分析' },
     { key: 'notifications', icon: 'bi-bell', label: '通知' },
@@ -1396,14 +1397,26 @@ function renderGenerateTab(body, p) {
     const [patsD, settingsD] = await Promise.all([api('/shop/patterns'), api('/shop/settings')]);
     const active = (staffsD.staffs || []).filter((s) => !s.is_resigned);
     const s = settingsD.settings || {};
+    // シフト時間設定から代表的な時間帯を表示（bulk_mode優先、無ければ月-金の平均）
+    let shiftHoursLabel = '未設定';
+    try {
+      const sh = await api('/shop/shift-hours');
+      if (sh.bulk_mode) {
+        const b = sh.bulk || {};
+        shiftHoursLabel = b.is_closed ? '定休（一括）' : `${b.start_time || '?'}-${b.end_time || '?'}`;
+      } else {
+        const mon = (sh.days || {})['1'] || {};
+        shiftHoursLabel = mon.is_closed ? '月曜定休' : `${mon.start_time || '?'}-${mon.end_time || '?'}`;
+      }
+    } catch {}
     document.getElementById('genConditions').innerHTML =
       card(sectionTitle('bi-clipboard-data', 'AIに考慮させる条件') +
         `<div class="gen-condition"><span class="gen-condition-label">稼働スタッフ</span><span class="gen-condition-value">${active.length}名</span></div>
-         <div class="gen-condition"><span class="gen-condition-label">　社員 / アルバイト</span><span class="gen-condition-value">${active.filter((x) => x.role === 'employee').length}名 / ${active.filter((x) => x.role === 'part_time').length}名</span></div>
+         <div class="gen-condition"><span class="gen-condition-label">　社員 / アルバイト</span><span class="gen-condition-value">${active.filter((x) => x.role === 'employee').length}名 / ${active.filter((x) => x.role === 'part_time' || x.role === 'student').length}名</span></div>
          <div class="gen-condition"><span class="gen-condition-label">1日最低勤務時間</span><span class="gen-condition-value">${s.min_daily_hours || 4}時間</span></div>
          <div class="gen-condition"><span class="gen-condition-label">最大連勤（推奨）</span><span class="gen-condition-value">${s.max_consecutive_days || 6}日</span></div>
          <div class="gen-condition"><span class="gen-condition-label">深夜割増率</span><span class="gen-condition-value">${s.night_premium_rate || 1.25}倍</span></div>
-         <div class="gen-condition"><span class="gen-condition-label">営業時間</span><span class="gen-condition-value">${esc(s.business_hours || '未設定')}</span></div>
+         <div class="gen-condition"><span class="gen-condition-label">シフト時間（代表）</span><span class="gen-condition-value">${esc(shiftHoursLabel)}</span></div>
          <div class="gen-condition"><span class="gen-condition-label">シフト時間帯</span><span class="gen-condition-value">${(patsD.patterns || []).length}枠</span></div>`);
   }).catch(() => {});
 
@@ -1955,6 +1968,168 @@ function showFixedShiftModal(staffId, staffName) {
   });
 }
 
+/* ---------- MyShift (店舗管理者自身のシフト・希望) ---------- */
+SCREENS.myshift = async function (el) {
+  const tok = navToken();
+  el.innerHTML = pageHead('マイシフト・希望', 'bi-person-calendar', 'あなた自身のシフトと希望管理') +
+    card(`<div id="myInfo"><div class="text-secondary small">読み込み中...</div></div>`) +
+    card(sectionTitle('bi-calendar-check', '確定シフト（来月まで）') +
+      `<div id="myShifts"><div class="text-secondary small">読み込み中...</div></div>`) +
+    card(sectionTitle('bi-pencil-square', '希望の提出', `<button class="btn btn-primary btn-sm ms-2" id="addMyReqBtn"><i class="bi bi-plus-lg"></i> 希望を追加</button>`) +
+      `<div id="myReqs"><div class="text-secondary small">読み込み中...</div></div>`) +
+    card(sectionTitle('bi-clock-history', '希望履歴（全件）') +
+      `<div id="myWishes"><div class="text-secondary small">読み込み中...</div></div>`);
+  document.getElementById('addMyReqBtn')?.addEventListener('click', () => openMyReqModal(loadMyData));
+  await loadMyData();
+
+  async function loadMyData() {
+    if (!isAlive(tok) || !el.isConnected) return;
+    try {
+      const [me, shifts, reqs, wishes] = await Promise.all([
+        api('/shop/me'),
+        api(`/shop/my-shifts?start=${todayStr().slice(0, 8) + '01'}&end=${plusMonths(2)}`),
+        api('/shop/my-requests'),
+        api('/shop/my-wishes'),
+      ]);
+      if (!isAlive(tok) || !el.isConnected) return;
+      // 自身の情報
+      const infoBox = document.getElementById('myInfo');
+      if (infoBox) {
+        if (!me.staff) {
+          safeSetHTML(infoBox, `<div class="info-box"><i class="bi bi-info-circle"></i> このアカウントは旧仕様の店主ログインのため、希望提出機能は利用できません。manager ロールのスタッフとしてログインしてください。</div>`);
+          // 各セクションも無効表示
+          ['myShifts', 'myReqs', 'myWishes'].forEach((id) => {
+            const b = document.getElementById(id);
+            if (b) safeSetHTML(b, '<div class="text-secondary small">—</div>');
+          });
+          return;
+        }
+        safeSetHTML(infoBox, `<div class="my-info-row"><i class="bi bi-person-badge"></i> <strong>${esc(me.staff.name)}</strong> (${esc(me.staff.staff_code)}) ・ ${roleLabel(me.staff.role)} ・ 時給${me.staff.hourly_wage}円</div>`);
+      }
+      // 確定シフト
+      const shiftsBox = document.getElementById('myShifts');
+      if (shiftsBox) {
+        const list = (shifts.shifts || []).filter((s) => s.status === 'confirmed');
+        if (!list.length) {
+          safeSetHTML(shiftsBox, '<div class="text-secondary small">確定シフトはありません</div>');
+        } else {
+          safeSetHTML(shiftsBox, `<div class="table-wrap"><table class="data-table"><thead><tr><th>日付</th><th>曜日</th><th>時間</th><th>休憩</th></tr></thead><tbody>${list.map((s) => {
+            const d = s.start_datetime.slice(0, 10);
+            return `<tr><td class="num">${esc(d)}</td><td>${wdName(d)}</td><td class="num">${hm(s.start_datetime)} - ${hm(s.end_datetime)}</td><td class="num">${(s.break_time_minutes || 0)}分</td></tr>`;
+          }).join('')}</tbody></table></div>`);
+        }
+      }
+      // 提出済み希望（pending）
+      const reqsBox = document.getElementById('myReqs');
+      if (reqsBox) {
+        const list = reqs.requests || [];
+        if (!list.length) {
+          safeSetHTML(reqsBox, '<div class="text-secondary small">提出中の希望はありません。「希望を追加」ボタンから提出できます。</div>');
+        } else {
+          safeSetHTML(reqsBox, `<div class="list-rows">${list.map((r) => `
+            <div class="list-row">
+              <div><strong class="num">${esc(r.start_datetime.slice(0, 16).replace('T', ' '))}</strong> 〜 <span class="num">${esc((r.end_datetime || '').slice(11, 16))}</span>
+                ${r.availability ? badge({ any: 'いつでも', morning: '早番', evening: '遅番' }[r.availability] || '柔軟', 'info') : badge('希望', 'warning')}
+                <div class="small text-secondary">${esc(r.reason || '')}</div>
+              </div>
+              <button class="btn btn-sm btn-outline-danger" data-del="${r.id}"><i class="bi bi-x"></i></button>
+            </div>`).join('')}</div>`);
+          reqsBox.querySelectorAll('[data-del]').forEach((b) => b?.addEventListener('click', async () => {
+            if (!confirm('この希望を削除しますか？')) return;
+            try {
+              await api(`/shop/my-requests/${b.dataset.del}`, { method: 'DELETE' });
+              toast('削除しました', 'success');
+              loadMyData();
+            } catch (e) { toast(e.message, 'error'); }
+          }));
+        }
+      }
+      // 希望履歴
+      const wishesBox = document.getElementById('myWishes');
+      if (wishesBox) {
+        const list = wishes.wishes || [];
+        if (!list.length) {
+          safeSetHTML(wishesBox, '<div class="text-secondary small">希望履歴はありません</div>');
+        } else {
+          safeSetHTML(wishesBox, `<div class="table-wrap"><table class="data-table"><thead><tr><th>日付</th><th>時間</th><th>種別</th><th>提出日時</th></tr></thead><tbody>${list.slice(0, 30).map((w) => `
+            <tr><td class="num">${esc((w.start_datetime || '').slice(0, 10))}</td>
+            <td class="num">${hm(w.start_datetime)} - ${hm(w.end_datetime)}</td>
+            <td>${w.availability ? badge({ any: 'いつでも', morning: '早番', evening: '遅番' }[w.availability] || '柔軟', 'info') : badge('時間指定', 'muted')}</td>
+            <td class="num small">${esc((w.submitted_at || '').replace('T', ' ').slice(0, 16))}</td></tr>`).join('')}</tbody></table></div>`);
+        }
+      }
+    } catch (e) {
+      if (!isAlive(tok) || !el.isConnected) return;
+      toast(e.message, 'error');
+    }
+  }
+};
+
+function openMyReqModal(onDone) {
+  const today = todayStr();
+  openModal('<i class="bi bi-pencil-square"></i> 希望シフトを提出',
+    `<p class="small text-secondary mb-2">日時指定か「柔軟希望（早番/遅番/いつでも）」で提出できます。<br>提出後も「希望休管理」で編集でき、AI自動生成に反映されます。</p>
+     <div class="row mb-2">
+       <div class="col-6"><label class="form-label" for="myRqDate">日付</label><input type="date" id="myRqDate" class="form-control" value="${today}"></div>
+       <div class="col-3"><label class="form-label" for="myRqSt">開始</label><input type="time" id="myRqSt" class="form-control" value="09:00"></div>
+       <div class="col-3"><label class="form-label" for="myRqEt">終了</label><input type="time" id="myRqEt" class="form-control" value="18:00"></div>
+     </div>
+     <label class="form-check">
+       <input type="checkbox" id="myRqFlex" class="form-check-input">
+       <span class="form-check-label">柔軟希望（時間は目安・シフト時間内で調整可）</span>
+     </label>
+     <div id="myRqFlexBox" style="display:none">
+       <label class="form-label mt-2">希望時間帯</label>
+       <select id="myRqAvail" class="form-select">
+         <option value="any">いつでもOK</option>
+         <option value="morning">早番（朝〜昼）</option>
+         <option value="evening">遅番（夕方〜夜）</option>
+       </select>
+     </div>
+     <div class="form-error mt-2" id="myRqErr"></div>`,
+    async (w, close) => {
+      const errBox = w.querySelector('#myRqErr');
+      const showErr = (m) => { if (errBox) errBox.innerHTML = m ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(m)}` : ''; };
+      showErr('');
+      const date = w.querySelector('#myRqDate').value;
+      const st = w.querySelector('#myRqSt').value;
+      const et = w.querySelector('#myRqEt').value;
+      const flex = w.querySelector('#myRqFlex').checked;
+      const avail = flex ? w.querySelector('#myRqAvail').value : null;
+      if (!date) return showErr('日付を入力してください');
+      if (!flex && (!st || !et)) return showErr('開始・終了時刻を入力してください');
+      const start_iso = `${date}T${st || '00:00'}:00`;
+      const end_iso = `${date}T${et || '23:59'}:00`;
+      try {
+        const body = { shifts: [{ start_datetime: start_iso, end_datetime: end_iso }] };
+        if (avail) body.shifts[0].availability = avail;
+        const r = await api('/shop/my-requests', { method: 'POST', body: JSON.stringify(body) });
+        close();
+        toast(r.message || '提出しました', 'success');
+        onDone?.();
+      } catch (e) {
+        showErr(e.message || '提出に失敗しました');
+      }
+    });
+  // 柔軟希望チェックで時間入力を無効化
+  setTimeout(() => {
+    const wrap = document.querySelector('.modal-overlay:last-child');
+    if (!wrap) return;
+    const flex = wrap.querySelector('#myRqFlex');
+    const flexBox = wrap.querySelector('#myRqFlexBox');
+    const stInput = wrap.querySelector('#myRqSt');
+    const etInput = wrap.querySelector('#myRqEt');
+    flex?.addEventListener('change', () => {
+      const on = flex.checked;
+      if (flexBox) flexBox.style.display = on ? 'block' : 'none';
+      if (stInput) stInput.disabled = on;
+      if (etInput) etInput.disabled = on;
+      if (on) { stInput?.classList.add('disabled-input'); etInput?.classList.add('disabled-input'); }
+      else { stInput?.classList.remove('disabled-input'); etInput?.classList.remove('disabled-input'); }
+    });
+  }, 50);
+}
+
 /* ---------- Requests (希望休管理) ---------- */
 SCREENS.requests = async function (el) {
   const tok = navToken();
@@ -2430,7 +2605,7 @@ function renderShopTab(body) {
          <div class="col-6"><label class="form-label" for="setMaxConsec">最大連勤（推奨）</label><input id="setMaxConsec" type="number" class="form-control" value="${s.max_consecutive_days ?? 6}"></div>
          <div class="col-6"><label class="form-label" for="setNightRate">深夜割増率</label><input id="setNightRate" type="number" step="0.05" class="form-control" value="${s.night_premium_rate ?? 1.25}"></div>
          <div class="col-6"><label class="form-label" for="setTransport">1日交通費(円)</label><input id="setTransport" type="number" class="form-control" value="${s.transport_per_day ?? 0}"></div>
-         <div class="col-6"><label class="form-label" for="setBiz">営業時間</label><input id="setBiz" class="form-control" value="${esc(s.business_hours || '')}" placeholder="9:00-22:00"></div>
+         <div class="col-12"><label class="form-label">シフト時間設定</label><div class="info-box"><i class="bi bi-info-circle"></i> シフト作成可能な時間帯は <strong>「シフト時間設定」タブ</strong> で管理しています（曜日別・祝日対応）。</div></div>
          <div class="col-6"><label class="form-label" for="setPeriodMode">デフォルト期間</label><select id="setPeriodMode" class="form-select"><option value="half" ${(s.period_mode || 'half') === 'half' ? 'selected' : ''}>半月ごと</option><option value="month" ${s.period_mode === 'month' ? 'selected' : ''}>1ヶ月ごと</option></select></div>
        </div>
        <button class="btn btn-primary btn-lg w-full mt-3" id="saveSettings">保存</button>
@@ -2443,7 +2618,7 @@ function renderShopTab(body) {
             default_hourly_wage: +body.querySelector('#setWage').value, min_daily_hours: +body.querySelector('#setMinDaily').value,
             max_daily_hours: +body.querySelector('#setMaxDaily').value, max_consecutive_days: +body.querySelector('#setMaxConsec').value,
             night_premium_rate: +body.querySelector('#setNightRate').value, transport_per_day: +body.querySelector('#setTransport').value,
-            business_hours: body.querySelector('#setBiz').value, period_mode: body.querySelector('#setPeriodMode').value } }) });
+            period_mode: body.querySelector('#setPeriodMode').value } }) });
         toast('保存しました', 'success'); currentUser.shop_name = body.querySelector('#setShopName').value;
       } catch (e) { toast(e.message, 'error'); }
     });

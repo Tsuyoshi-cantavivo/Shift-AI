@@ -963,6 +963,28 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 .holiday-list .list-row { padding: 8px 10px; }
 .holiday-row { font-size: .9rem; }
 
+/* マイシフト画面 */
+.my-info-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  background: var(--card-2);
+  border-radius: var(--radius);
+  font-size: .92rem;
+}
+
+/* 共通: 情報ボックス（営業時間→シフト時間設定 等） */
+.info-box {
+  padding: 10px 12px;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: .85rem;
+  color: var(--t-muted);
+}
+.info-box i { color: var(--indigo-l); margin-right: 4px; }
+
 /* 日本の祝日プレビュー・チップ */
 .holiday-preview {
   padding: 10px;

@@ -929,6 +929,185 @@ def shop_password():
 
 
 # ===========================================================
+# 店舗管理者自身の希望・シフト（manager も勤務者として希望を出せる）
+# ===========================================================
+def _resolve_my_staff():
+    """shop ロールでログイン中の manager の staffs 行を返す。
+    旧店主ログイン（shops.id を user_id とする後方互換）の場合は None を返す。"""
+    auth_h = request.headers.get("Authorization", "")
+    token = auth_h[7:] if auth_h.startswith("Bearer ") else ""
+    session = query_one("SELECT * FROM sessions WHERE token=?", (token,))
+    if not session:
+        return None
+    user_id = session.get("user_id")
+    shop_id = session.get("shop_id")
+    if not user_id or not shop_id:
+        return None
+    # user_id が staffs.id として存在するか確認（旧店主ログイン対策）
+    return query_one("SELECT * FROM staffs WHERE id=? AND shop_id=?", (user_id, shop_id))
+
+
+@app.get("/api/shop/me")
+def shop_me():
+    """shop ロールでログイン中のユーザー自身のスタッフ情報を返す。
+    manager ロールでログインしている場合はそのスタッフ情報、
+    旧店主ログインの場合は staff=null を返す。"""
+    require_auth(["shop"])
+    staff = _resolve_my_staff()
+    if not staff:
+        return jsonify({"staff": None})
+    return jsonify({"staff": {
+        "id": staff["id"], "shop_id": staff["shop_id"],
+        "staff_code": staff["staff_code"], "name": staff["name"],
+        "role": staff["role"], "hourly_wage": staff["hourly_wage"],
+    }})
+
+
+@app.post("/api/shop/my-requests")
+def shop_my_requests_post():
+    """店舗管理者が自分自身の希望シフトを提出。
+
+    staff/requests と同様に wish_history にも保存され、
+    AI自動生成入力の対象となる。
+    """
+    require_auth(["shop"])
+    staff = _resolve_my_staff()
+    if not staff:
+        abort(400, description="このアカウントでは希望提出ができません（manager ロールでログインしてください）")
+    body = request.get_json(silent=True) or {}
+    items = body.get("shifts") or []
+    if not items:
+        abort(400, description="希望がありません")
+    shop_id = staff["shop_id"]
+    first_day = items[0]["start_datetime"][:10]
+    period = query_one(
+        "SELECT * FROM shift_request_periods WHERE shop_id=? AND is_active=1 AND start_date<=? AND end_date>=? ORDER BY deadline DESC LIMIT 1",
+        (shop_id, first_day, first_day))
+    if not period:
+        abort(400, description="この日程は募集期間外です")
+    if period["deadline"] < jst_today().strftime("%Y-%m-%d"):
+        abort(400, description=f"締切（{period['deadline']}）を過ぎています")
+    count = 0
+    skipped_overlap = 0
+    for sh in items:
+        avail = sh.get("availability")
+        start_dt = normalize_iso(sh["start_datetime"])
+        if avail:
+            end_dt = normalize_iso(sh.get("end_datetime")) or (start_dt[:10] + "T22:00:00")
+        else:
+            end_dt = normalize_iso(sh["end_datetime"])
+        # 重複チェック（自身の confirmed + 既存希望）
+        overlap, _conflict = _check_staff_overlap(
+            shop_id, staff["id"], start_dt, end_dt, include_requested=True)
+        if overlap:
+            skipped_overlap += 1
+            continue
+        if avail:
+            execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, status, reason, availability) VALUES (?,?,?,?,?,?,?)",
+                    (shop_id, staff["id"], start_dt, end_dt, "requested", "管理者希望(柔軟)", avail))
+        else:
+            work = minutes_between(start_dt, end_dt)
+            execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason) VALUES (?,?,?,?,?,?,?)",
+                    (shop_id, staff["id"], start_dt, end_dt, compute_break_minutes(work), "requested", "管理者希望提出"))
+        # wish_history にも保存
+        existing = None
+        try:
+            existing = query_one(
+                "SELECT id FROM wish_history WHERE staff_id=? AND start_datetime=? AND end_datetime=?",
+                (staff["id"], start_dt, end_dt))
+        except Exception:
+            pass
+        if existing is None:
+            try:
+                execute("INSERT INTO wish_history (shop_id, staff_id, start_datetime, end_datetime, availability, note) VALUES (?,?,?,?,?,?)",
+                        (shop_id, staff["id"], start_dt, end_dt, avail, "管理者希望提出"))
+            except Exception:
+                pass
+        count += 1
+    msg = f"{count}件の希望を提出しました"
+    if skipped_overlap:
+        msg += f"（{skipped_overlap}件は同日時間重複でスキップ）"
+    return jsonify({"ok": True, "submitted": count, "skipped_overlap": skipped_overlap, "message": msg})
+
+
+@app.get("/api/shop/my-requests")
+def shop_my_requests_list():
+    """自分の（pending中の）希望一覧。"""
+    require_auth(["shop"])
+    staff = _resolve_my_staff()
+    if not staff:
+        return jsonify({"requests": []})
+    rows = query_all(
+        "SELECT id, start_datetime, end_datetime, status, reason, availability "
+        "FROM shifts WHERE staff_id=? AND status='requested' ORDER BY start_datetime",
+        (staff["id"],))
+    return jsonify({"requests": rows})
+
+
+@app.delete("/api/shop/my-requests/<int:rid>")
+def shop_my_requests_del(rid):
+    """自分の希望を削除。"""
+    require_auth(["shop"])
+    staff = _resolve_my_staff()
+    if not staff:
+        abort(404, description="このアカウントでは希望削除ができません")
+    sh = query_one(
+        "SELECT start_datetime, end_datetime FROM shifts "
+        "WHERE id=? AND staff_id=? AND status='requested'",
+        (rid, staff["id"]))
+    if sh:
+        execute("DELETE FROM shifts WHERE id=? AND staff_id=? AND status='requested'",
+                (rid, staff["id"]))
+        try:
+            execute("DELETE FROM wish_history WHERE staff_id=? AND start_datetime=? AND end_datetime=?",
+                    (staff["id"], sh["start_datetime"], sh["end_datetime"]))
+        except Exception:
+            pass
+    return jsonify({"ok": True})
+
+
+@app.get("/api/shop/my-wishes")
+def shop_my_wishes():
+    """自分の希望履歴（確定/却下問わず全て）。"""
+    require_auth(["shop"])
+    staff = _resolve_my_staff()
+    if not staff:
+        return jsonify({"wishes": []})
+    try:
+        rows = query_all(
+            "SELECT id, start_datetime, end_datetime, availability, submitted_at, note "
+            "FROM wish_history WHERE staff_id=? "
+            "ORDER BY start_datetime DESC LIMIT 200",
+            (staff["id"],))
+    except Exception:
+        rows = []
+    return jsonify({"wishes": rows})
+
+
+@app.get("/api/shop/my-shifts")
+def shop_my_shifts():
+    """自分の確定シフトを取得（今月〜来月など期間指定可）。"""
+    require_auth(["shop"])
+    staff = _resolve_my_staff()
+    if not staff:
+        return jsonify({"shifts": []})
+    start_d = request.args.get("start")
+    end_d = request.args.get("end")
+    sql = ("SELECT id, shop_id, staff_id, start_datetime, end_datetime, "
+           "break_time_minutes, status, reason FROM shifts WHERE staff_id=?")
+    params = [staff["id"]]
+    if start_d:
+        sql += " AND start_datetime>=?"
+        params.append(start_d + "T00:00:00")
+    if end_d:
+        sql += " AND start_datetime<=?"
+        params.append(end_d + "T23:59:59")
+    sql += " ORDER BY start_datetime"
+    rows = query_all(sql, tuple(params))
+    return jsonify({"shifts": rows})
+
+
+# ===========================================================
 # シフト時間設定（シフト作成可能時間）
 # ===========================================================
 # 設定スキーマ (shops.settings.shift_hours):
