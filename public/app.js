@@ -378,7 +378,7 @@ const NAV_DEFS = {
     { key: 'shifts', icon: 'bi-calendar3', label: 'シフト', mobile: true },
     { key: 'aiGenerate', icon: 'bi-stars', label: 'AIシフト作成', mobile: true, ai: true },
     { key: 'staffs', icon: 'bi-people', label: 'スタッフ管理', mobile: true },
-    { key: 'myshift', icon: 'bi-person-calendar', label: 'マイシフト・希望' },
+    { key: 'myshift', icon: 'bi-calendar2-check', label: 'マイシフト・希望' },
     { key: 'requests', icon: 'bi-inbox', label: '希望休管理' },
     { key: 'analytics', icon: 'bi-graph-up-arrow', label: '人件費分析' },
     { key: 'notifications', icon: 'bi-bell', label: '通知' },
@@ -1971,7 +1971,7 @@ function showFixedShiftModal(staffId, staffName) {
 /* ---------- MyShift (店舗管理者自身のシフト・希望) ---------- */
 SCREENS.myshift = async function (el) {
   const tok = navToken();
-  el.innerHTML = pageHead('マイシフト・希望', 'bi-person-calendar', 'あなた自身のシフトと希望管理') +
+  el.innerHTML = pageHead('マイシフト・希望', 'bi-calendar2-check', 'あなた自身のシフトと希望管理') +
     card(`<div id="myInfo"><div class="text-secondary small">読み込み中...</div></div>`) +
     card(sectionTitle('bi-calendar-check', '確定シフト（来月まで）') +
       `<div id="myShifts"><div class="text-secondary small">読み込み中...</div></div>`) +
@@ -1984,83 +1984,97 @@ SCREENS.myshift = async function (el) {
 
   async function loadMyData() {
     if (!isAlive(tok) || !el.isConnected) return;
+    let me, shifts, reqs, wishes;
     try {
-      const [me, shifts, reqs, wishes] = await Promise.all([
+      [me, shifts, reqs, wishes] = await Promise.all([
         api('/shop/me'),
         api(`/shop/my-shifts?start=${todayStr().slice(0, 8) + '01'}&end=${plusMonths(2)}`),
         api('/shop/my-requests'),
         api('/shop/my-wishes'),
       ]);
-      if (!isAlive(tok) || !el.isConnected) return;
-      // 自身の情報
-      const infoBox = document.getElementById('myInfo');
-      if (infoBox) {
-        if (!me.staff) {
-          safeSetHTML(infoBox, `<div class="info-box"><i class="bi bi-info-circle"></i> このアカウントは旧仕様の店主ログインのため、希望提出機能は利用できません。manager ロールのスタッフとしてログインしてください。</div>`);
-          // 各セクションも無効表示
-          ['myShifts', 'myReqs', 'myWishes'].forEach((id) => {
-            const b = document.getElementById(id);
-            if (b) safeSetHTML(b, '<div class="text-secondary small">—</div>');
-          });
-          return;
-        }
-        safeSetHTML(infoBox, `<div class="my-info-row"><i class="bi bi-person-badge"></i> <strong>${esc(me.staff.name)}</strong> (${esc(me.staff.staff_code)}) ・ ${roleLabel(me.staff.role)} ・ 時給${me.staff.hourly_wage}円</div>`);
-      }
-      // 確定シフト
-      const shiftsBox = document.getElementById('myShifts');
-      if (shiftsBox) {
-        const list = (shifts.shifts || []).filter((s) => s.status === 'confirmed');
-        if (!list.length) {
-          safeSetHTML(shiftsBox, '<div class="text-secondary small">確定シフトはありません</div>');
-        } else {
-          safeSetHTML(shiftsBox, `<div class="table-wrap"><table class="data-table"><thead><tr><th>日付</th><th>曜日</th><th>時間</th><th>休憩</th></tr></thead><tbody>${list.map((s) => {
-            const d = s.start_datetime.slice(0, 10);
-            return `<tr><td class="num">${esc(d)}</td><td>${wdName(d)}</td><td class="num">${hm(s.start_datetime)} - ${hm(s.end_datetime)}</td><td class="num">${(s.break_time_minutes || 0)}分</td></tr>`;
-          }).join('')}</tbody></table></div>`);
-        }
-      }
-      // 提出済み希望（pending）
-      const reqsBox = document.getElementById('myReqs');
-      if (reqsBox) {
-        const list = reqs.requests || [];
-        if (!list.length) {
-          safeSetHTML(reqsBox, '<div class="text-secondary small">提出中の希望はありません。「希望を追加」ボタンから提出できます。</div>');
-        } else {
-          safeSetHTML(reqsBox, `<div class="list-rows">${list.map((r) => `
-            <div class="list-row">
-              <div><strong class="num">${esc(r.start_datetime.slice(0, 16).replace('T', ' '))}</strong> 〜 <span class="num">${esc((r.end_datetime || '').slice(11, 16))}</span>
-                ${r.availability ? badge({ any: 'いつでも', morning: '早番', evening: '遅番' }[r.availability] || '柔軟', 'info') : badge('希望', 'warning')}
-                <div class="small text-secondary">${esc(r.reason || '')}</div>
-              </div>
-              <button class="btn btn-sm btn-outline-danger" data-del="${r.id}"><i class="bi bi-x"></i></button>
-            </div>`).join('')}</div>`);
-          reqsBox.querySelectorAll('[data-del]').forEach((b) => b?.addEventListener('click', async () => {
-            if (!confirm('この希望を削除しますか？')) return;
-            try {
-              await api(`/shop/my-requests/${b.dataset.del}`, { method: 'DELETE' });
-              toast('削除しました', 'success');
-              loadMyData();
-            } catch (e) { toast(e.message, 'error'); }
-          }));
-        }
-      }
-      // 希望履歴
-      const wishesBox = document.getElementById('myWishes');
-      if (wishesBox) {
-        const list = wishes.wishes || [];
-        if (!list.length) {
-          safeSetHTML(wishesBox, '<div class="text-secondary small">希望履歴はありません</div>');
-        } else {
-          safeSetHTML(wishesBox, `<div class="table-wrap"><table class="data-table"><thead><tr><th>日付</th><th>時間</th><th>種別</th><th>提出日時</th></tr></thead><tbody>${list.slice(0, 30).map((w) => `
-            <tr><td class="num">${esc((w.start_datetime || '').slice(0, 10))}</td>
-            <td class="num">${hm(w.start_datetime)} - ${hm(w.end_datetime)}</td>
-            <td>${w.availability ? badge({ any: 'いつでも', morning: '早番', evening: '遅番' }[w.availability] || '柔軟', 'info') : badge('時間指定', 'muted')}</td>
-            <td class="num small">${esc((w.submitted_at || '').replace('T', ' ').slice(0, 16))}</td></tr>`).join('')}</tbody></table></div>`);
-        }
-      }
     } catch (e) {
       if (!isAlive(tok) || !el.isConnected) return;
-      toast(e.message, 'error');
+      // 権限エラー等の場合は分かりやすい案内を表示
+      const msg = e.message || '';
+      const infoBox = document.getElementById('myInfo');
+      if (infoBox) {
+        if (msg.includes('権限') || msg.includes('403')) {
+          safeSetHTML(infoBox, `<div class="info-box"><i class="bi bi-exclamation-triangle text-warning"></i> <strong>この機能を利用できません</strong><br>マイシフト・希望は <strong>店舗管理者（manager）アカウント</strong>でログイン中のみ利用できます。<br>現在のログイン権限では利用できない、または旧仕様の店主アカウントの可能性があります。<br><br><span class="small">エラー詳細: ${esc(msg)}</span></div>`);
+        } else {
+          safeSetHTML(infoBox, `<div class="info-box text-danger"><i class="bi bi-exclamation-circle"></i> ${esc(msg)}</div>`);
+        }
+      }
+      ['myShifts', 'myReqs', 'myWishes'].forEach((id) => {
+        const b = document.getElementById(id);
+        if (b) safeSetHTML(b, '<div class="text-secondary small">—</div>');
+      });
+      return;
+    }
+    if (!isAlive(tok) || !el.isConnected) return;
+    // 自身の情報
+    const infoBox = document.getElementById('myInfo');
+    if (infoBox) {
+      if (!me.staff) {
+        safeSetHTML(infoBox, `<div class="info-box"><i class="bi bi-info-circle text-primary"></i> <strong>希望提出機能について</strong><br>このアカウントは <strong>旧仕様の店主ログイン</strong>（shops テーブルのパスワード直接利用）のため、希望提出機能は利用できません。<br>新仕様の <strong>manager ロール</strong> でログインすると、シフト希望を出せるようになります（システム管理者にご相談ください）。</div>`);
+        ['myShifts', 'myReqs', 'myWishes'].forEach((id) => {
+          const b = document.getElementById(id);
+          if (b) safeSetHTML(b, '<div class="text-secondary small">このアカウントでは利用できません</div>');
+        });
+        return;
+      }
+      safeSetHTML(infoBox, `<div class="my-info-row"><i class="bi bi-person-badge"></i> <strong>${esc(me.staff.name)}</strong> (${esc(me.staff.staff_code)}) ・ ${roleLabel(me.staff.role)} ・ 時給${me.staff.hourly_wage}円</div>`);
+    }
+    // 確定シフト
+    const shiftsBox = document.getElementById('myShifts');
+    if (shiftsBox) {
+      const list = (shifts.shifts || []).filter((s) => s.status === 'confirmed');
+      if (!list.length) {
+        safeSetHTML(shiftsBox, '<div class="text-secondary small">確定シフトはありません</div>');
+      } else {
+        safeSetHTML(shiftsBox, `<div class="table-wrap"><table class="data-table"><thead><tr><th>日付</th><th>曜日</th><th>時間</th><th>休憩</th></tr></thead><tbody>${list.map((s) => {
+          const d = s.start_datetime.slice(0, 10);
+          return `<tr><td class="num">${esc(d)}</td><td>${wdName(d)}</td><td class="num">${hm(s.start_datetime)} - ${hm(s.end_datetime)}</td><td class="num">${(s.break_time_minutes || 0)}分</td></tr>`;
+        }).join('')}</tbody></table></div>`);
+      }
+    }
+    // 提出済み希望（pending）
+    const reqsBox = document.getElementById('myReqs');
+    if (reqsBox) {
+      const list = reqs.requests || [];
+      if (!list.length) {
+        safeSetHTML(reqsBox, '<div class="text-secondary small">提出中の希望はありません。「希望を追加」ボタンから提出できます。</div>');
+      } else {
+        safeSetHTML(reqsBox, `<div class="list-rows">${list.map((r) => `
+          <div class="list-row">
+            <div><strong class="num">${esc(r.start_datetime.slice(0, 16).replace('T', ' '))}</strong> 〜 <span class="num">${esc((r.end_datetime || '').slice(11, 16))}</span>
+              ${r.availability ? badge({ any: 'いつでも', morning: '早番', evening: '遅番' }[r.availability] || '柔軟', 'info') : badge('希望', 'warning')}
+              <div class="small text-secondary">${esc(r.reason || '')}</div>
+            </div>
+            <button class="btn btn-sm btn-outline-danger" data-del="${r.id}"><i class="bi bi-x"></i></button>
+          </div>`).join('')}</div>`);
+        reqsBox.querySelectorAll('[data-del]').forEach((b) => b?.addEventListener('click', async () => {
+          if (!confirm('この希望を削除しますか？')) return;
+          try {
+            await api(`/shop/my-requests/${b.dataset.del}`, { method: 'DELETE' });
+            toast('削除しました', 'success');
+            loadMyData();
+          } catch (e) { toast(e.message, 'error'); }
+        }));
+      }
+    }
+    // 希望履歴
+    const wishesBox = document.getElementById('myWishes');
+    if (wishesBox) {
+      const list = wishes.wishes || [];
+      if (!list.length) {
+        safeSetHTML(wishesBox, '<div class="text-secondary small">希望履歴はありません</div>');
+      } else {
+        safeSetHTML(wishesBox, `<div class="table-wrap"><table class="data-table"><thead><tr><th>日付</th><th>時間</th><th>種別</th><th>提出日時</th></tr></thead><tbody>${list.slice(0, 30).map((w) => `
+          <tr><td class="num">${esc((w.start_datetime || '').slice(0, 10))}</td>
+          <td class="num">${hm(w.start_datetime)} - ${hm(w.end_datetime)}</td>
+          <td>${w.availability ? badge({ any: 'いつでも', morning: '早番', evening: '遅番' }[w.availability] || '柔軟', 'info') : badge('時間指定', 'muted')}</td>
+          <td class="num small">${esc((w.submitted_at || '').replace('T', ' ').slice(0, 16))}</td></tr>`).join('')}</tbody></table></div>`);
+      }
     }
   }
 };
