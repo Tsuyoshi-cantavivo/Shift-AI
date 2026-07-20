@@ -2263,9 +2263,24 @@ def shop_shifts_auto():
         "WHERE shop_id=? AND status='confirmed' AND start_datetime>=? AND start_datetime<=? "
         "AND reason IN ({})".format(",".join(["?"] * len(MANUAL_REASONS))),
         (shop_id, start_d + "T00:00:00", end_d + "T23:59:59", *MANUAL_REASONS))
-    # confirmed/modifying/requested を全て削除して再配置
-    execute("DELETE FROM shifts WHERE shop_id=? AND status IN ('confirmed','modifying','requested') AND start_datetime>=? AND start_datetime<=?",
+    # ★【ドラフトモード時のスタッフ希望保護】
+    # 従来は confirmed/modifying/requested を全て削除していたが、
+    # これだと「希望表管理」のカードが消えてしまう（ユーザー体験悪い）。
+    # ドラフト保存時は:
+    #   - confirmed (手動配置以外), modifying を削除
+    #   - AIドラフト系の requested を削除（前回生成をクリア）
+    #   - ★スタッフ希望（requested, reason NOT LIKE 'AIドラフト%'）は保持
+    # 即確定時は従来通り全削除（シフトを完全に置き換える）。
+    if draft:
+        execute(
+            "DELETE FROM shifts WHERE shop_id=? AND "
+            "(status IN ('confirmed','modifying') "
+            " OR (status='requested' AND (reason LIKE 'AIドラフト%' OR reason LIKE 'AI生成%'))) "
+            "AND start_datetime>=? AND start_datetime<=?",
             (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
+    else:
+        execute("DELETE FROM shifts WHERE shop_id=? AND status IN ('confirmed','modifying','requested') AND start_datetime>=? AND start_datetime<=?",
+                (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
     # draft モード: confirmed を requested + reason='AIドラフト' で保存（確定通知しない）
     # 即確定モード: confirmed をそのまま保存（従来通り）
     insert_status = "requested" if draft else "confirmed"
@@ -2305,6 +2320,9 @@ def shop_shifts_auto():
 def shop_shifts_finalize():
     """ドラフト状態のシフト（reason LIKE 'AIドラフト%'）を一括確定。
 
+    また、期間内のスタッフ希望（status='requested'）も confirmed に変換する。
+    これにより「確定」ボタンを押すと希望表カードが消える（シフトが完全確定）。
+
     body:
       - start_date, end_date: 期間指定
     戻り値: {ok, finalized, notified_staff, message}
@@ -2315,38 +2333,38 @@ def shop_shifts_finalize():
     end_d = body.get("end_date")
     if not start_d or not end_d:
         abort(400, description="start_date, end_date が必要です")
-    # 対象のドラフトを取得（AIドラフト理由のもの）
-    drafts = query_all(
-        "SELECT id, staff_id, start_datetime, end_datetime FROM shifts "
-        "WHERE shop_id=? AND status='requested' AND reason LIKE 'AIドラフト%' "
+    # 期間内の全 requested を取得（AIドラフト + スタッフ希望 両方）
+    targets = query_all(
+        "SELECT id, staff_id, start_datetime, end_datetime, reason FROM shifts "
+        "WHERE shop_id=? AND status='requested' "
         "AND start_datetime>=? AND start_datetime<=?",
         (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
-    if not drafts:
-        # 念のため status='requested' で「スタッフ希望」以外のものも確定候補に
-        drafts = query_all(
-            "SELECT id, staff_id, start_datetime, end_datetime FROM shifts "
-            "WHERE shop_id=? AND status='requested' "
-            "AND (reason LIKE 'AI%' OR reason LIKE '%ドラフト%') "
-            "AND start_datetime>=? AND start_datetime<=?",
-            (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
-    if not drafts:
+    if not targets:
         return jsonify({"ok": True, "finalized": 0, "notified_staff": 0,
-                        "message": "確定対象のドラフトがありません。AI生成を実行してください。"})
-    # 一括確定
+                        "message": "確定対象のシフトがありません。AI生成（ドラフト保存）を実行してください。"})
+    # 全て confirmed に変換
     finalized_staff = set()
-    for d in drafts:
-        execute("UPDATE shifts SET status='confirmed' WHERE id=? AND shop_id=?",
-                (d["id"], shop_id))
-        finalized_staff.add(d["staff_id"])
+    finalized_count = 0
+    for t in targets:
+        # AIドラフトの reason は「AIドラフト: ...」なので、確定時に整理
+        new_reason = t["reason"]
+        if t["reason"] and t["reason"].startswith("AIドラフト: "):
+            new_reason = t["reason"][len("AIドラフト: "):]  # プレフィックス除去
+        elif t["reason"] and t["reason"].startswith("AIドラフト"):
+            new_reason = "AI自動生成"
+        execute("UPDATE shifts SET status='confirmed', reason=? WHERE id=? AND shop_id=?",
+                (new_reason, t["id"], shop_id))
+        finalized_staff.add(t["staff_id"])
+        finalized_count += 1
     # スタッフに通知
     for sid in finalized_staff:
         notify(shop_id, sid, "confirmed", "シフトが確定しました", f"{start_d}〜{end_d}のシフトが確定しました。")
     # 店舗にも通知
     notify(shop_id, None, "info", "シフト確定完了",
-           f"{start_d}〜{end_d}のシフトを {len(drafts)} 件確定し、{len(finalized_staff)} 名に通知しました。")
-    return jsonify({"ok": True, "finalized": len(drafts),
+           f"{start_d}〜{end_d}のシフトを {finalized_count} 件確定し、{len(finalized_staff)} 名に通知しました。")
+    return jsonify({"ok": True, "finalized": finalized_count,
                     "notified_staff": len(finalized_staff),
-                    "message": f"{len(drafts)} 件のシフトを確定し、{len(finalized_staff)} 名のスタッフに通知しました。"})
+                    "message": f"{finalized_count} 件のシフトを確定し、{len(finalized_staff)} 名のスタッフに通知しました。"})
 
 
 # --- シフト コピー ---

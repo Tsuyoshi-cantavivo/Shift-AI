@@ -129,8 +129,11 @@ class TestFinalize:
         assert r.status_code == 200
         assert r.get_json()["finalized"] == 0
 
-    def test_finalize_does_not_touch_staff_requests(self, client):
-        """スタッフ希望（reason='スタッフ希望'）は確定対象外。"""
+    def test_finalize_includes_staff_requests(self, client):
+        """確定時には期間内のスタッフ希望も含めて全て confirmed にする。
+
+        これにより「希望表カード」が確定後に消える（シフト完全確定）。
+        """
         shop_id, emp1, _ = self._setup_draft()
         # スタッフ希望も混ぜる
         dbmod.execute(
@@ -142,16 +145,16 @@ class TestFinalize:
             "start_date": MON, "end_date": TUE,
         }, headers=auth(tok))
         assert r.status_code == 200
-        # 月曜のドラフトのみ確定
+        # 月曜のドラフトも火曜のスタッフ希望も両方 confirmed になる
         mon_drafts = dbmod.query_all(
-            "SELECT status FROM shifts WHERE shop_id=? AND start_datetime LIKE ? AND status='confirmed'",
+            "SELECT status FROM shifts WHERE shop_id=? AND start_datetime LIKE ?",
             (shop_id, f"{MON}%"))
-        assert len(mon_drafts) >= 1
-        # 火曜のスタッフ希望は requested のまま
+        assert all(r["status"] == "confirmed" for r in mon_drafts)
         tue_staff_req = dbmod.query_all(
             "SELECT status FROM shifts WHERE shop_id=? AND start_datetime LIKE ? AND reason=?",
             (shop_id, f"{TUE}%", "スタッフ希望提出"))
-        assert all(r["status"] == "requested" for r in tue_staff_req)
+        # スタッフ希望も confirmed に変換されている（希望表カードが消える）
+        assert all(r["status"] == "confirmed" for r in tue_staff_req)
 
 
 class TestEngineExcludesDrafts:

@@ -2261,7 +2261,12 @@ SCREENS.requests = async function (el) {
         api('/shop/staffs'),
       ]);
       if (!isAlive(tok) || !el.isConnected) return;
-      const reqs = (shiftsD.shifts || []).filter((s) => s.status === 'requested');
+      // ★AIドラフト（reason LIKE 'AIドラフト%'）は「スタッフ希望」ではないので除外
+      // ドラフトは「シフト画面」で確認でき、スタッフ希望は「希望表管理」で確認する
+      const reqs = (shiftsD.shifts || []).filter((s) =>
+        s.status === 'requested' &&
+        !(s.reason || '').startsWith('AIドラフト') &&
+        !(s.reason || '').startsWith('AI生成'));
       const staffs = staffsD.staffs || [];
       const staffMap = {};
       staffs.forEach((s) => staffMap[s.id] = s);
