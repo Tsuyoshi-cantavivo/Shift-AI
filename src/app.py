@@ -799,11 +799,165 @@ def admin_debug_db_schema():
         role_stats = query_all("SELECT role, COUNT(*) as cnt FROM staffs GROUP BY role")
     except Exception as e:
         role_stats = [{"role": "(error)", "cnt": 0, "error": str(e)}]
+    # shop_holidays テーブルの存在確認
+    try:
+        holiday_table = query_all("SELECT name FROM sqlite_master WHERE name='shop_holidays'")
+        has_holidays = len(holiday_table) > 0
+    except Exception:
+        has_holidays = False
     return jsonify({
         "staffs_schema": schema,
         "role_distribution": role_stats,
         "supports_student_role": "student" in schema.lower(),
+        "has_shop_holidays_table": has_holidays,
     })
+
+
+@app.post("/api/admin/db/migrate")
+def admin_db_migrate():
+    """本番DBを最新スキーマにマイグレーション。
+
+    - staffs テーブルに 'student' ロールを許可（TABLE 再構築）
+    - shop_holidays テーブルが無ければ作成
+    - 各店舗に manager ロールのスタッフが無ければ、shops.password_hash を
+      引き継いだ manager を自動作成（旧仕様 → 新仕様への救済）
+    """
+    require_auth(["admin"])
+    import sqlite3 as _sqlite3
+    log = []
+    # 1. staffs テーブルの schema 確認
+    try:
+        rows = query_all("SELECT sql FROM sqlite_master WHERE name='staffs'")
+        cur_schema = rows[0]["sql"] if rows else ""
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"staffs テーブルの取得に失敗: {e}"}), 500
+
+    needs_rebuild = "student" not in cur_schema.lower()
+    if needs_rebuild:
+        log.append("staffs テーブルを 'student' ロール対応版に再構築します...")
+        conn = db_module_get_conn()
+        try:
+            cur = conn.cursor()
+            # バックアップ
+            cur.execute("DROP TABLE IF EXISTS staffs_backup")
+            cur.execute("CREATE TABLE staffs_backup AS SELECT * FROM staffs")
+            # 新スキーマで再作成（'student' 含む）
+            cur.execute("""
+                CREATE TABLE staffs_new (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  shop_id INTEGER NOT NULL,
+                  staff_code TEXT NOT NULL,
+                  password_hash TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  role TEXT DEFAULT 'part_time'
+                    CHECK(role IN ('employee','part_time','manager','student')),
+                  hourly_wage INTEGER DEFAULT 1000,
+                  min_hours_per_month INTEGER DEFAULT 0,
+                  max_hours_per_month INTEGER DEFAULT 160,
+                  is_resigned INTEGER DEFAULT 0,
+                  created_at TEXT DEFAULT (datetime('now')),
+                  UNIQUE(shop_id, staff_code),
+                  FOREIGN KEY (shop_id) REFERENCES shops(id)
+                )
+            """)
+            # データコピー
+            cur.execute("""
+                INSERT INTO staffs_new (id, shop_id, staff_code, password_hash, name, role,
+                                       hourly_wage, min_hours_per_month, max_hours_per_month,
+                                       is_resigned, created_at)
+                SELECT id, shop_id, staff_code, password_hash, name, role,
+                       hourly_wage, min_hours_per_month, max_hours_per_month,
+                       is_resigned, created_at FROM staffs
+            """)
+            # 入れ替え
+            cur.execute("DROP TABLE staffs")
+            cur.execute("ALTER TABLE staffs_new RENAME TO staffs")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_staffs_shop ON staffs(shop_id)")
+            conn.commit()
+            log.append("✓ staffs テーブルを再構築しました（student ロール対応）")
+        except Exception as e:
+            conn.rollback()
+            log.append(f"✗ staffs 再構築失敗: {e}")
+            return jsonify({"ok": False, "error": str(e), "log": log}), 500
+        finally:
+            try: conn.close()
+            except Exception: pass
+    else:
+        log.append("✓ staffs テーブルは既に 'student' ロール対応済み")
+
+    # 2. shop_holidays テーブル確認
+    try:
+        holiday_rows = query_all("SELECT name FROM sqlite_master WHERE name='shop_holidays'")
+        if not holiday_rows:
+            conn = db_module_get_conn()
+            try:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS shop_holidays (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      shop_id INTEGER NOT NULL,
+                      holiday_date TEXT NOT NULL,
+                      note TEXT,
+                      UNIQUE(shop_id, holiday_date),
+                      FOREIGN KEY (shop_id) REFERENCES shops(id)
+                    )
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_holidays_shop ON shop_holidays(shop_id, holiday_date)")
+                conn.commit()
+                log.append("✓ shop_holidays テーブルを新規作成しました")
+            finally:
+                try: conn.close()
+                except Exception: pass
+        else:
+            log.append("✓ shop_holidays テーブルは存在します")
+    except Exception as e:
+        log.append(f"⚠ shop_holidays 確認/作成でエラー: {e}")
+
+    # 3. 各店舗に manager スタッフが無ければ shops.password_hash を引き継いで作成
+    try:
+        shops = query_all("SELECT id, shop_code, shop_name, password_hash FROM shops")
+        auto_created = 0
+        for shop in shops:
+            existing = query_one(
+                "SELECT id FROM staffs WHERE shop_id=? AND role='manager'",
+                (shop["id"],))
+            if existing:
+                continue
+            # manager スタッフを自動作成（PW引き継ぎ）
+            try:
+                execute(
+                    "INSERT INTO staffs (shop_id, staff_code, password_hash, name, role, "
+                    "hourly_wage, min_hours_per_month, max_hours_per_month) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (shop["id"], "manager", shop["password_hash"],
+                     shop["shop_name"] + " 店主", "manager", 2000, 0, 200))
+                auto_created += 1
+                log.append(f"✓ 店舗 '{shop['shop_code']}' に manager スタッフを自動作成（PW引継ぎ）")
+            except Exception as e:
+                log.append(f"⚠ 店舗 '{shop['shop_code']}' の manager 作成スキップ: {e}")
+        if auto_created == 0:
+            log.append("✓ 全店舗に manager スタッフが存在します")
+    except Exception as e:
+        log.append(f"⚠ manager 自動作成でエラー: {e}")
+
+    # 最終状態を確認
+    try:
+        final = query_all("SELECT sql FROM sqlite_master WHERE name='staffs'")
+        final_schema = final[0]["sql"] if final else ""
+    except Exception:
+        final_schema = ""
+    return jsonify({
+        "ok": True,
+        "log": log,
+        "migrated_staffs_table": needs_rebuild,
+        "final_schema": final_schema,
+        "supports_student_role": "student" in final_schema.lower(),
+    })
+
+
+def db_module_get_conn():
+    """db モジュル経由で生のコネクションを取得（マイグレーション用）。"""
+    import db as _db
+    return _db.get_conn()
 
 
 @app.put("/api/admin/shops/<int:sid>/staffs/<int:staff_id>/password")

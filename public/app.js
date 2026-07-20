@@ -3002,9 +3002,77 @@ SCREENS.staffSettings = function (el) {
    ============================================================ */
 SCREENS.adminHome = function (el) {
   el.innerHTML = pageHead('システム管理者', 'bi-shield-lock', currentUser.name) +
-    card(`<button class="btn btn-primary btn-lg w-full" id="goShops"><i class="bi bi-shop"></i> 店舗一覧へ</button>`);
+    card(`<button class="btn btn-primary btn-lg w-full mb-2" id="goShops"><i class="bi bi-shop"></i> 店舗一覧へ</button>
+      <button class="btn btn-light btn-lg w-full" id="dbMaintBtn"><i class="bi bi-database-check"></i> データベース状態確認・更新</button>`);
   document.getElementById('goShops')?.addEventListener('click', () => navigateTo('adminShops'));
+  document.getElementById('dbMaintBtn')?.addEventListener('click', () => openDbMaintenanceModal());
 };
+
+function openDbMaintenanceModal() {
+  const w = openModal('<i class="bi bi-database-check"></i> データベース状態確認・更新',
+    `<div id="dbStatus"><div class="text-secondary small">確認中...</div></div>`,
+    null, { saveLabel: '閉じる' });
+  // 状態取得
+  api('/admin/debug/db-schema').then((d) => {
+    const box = w.querySelector('#dbStatus');
+    if (!box) return;
+    const student = d.supports_student_role;
+    const holidays = d.has_shop_holidays_table;
+    const allOk = student && holidays;
+    safeSetHTML(box, `
+      <div class="${allOk ? 'info-box' : 'info-box'}" style="border-color:${allOk ? 'var(--success)' : 'var(--danger)'}">
+        <div class="mb-2"><strong>現在のデータベース状態</strong></div>
+        <div>• student ロール対応: ${student ? '<span class="text-success">✓ 対応済み</span>' : '<span class="text-danger">✗ 未対応（要更新）</span>'}</div>
+        <div>• shop_holidays テーブル: ${holidays ? '<span class="text-success">✓ 存在</span>' : '<span class="text-danger">✗ 未作成</span>'}</div>
+      </div>
+      ${!allOk ? `
+        <div class="alert alert-warning mt-3">
+          <strong>⚠ データベースが古い状態です。</strong><br>
+          新機能（学生アルバイト・祝日機能等）が使えません。<br>
+          下の「スキーマを最新化」ボタンで修正できます。
+        </div>
+        <button class="btn btn-primary w-full mt-2" id="runMigrationBtn"><i class="bi bi-arrow-repeat"></i> スキーマを最新化する</button>
+        <div id="migrationResult" class="mt-2"></div>
+      ` : `
+        <div class="alert alert-success mt-3">
+          ✓ データベースは最新です。追加の操作は不要です。
+        </div>
+      `}
+      <details class="mt-3">
+        <summary class="small text-secondary cursor-pointer">技術詳細</summary>
+        <pre class="small mt-2" style="white-space:pre-wrap;word-break:break-all">${esc(d.staffs_schema || '')}</pre>
+        <div class="small mt-2">role 分布:</div>
+        <pre class="small">${esc(JSON.stringify(d.role_distribution, null, 2))}</pre>
+      </details>`);
+    const btn = w.querySelector('#runMigrationBtn');
+    if (btn) {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="bi bi-hourglass-split"></i> 実行中...';
+        const resultBox = w.querySelector('#migrationResult');
+        try {
+          const r = await api('/admin/db/migrate', { method: 'POST', body: JSON.stringify({}) });
+          if (resultBox) {
+            safeSetHTML(resultBox, `
+              <div class="alert alert-success">
+                <strong>✓ マイグレーション完了</strong>
+                <pre class="small mt-2" style="white-space:pre-wrap">${esc((r.log || []).join('\n'))}</pre>
+              </div>`);
+          }
+          toast('データベースを最新化しました', 'success');
+        } catch (e) {
+          if (resultBox) {
+            safeSetHTML(resultBox, `<div class="alert alert-danger">エラー: ${esc(e.message)}</div>`);
+          }
+          toast(e.message, 'error');
+        }
+      });
+    }
+  }).catch((e) => {
+    const box = w.querySelector('#dbStatus');
+    if (box) safeSetHTML(box, `<div class="text-danger small">${esc(e.message)}</div>`);
+  });
+}
 SCREENS.adminShops = async function (el) {
   el.innerHTML = pageHead('店舗一覧', 'bi-shop') +
     card(`<div class="flex justify-between items-center mb-3">${sectionTitle('bi-shop', '店舗一覧')}<button class="btn btn-primary btn-sm" id="addShopBtn"><i class="bi bi-plus-lg"></i></button></div><div id="shopList"></div>`);
