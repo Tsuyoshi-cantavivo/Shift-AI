@@ -220,10 +220,23 @@ function showLogin() {
   document.getElementById('loginView')?.classList.remove('d-none');
   document.getElementById('appView')?.classList.add('d-none');
 }
+
+// 起動時・ログイン時に /api/me を叩いて正確な権限情報を取得
+async function refreshMyStaffInfo() {
+  if (!authToken) { window._myStaffInfo = null; return; }
+  try {
+    const d = await api('/me');
+    window._myStaffInfo = d.staff_info || null;
+    setActiveNav();
+  } catch { window._myStaffInfo = null; }
+}
+
 function showApp() {
   document.getElementById('loginView')?.classList.add('d-none');
   document.getElementById('appView')?.classList.remove('d-none');
   renderNav();
+  // 自分の権限情報を正確に取得（非同期・画面遷移は待たない）
+  refreshMyStaffInfo();
   // 店舗の場合は期間・営業時間を事前取得してから画面へ
   if (currentRole === 'shop') {
     Promise.all([ensurePeriod(), ensureBusinessHours()]).then(() => navigateTo(defaultScreen()));
@@ -430,15 +443,24 @@ function setActiveNav() {
   const label = defs.find((i) => i.key === currentScreen)?.label || 'ShiftAI';
   const titleEl = document.getElementById('headerTitle');
   if (titleEl) {
-    // 現在の権限表示を末尾に付与（debug用・見やすさのため）
-    const roleDisp = currentRole === 'shop'
-      ? (currentUser?.role === 'manager' ? '【店舗管理者】' : '【店舗】')
-      : currentRole === 'admin' ? '【システム管理者】'
-      : currentRole === 'staff' ? `【スタッフ${currentUser?.role ? ':' + roleLabel(currentUser.role) : ''}】`
-      : '';
+    // 現在の権限を正確に判定して表示
+    let roleDisp = '';
+    if (currentRole === 'shop') {
+      // /api/me の is_manager フラグで正確に判定（未取得時は shop_name から推定）
+      const isMgr = window._myStaffInfo?.is_manager === true;
+      const hasStaff = !!window._myStaffInfo;
+      if (isMgr) roleDisp = '【店舗管理者】';
+      else if (hasStaff) roleDisp = `【店舗(${roleLabel(window._myStaffInfo.role)})】`;
+      else roleDisp = '【店舗（旧仕様）】';
+    } else if (currentRole === 'admin') {
+      roleDisp = '【システム管理者】';
+    } else if (currentRole === 'staff') {
+      roleDisp = `【スタッフ:${roleLabel(currentUser?.role)}】`;
+    }
     titleEl.textContent = label + (roleDisp ? ' ' + roleDisp : '');
   }
 }
+
 
 function navigateTo(screen) {
   // 画面遷移トークンをインクリメント → 前画面の async 処理が isAlive(tok) で自我判断できる

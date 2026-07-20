@@ -612,7 +612,24 @@ def logout():
 @app.get("/api/me")
 def me():
     role, user, _ = require_auth(["admin", "shop", "staff"])
-    return jsonify({"role": role, "user": user})
+    result = {"role": role, "user": user}
+    # shop ロールの場合は manager ロールかどうか、staff 情報も併せて返す
+    # （UI で「店舗管理者」vs「旧仕様店主」を正確に区別するため）
+    if role == "shop":
+        try:
+            staff = _resolve_my_staff()
+        except Exception:
+            staff = None
+        if staff:
+            result["staff_info"] = {
+                "id": staff["id"], "name": staff["name"], "role": staff["role"],
+                "staff_code": staff["staff_code"],
+            }
+            result["is_manager"] = staff.get("role") == "manager"
+        else:
+            result["staff_info"] = None
+            result["is_manager"] = False
+    return jsonify(result)
 
 
 # ===========================================================
