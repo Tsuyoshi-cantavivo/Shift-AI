@@ -1663,6 +1663,22 @@ SCREENS.shifts = function (el) {
   loadSummary();
   refreshShortage();
 
+  // 期間変更で自動再描画（カレンダーも同期）
+  const onPeriodChange = () => {
+    loadSummary();
+    refreshShortage();
+    // カレンダー表示月も sStart に合わせる
+    const s = sStartEl ? sStartEl.value : '';
+    if (s && window._shiftCalCtrl && window._shiftCalCtrl.goToMonth) {
+      const [yy, mm] = s.split('-').map((x) => +x);
+      if (yy && mm) {
+        try { window._shiftCalCtrl.goToMonth(yy, mm - 1); } catch {}
+      }
+    }
+  };
+  sStartEl?.addEventListener('change', onPeriodChange);
+  sEndEl?.addEventListener('change', onPeriodChange);
+
   // AI生成ボタン: 入力期間で直接プレビュー→確定（遷移しない）
   // ※ 各ボタンは ?. で保護（HTML描画不良時にアプリ全体が停止するのを防ぐ）
   document.getElementById('autoGen')?.addEventListener('click', () => runShiftGenInline(cur, loadSummary, refreshShortage));
@@ -1744,6 +1760,18 @@ SCREENS.shifts = function (el) {
     editable: true,
   });
   window._shiftCalCtrl = calCtrl;
+  // カレンダー初期表示月を画面上部の期間（sStart）に同期
+  // ※ 従来は appState.period.start_date だけで初期化されていたため、
+  //    ユーザーが期間を変えてもカレンダーが追従せず時間表示が無いように見える問題
+  setTimeout(() => {
+    const ss = document.getElementById('sStart');
+    if (ss && ss.value) {
+      const [yy, mm] = ss.value.split('-').map((x) => +x);
+      if (yy && mm) {
+        try { calCtrl.goToMonth(yy, mm - 1); } catch {}
+      }
+    }
+  }, 200);
 };
 
 /* AI生成: シフト画面内で直接プレビュー→確定（遷移しない） */
