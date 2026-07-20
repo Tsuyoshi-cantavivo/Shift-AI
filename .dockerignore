@@ -1,0 +1,46 @@
+# Railway / Docker ビルド時のみ除外（ローカル・GitHub には残る）
+# nixpacks が Node.js プロジェクトと誤認するのを防ぐため
+
+# Node.js / Playwright 関連（本番では不要）
+package.json
+package-lock.json
+node_modules/
+playwright.config.js
+e2e/
+test-results/
+playwright-report/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ローカルDB
+*.db
+shift.db
+
+# IDE・OS
+.vscode/
+.idea/
+.DS_Store
+
+# テスト・開発用
+tests/
+.git/
+.gitignore
+README.md
+*.md
+migrations/
+.env
+.env.example
+
+# Playwright MCP（開発時のみ）
+.playwright-mcp/
+
+# スクリーンショット
+*.png
+login-dark.png
+test-*.png
