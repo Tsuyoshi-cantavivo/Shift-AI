@@ -105,7 +105,23 @@ def minutes_between(start_iso, end_iso):
 
 
 def compute_break_minutes(work_minutes):
-    """労働基準法の休憩: 8h超→60分, 6h超→45分。"""
+    """労働基準法の休憩: 6h超→45分, 8h超→60分。
+
+    【労基法コンプライアンス拡張】長時間労働に対する段階的休憩付与:
+      - 6h超 → 45分
+      - 8h超 → 60分
+      - 10h超 → 90分
+      - 12h超 → 120分
+      - 14h超 → 150分
+    労基法34条は「8hを超える場合は45分以上」を最低基準とするが、
+    実務上は8h毎に45分追加が望ましく、過労死防止の観点から重要。
+    """
+    if work_minutes > 14 * 60:
+        return 150
+    if work_minutes > 12 * 60:
+        return 120
+    if work_minutes > 10 * 60:
+        return 90
     if work_minutes > 8 * 60:
         return 60
     if work_minutes > 6 * 60:

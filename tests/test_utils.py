@@ -107,10 +107,20 @@ class TestComputeBreak:
         assert compute_break_minutes(5 * 60) == 0
 
     def test_12h_60(self):
-        assert compute_break_minutes(12 * 60) == 60
+        # 12hちょうどは10h超 → 90分（労基法コンプライアンス拡張後）
+        assert compute_break_minutes(12 * 60) == 90
+
+    def test_12h_plus_120(self):
+        # 12h超 → 120分
+        assert compute_break_minutes(12 * 60 + 1) == 120
+
+    def test_14h_plus_150(self):
+        # 14h超 → 150分（上限）
+        assert compute_break_minutes(14 * 60 + 1) == 150
 
     def test_huge(self):
-        assert compute_break_minutes(24 * 60) == 60
+        # 24h勤務は150分（上限）
+        assert compute_break_minutes(24 * 60) == 150
 
 
 class TestNightMinutes:

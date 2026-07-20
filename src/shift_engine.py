@@ -254,6 +254,12 @@ def auto_generate(shop_id, settings, start_date, end_date):
     min_daily = int(settings.get("min_daily_hours") or 4) * 60
     # 社員の穴埋めシフトの上限長（1シフトで6-9h程度が現実的）。無いと13h等の異常長発生。
     max_daily = int(settings.get("max_daily_hours") or 9) * 60
+    # 【労基法コンプライアンス】社員は夜間カバー等で長くなり得るが、
+    # 13h（法定実働上限の実務的天井）は絶対に超さない。
+    # 旧バグ: 「社員は max_daily の上限を受けない」として無制限にし、
+    #   22hシフト（労基法32条違反）を生成していた。
+    # 新仕様: 社員も max_daily × 1.5（最大13h）で打切り。
+    max_employee_daily = min(int(settings.get("max_employee_daily_hours") or 0) * 60 or max_daily + 4 * 60, 13 * 60)
 
     staffs = query_all("SELECT * FROM staffs WHERE shop_id=? AND is_resigned=0", (shop_id,))
     patterns = query_all("SELECT * FROM shift_patterns WHERE shop_id=?", (shop_id,))
@@ -341,14 +347,23 @@ def auto_generate(shop_id, settings, start_date, end_date):
            ※ 厳格過ぎるとシフトが作れなくなるため、ここでは事前の警告用途とし、
               配置後に最終チェック（post_validate）で検知する。
         【休希望】availability='rest' の日はそのスタッフは配置しない。
+        【労基法コンプライアンス】1シフト実働上限:
+           - part_time / student: max_daily (default 9h)
+           - employee / manager: max_employee_daily (default max_daily+4h, 最大13h)
+           22hシフト等は労基法32条違反のため拒否。
         """
         if (staff_id, day) in rest_days:
             return False, "rest_request"
         work = minutes_between(start_iso, end_iso)
         is_pt = staff_role.get(staff_id) == "part_time"
         is_student = staff_role.get(staff_id) == "student"
+        is_emp = staff_role.get(staff_id) in ("employee", "manager")
         if (is_pt or is_student) and work < min_daily:
             return False, "min_daily"
+        # 1シフト上限チェック（労基法遵守）
+        role_max = max_employee_daily if is_emp else max_daily
+        if work > role_max:
+            return False, "max_daily"
         _, sw = state(day)
         if staff_id in sw:
             return False, "already_working"
@@ -504,6 +519,12 @@ def auto_generate(shop_id, settings, start_date, end_date):
         # 休希望は配置候補から外すため、timed/flex リストから除去
         requests = [r for r in requests if r.get("availability") != "rest"]
 
+    # 「いつでも(availability='any')」希望の日付セット（Step3 予備戦力判定用）
+    flex_any_days = set()
+    for r in requests:
+        if r.get("availability") == "any":
+            flex_any_days.add((r["staff_id"], r["start_datetime"][:10]))
+
     timed = [r for r in requests if not r.get("availability")]
     flex = [r for r in requests if r.get("availability")]
 
@@ -621,17 +642,30 @@ def auto_generate(shop_id, settings, start_date, end_date):
             if not day_segs:
                 break
             avail = [s for s in staffs if s["role"] in ("employee", "manager") and s["id"] not in sw]
+            # ★【改善】社員が枯渇したら「いつでも(availability=any)」希望の
+            # バイトも Step3 の予備戦力として動員。これにより社員1名に22hが
+            # 集中する偏りを緩和する。
+            if not avail:
+                any_pt = [s for s in staffs if s["role"] in ("part_time",)
+                          and s["id"] not in sw
+                          and (s["id"], cur) in flex_any_days]
+                avail = any_pt
             if not avail:
                 break
-            avail.sort(key=lambda s: minutes_by_staff.get(s["id"], 0))
+            # ソート: 負荷0のスタッフ同士は staff_id で揺れるのを防ぐため、
+            # (現在負荷, ランダムシード的役割の日別hash) で分散
+            avail.sort(key=lambda s: (minutes_by_staff.get(s["id"], 0), s["id"]))
             # 長いセグメントから優先（複数パターンをまたぐ長時間シフトで効率よくカバー）
             day_segs_sorted = sorted(day_segs, key=lambda seg: (seg[1] - seg[0]), reverse=True)
             placed_any = False
             for (s_min, e_min, _deficit) in day_segs_sorted:
                 seg_len = e_min - s_min
-                # 社員は max_daily の上限を受けない（夜を含む長時間シフトでカバー）。
+                # 【労基法コンプライアンス】社員・バイト問わず1シフトは
+                # max_employee_daily (13h) を超えない。これにより22hシフト等の
+                # 労基法32条違反を予防。残りは次ループで別社員がカバー。
                 # 最低時間も社員には適用しない。ただし短すぎる残りカス（<1h）は現実的でないので回避。
-                win_len = seg_len if seg_len >= 60 else 0
+                emp_cap = max_employee_daily if any(s["role"] in ("employee", "manager") for s in avail) else max_daily
+                win_len = min(seg_len, emp_cap) if seg_len >= 60 else 0
                 if win_len <= 0:
                     continue
                 win_end = s_min + win_len
@@ -644,7 +678,8 @@ def auto_generate(shop_id, settings, start_date, end_date):
                         continue
                     ok, _ = can_place(emp["id"], cur, s_iso, e_iso)
                     if ok:
-                        place(emp["id"], cur, s_iso, e_iso, "不足補填（社員自動配置）")
+                        role_label = "社員自動配置" if emp["role"] in ("employee", "manager") else "柔軟バイト自動配置"
+                        place(emp["id"], cur, s_iso, e_iso, f"不足補填（{role_label}）")
                         placed_any = True
                         progress = True
                         break

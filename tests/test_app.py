@@ -16,7 +16,7 @@ import db as dbmod
 import shift_engine
 import ai
 from auth import hash_password
-from utils import compute_break_minutes, minutes_between
+from utils import compute_break_minutes, minutes_between, parse_iso
 
 from helpers import (
     insert_admin, insert_shop, insert_staff, insert_pattern, insert_fixed,
@@ -742,6 +742,48 @@ class TestShiftEngine:
         recomputed = [{"date": s["date"], "pattern": s["pattern"]} for s in short]
         assert recomputed == internal
 
+    # ---- 【インシデント対策: MS_LakeTown 8/3】22hシフト・社員偏り検出 ----
+    def test_no_employee_extreme_long_shift_with_overnight_full(self):
+        """【回帰・インシデント】Full=04:00-翌02:00 (22h) のような異常長パターンが
+        あっても、社員1シフトは max_employee_daily (13h) を超えないこと。
+
+        旧バグ: shift_engine.py:634 で win_len=seg_len (max_daily 未適用) により、
+        社員1名に 04:00-翌02:00 (22h) が割り当てられ、労基法32条違反のシフトが
+        生成されていた（本番MS_LakeTown 8/3で発生）。
+        """
+        shop_id = insert_shop(settings={"min_daily_hours": 3, "max_daily_hours": 9})
+        # Full: 04:00-翌02:00 (22h, overnight) 必要1名
+        insert_pattern(shop_id, "Full", "04:00", "02:00", 1)
+        emp1 = insert_staff(shop_id, "E1", "社員1", "employee", 2000, 160, 200)
+        emp2 = insert_staff(shop_id, "E2", "社員2", "employee", 2000, 160, 200)
+        res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 3, "max_daily_hours": 9}, MON, MON)
+        emp_shifts = [s for s in res["confirmed"] if s["staff_id"] in (emp1, emp2)]
+        for s in emp_shifts:
+            work_h = (parse_iso(s["end"]) - parse_iso(s["start"])).total_seconds() / 3600
+            assert work_h <= 13.01, (
+                f"社員シフトが{work_h:.1f}hと長すぎる（労基法32条違反リスク）。"
+                f"22h偏りインシデントの回帰: {s}"
+            )
+
+    def test_no_role_exceeds_max_daily_cap(self):
+        """【回帰】如何なるロールのシフトも max_daily 上限を超えないこと。
+        社員は max_employee_daily (13h)、バイトは max_daily (9h)。"""
+        shop_id = insert_shop(settings={"min_daily_hours": 3, "max_daily_hours": 9})
+        insert_pattern(shop_id, "朝", "07:00", "11:00", 1)
+        insert_pattern(shop_id, "昼", "11:00", "19:00", 2)
+        insert_pattern(shop_id, "夜", "19:00", "23:00", 1)
+        emp = insert_staff(shop_id, "E1", "社員", "employee", 2000, 160, 200)
+        pt = insert_staff(shop_id, "P1", "バイト", "part_time", 1100, 0, 160)
+        res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 3, "max_daily_hours": 9}, MON, MON)
+        role_map = {emp: "employee", pt: "part_time"}
+        for s in res["confirmed"]:
+            work_h = (parse_iso(s["end"]) - parse_iso(s["start"])).total_seconds() / 3600
+            role = role_map.get(s["staff_id"], "part_time")
+            limit = 13 if role in ("employee", "manager") else 9
+            assert work_h <= limit + 0.01, (
+                f"{role}のシフト{work_h:.1f}h > 上限{limit}h: {s}"
+            )
+
     # ---- compute_shortage_unique_hours: パターン重なり問題の修正 ----
     def test_compute_shortage_unique_hours_overlapping_patterns(self):
         """【インシデント対策】重なる時間帯を持つ2パターンが両方不足の場合、
@@ -885,7 +927,10 @@ class TestWeekdayOverride:
 #   req_map が空になって「シフトが作れない」状態だった。
 # ============================================================
 class TestOvernightPattern:
-    def _setup_shop(self, start="07:00", end="05:00", required=2):
+    def _setup_shop(self, start="17:00", end="05:00", required=2):
+        """【労基法コンプライアンス】従来 07:00-翌05:00 (22h) だったが、
+        1人では労基法32条違反となるため、より現実的な 17:00-翌05:00 (12h overnight) に変更。
+        社員の1シフト上限は 13h(max_employee_daily) なので12hなら1人でカバー可能。"""
         shop_id = insert_shop(settings={"min_daily_hours": 4})
         insert_pattern(shop_id, "終日", start, end, required)
         # 社員2名（不足補填用）+ バイト4名
@@ -896,13 +941,18 @@ class TestOvernightPattern:
         return shop_id, emp1, emp2, pt1, pt2
 
     def test_overnight_pattern_generates_shifts(self):
-        """7:00〜翌5:00 営業パターンでシフトが生成される（空結果にならない）。"""
+        """17:00〜翌5:00 営業パターンでシフトが生成される（空結果にならない）。"""
         shop_id, *_ = self._setup_shop()
         res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 4}, MON, MON)
         assert len(res["confirmed"]) > 0, "overnight パターンでシフトが生成されない（旧バグ）"
 
     def test_overnight_pattern_no_shortage_with_enough_staff(self):
-        """必要人数分の社員がいれば overnight パターンでも shortage なし。"""
+        """必要人数分の社員がいれば overnight パターン(12h)でも shortage なし。
+
+        【労基法コンプライアンス】12hパターン・必要2名を社員2名(各12h)でカバー。
+        22hパターンだと1シフト上限(13h)に引っかかり不足になるため、
+        パターン長を現実的な12hに設定する。
+        """
         shop_id, emp1, emp2, *_ = self._setup_shop(required=2)
         res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 4}, MON, MON)
         assert res["shortage"] == [], f"社員2名で不足解消できるはず: {res['shortage']}"
@@ -927,8 +977,8 @@ class TestOvernightPattern:
         shop_id, *_ = self._setup_shop(required=2)
         res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 4}, MON, MON)
         from utils import parse_iso
-        # 当日 07:00〜翌日 05:00 まで 30分刻みで cap チェック
-        t = parse_iso(f"{MON}T07:00:00")
+        # 当日 17:00〜翌日 05:00 まで 30分刻みで cap チェック
+        t = parse_iso(f"{MON}T17:00:00")
         end = parse_iso(f"{TUE}T05:00:00")
         while t < end:
             cnt = sum(1 for s in res["confirmed"]

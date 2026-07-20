@@ -2100,22 +2100,61 @@ def shop_patterns():
     return jsonify({"patterns": patterns})
 
 
+def _validate_pattern_hours(start_time, end_time):
+    """パターン時間長のバリデーション（労基法コンプライアンス）。
+
+    戻り値: (ok, warning_message)
+      - ok=False: 登録拒否（労基法上明らかに違法）
+      - ok=True, warning: 登録可だが警告表示推奨
+      - ok=True, warning=None: 完全にクリア
+    """
+    try:
+        ps = int((start_time or "").split(":")[0]) * 60 + int((start_time or "").split(":")[1])
+        pe = int((end_time or "").split(":")[0]) * 60 + int((end_time or "").split(":")[1])
+    except (ValueError, IndexError):
+        return False, "時刻形式が不正です（HH:MM形式で指定してください）"
+    if pe <= ps:
+        pe += 24 * 60  # overnight
+    hours = (pe - ps) / 60
+    if hours > 15:
+        return False, (
+            f"パターン時間が{hours:.1f}hに及びます。"
+            f"1人ではカバーできず労基法32条違反(1日8h原則)となるため、"
+            f"パターンを分割してください（例: 朝/昼/夜）。")
+    if hours > 13:
+        return True, (
+            f"パターン時間が{hours:.1f}hと長すぎます。"
+            f"社員でカバーしても13hが上限のため、シフト生成時に不足が出ます。"
+            f"パターン分割を推奨します。")
+    if hours > 9:
+        return True, (
+            f"パターン時間が{hours:.1f}hです。"
+            f"アルバイト(max_daily_hours)ではカバーできず社員限定になります。")
+    return True, None
+
+
 @app.post("/api/shop/patterns")
 def shop_patterns_post():
     shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
+    ok, warning = _validate_pattern_hours(body.get("start_time"), body.get("end_time"))
+    if not ok:
+        abort(400, description=warning)
     meta = execute("INSERT INTO shift_patterns (shop_id, pattern_name, start_time, end_time, required_staff) VALUES (?,?,?,?,?)",
                    (shop_id, body["pattern_name"], body["start_time"], body["end_time"], body.get("required_staff") or 1))
-    return jsonify({"ok": True, "id": meta["last_row_id"]})
+    return jsonify({"ok": True, "id": meta["last_row_id"], "warning": warning})
 
 
 @app.put("/api/shop/patterns/<int:pid>")
 def shop_patterns_put(pid):
     shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
+    ok, warning = _validate_pattern_hours(body.get("start_time"), body.get("end_time"))
+    if not ok:
+        abort(400, description=warning)
     execute("UPDATE shift_patterns SET pattern_name=?, start_time=?, end_time=?, required_staff=? WHERE id=? AND shop_id=?",
             (body["pattern_name"], body["start_time"], body["end_time"], body.get("required_staff") or 1, pid, shop_id))
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "warning": warning})
 
 
 @app.delete("/api/shop/patterns/<int:pid>")
