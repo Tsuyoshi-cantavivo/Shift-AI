@@ -802,7 +802,8 @@ function buildPrintTimelineHtml(list, anchorDate) {
         lbl = `${hm(s.start_datetime)}`;
       }
       const contCls = continued ? ' tl-bar-continued' : '';
-      return `<div class="tl-bar ${slotClass(s.start_datetime)}${contCls}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
+      const draftCls = (s.status === 'requested' && (s.reason || '').startsWith('AIドラフト')) ? ' tl-bar-draft' : '';
+      return `<div class="tl-bar ${slotClass(s.start_datetime)}${contCls}${draftCls}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
     }).join('');
     return `<div class="tl-row"><div class="tl-name">${esc(st.name)}</div><div class="tl-track">${bars}</div></div>`;
   }).join('');
@@ -848,8 +849,10 @@ async function openPrintView(start, end) {
   setLoading(true);
   try {
     const shiftsD = await api(`/shop/shifts?start=${start}&end=${end}`);
+    // confirmed + AIドラフト(requested, reason='AIドラフト...') を含めて表示
+    // （ドラフト状態でも確認・印刷できるようにする）
     const shifts = (shiftsD.shifts || [])
-      .filter((s) => s.status === 'confirmed')
+      .filter((s) => s.status === 'confirmed' || ((s.status === 'requested') && (s.reason || '').startsWith('AIドラフト')))
       .sort((a, b) => (a.start_datetime || '').localeCompare(b.start_datetime || ''));
     const byDay = {};
     shifts.forEach((s) => {
@@ -956,7 +959,8 @@ function openDayTimeline(date, allShifts, editable, onChange) {
         else lbl = `${hm(s.start_datetime)}-${hm(s.end_datetime)}`;
       }
       const contCls = continued ? ' tl-bar-continued' : '';
-      return `<div class="tl-bar ${slotClass(s.start_datetime)}${contCls}" data-id="${s.id}" title="${continued ? '前日から継続: ' : ''}${hm(s.start_datetime)}-${hm(s.end_datetime)}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
+      const draftCls = (s.status === 'requested' && (s.reason || '').startsWith('AIドラフト')) ? ' tl-bar-draft' : '';
+      return `<div class="tl-bar ${slotClass(s.start_datetime)}${contCls}${draftCls}" data-id="${s.id}" title="${continued ? '前日から継続: ' : ''}${hm(s.start_datetime)}-${hm(s.end_datetime)}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
     }).join('');
     return `<div class="tl-row" data-staff-id="${sid}" data-staff-name="${esc(st.name)}"><div class="tl-name">${esc(st.name)}</div><div class="tl-track" data-staff-id="${sid}" title="${editable ? '空き部分をクリックで追加' : ''}">${bars}</div></div>`;
   }).join('');
@@ -2115,16 +2119,20 @@ SCREENS.myshift = async function (el) {
       }
       safeSetHTML(infoBox, `<div class="my-info-row"><i class="bi bi-person-badge"></i> <strong>${esc(me.staff.name)}</strong> (${esc(me.staff.staff_code)}) ・ ${roleLabel(me.staff.role)} ・ 時給${me.staff.hourly_wage}円</div>`);
     }
-    // 確定シフト
+    // 確定シフト（+ AIドラフトも確認用に表示）
     const shiftsBox = document.getElementById('myShifts');
     if (shiftsBox) {
-      const list = (shifts.shifts || []).filter((s) => s.status === 'confirmed');
+      const list = (shifts.shifts || []).filter((s) =>
+        s.status === 'confirmed' ||
+        ((s.status === 'requested') && (s.reason || '').startsWith('AIドラフト')));
       if (!list.length) {
         safeSetHTML(shiftsBox, '<div class="text-secondary small">確定シフトはありません</div>');
       } else {
-        safeSetHTML(shiftsBox, `<div class="table-wrap"><table class="data-table"><thead><tr><th>日付</th><th>曜日</th><th>時間</th><th>休憩</th></tr></thead><tbody>${list.map((s) => {
+        safeSetHTML(shiftsBox, `<div class="table-wrap"><table class="data-table"><thead><tr><th>日付</th><th>曜日</th><th>時間</th><th>状態</th><th>休憩</th></tr></thead><tbody>${list.map((s) => {
           const d = s.start_datetime.slice(0, 10);
-          return `<tr><td class="num">${esc(d)}</td><td>${wdName(d)}</td><td class="num">${hm(s.start_datetime)} - ${hm(s.end_datetime)}</td><td class="num">${(s.break_time_minutes || 0)}分</td></tr>`;
+          const isDraft = s.status === 'requested';
+          const stateBadge = isDraft ? badge('ドラフト', 'warning') : badge('確定', 'success');
+          return `<tr><td class="num">${esc(d)}</td><td>${wdName(d)}</td><td class="num">${hm(s.start_datetime)} - ${hm(s.end_datetime)}</td><td>${stateBadge}</td><td class="num">${(s.break_time_minutes || 0)}分</td></tr>`;
         }).join('')}</tbody></table></div>`);
       }
     }

@@ -614,6 +614,27 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 }
 .shift-line .time { font-weight: 700; font-size: .9rem; }
 .shift-line .who { font-size: .78rem; color: var(--t-muted); }
+
+/* AIドラフト状態のバー（タイムライン/印刷）— 確定と視覚的に区別 */
+.tl-bar.tl-bar-draft {
+  opacity: 0.75;
+  border: 2px dashed rgba(255, 255, 255, 0.7);
+}
+[data-theme="light"] .tl-bar.tl-bar-draft {
+  border-color: rgba(0, 0, 0, 0.4);
+}
+.tl-bar.tl-bar-draft::before {
+  content: 'ドラフト';
+  position: absolute;
+  top: -8px;
+  left: 4px;
+  font-size: 9px;
+  background: var(--warning, #f59e0b);
+  color: white;
+  padding: 1px 4px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
 .dot.morning { background: #F59E0B; }
 .dot.noon    { background: #10B981; }
