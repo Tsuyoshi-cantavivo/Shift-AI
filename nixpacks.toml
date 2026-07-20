@@ -1,14 +1,21 @@
 # nixpacks configuration — Railway に「Python プロジェクト」として認識させる
 # (package.json が存在すると Node.js プロジェクトと誤認されるのを防止)
+#
+# NixOS の Python は PEP 668 で "externally-managed" になっており、
+# 直接 pip install を叩けない。そのため venv を作ってそこへインストールする。
 
 [phases.setup]
-nixPkgs = ["python311", "python311Packages.pip", "gcc"]
+nixPkgs = ["python311", "python311Packages.pip", "python311Packages.virtualenv", "gcc"]
 
 [phases.install]
-cmds = ["pip install --upgrade pip", "pip install -r requirements.txt"]
+cmds = [
+  "python -m venv --copies /opt/venv",
+  "/opt/venv/bin/pip install --upgrade pip",
+  "/opt/venv/bin/pip install -r requirements.txt"
+]
 
 [phases.build]
 cmds = ["echo 'Build step: skip (no compilation needed)'"]
 
 [start]
-cmd = "python -m gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 2 --threads 4 --timeout 60 --access-logfile - src.app:app"
+cmd = "/opt/venv/bin/gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 2 --threads 4 --timeout 60 --access-logfile - src.app:app"
