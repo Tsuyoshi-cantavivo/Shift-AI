@@ -2315,9 +2315,26 @@ def static_files(path):
 # 起動
 # ===========================================================
 def ensure_db():
+    """起動時にスキーマを整備。本番(Railway等)では失敗するとコンテナが死ぬので、
+    エラーは握り潰さずにログ出力して上位に伝播させる。"""
     if not os.path.exists(SCHEMA_PATH):
+        print(f"[ensure_db] WARN: schema.sql not found at {SCHEMA_PATH}", flush=True)
         return
-    init_schema(SCHEMA_PATH)
+    try:
+        init_schema(SCHEMA_PATH)
+        print(f"[ensure_db] OK: schema initialized from {SCHEMA_PATH}", flush=True)
+    except Exception as e:
+        # スキーマ初期化失敗は致命的 → ログを出して伝播
+        print(f"[ensure_db] FAIL: {e}", flush=True)
+        raise
+
+
+# gunicorn 等でインポートされた場合もスキーマを整備（起動時に1回）
+try:
+    ensure_db()
+except Exception as _e:
+    # gunicorn 起動時に ImportError にしてすぐ分かるようにする
+    print(f"[startup] DB initialization failed: {_e}", flush=True)
 
 
 if __name__ == "__main__":
@@ -2328,9 +2345,3 @@ if __name__ == "__main__":
     # （debug=True のまま本番運用すると Werkzeug debugger で RCE 可能になるため）
     debug = os.getenv("FLASK_DEBUG", "1") == "1"
     app.run(host="0.0.0.0", port=port, debug=debug)
-else:
-    # `flask run` 等でインポートされた場合もスキーマを整備
-    try:
-        ensure_db()
-    except Exception as _e:
-        pass
