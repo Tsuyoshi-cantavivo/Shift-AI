@@ -715,6 +715,58 @@ def admin_shop_staffs(sid):
     return jsonify({"staffs": rows})
 
 
+@app.put("/api/admin/shops/<int:sid>/staffs/<int:staff_id>/role")
+def admin_shop_staff_update_role(sid, staff_id):
+    """システム管理者がスタッフのロールを変更。
+
+    body: {"role": "manager" | "employee" | "part_time" | "student"}
+    ※ manager に変更すると、そのスタッフで店舗管理者ログインが可能に。
+    ※ student に変更時は月80h上限を強制。
+    """
+    require_auth(["admin"])
+    body = request.get_json(silent=True) or {}
+    new_role = body.get("role")
+    if new_role not in ("manager", "employee", "part_time", "student"):
+        abort(400, description="role は manager / employee / part_time / student のいずれかを指定してください")
+    # 存在チェック
+    staff = query_one("SELECT id, role, shop_id FROM staffs WHERE id=? AND shop_id=?", (staff_id, sid))
+    if not staff:
+        abort(404, description="スタッフが見つかりません")
+    old_role = staff["role"]
+    # 学生の場合は月80h上限を強制
+    extra = {}
+    if new_role == "student":
+        cur = query_one("SELECT max_hours_per_month FROM staffs WHERE id=?", (staff_id,))
+        if cur and (cur.get("max_hours_per_month") or 0) > 80:
+            execute("UPDATE staffs SET max_hours_per_month=80 WHERE id=?", (staff_id,))
+            extra["max_hours_per_month"] = 80
+    execute("UPDATE staffs SET role=? WHERE id=? AND shop_id=?", (new_role, staff_id, sid))
+    # 既存セッションを無効化（role 変更後は再ログインを強制するため安全）
+    execute("DELETE FROM sessions WHERE role IN ('shop','staff') AND user_id=?", (staff_id,))
+    return jsonify({"ok": True, "staff_id": staff_id, "old_role": old_role, "new_role": new_role, **extra})
+
+
+@app.put("/api/admin/shops/<int:sid>/staffs/<int:staff_id>/password")
+def admin_shop_staff_reset_password(sid, staff_id):
+    """システム管理者がスタッフのパスワードをリセット。
+
+    body: {"new_password": "..."}
+    """
+    require_auth(["admin"])
+    body = request.get_json(silent=True) or {}
+    pw = body.get("new_password") or ""
+    err = validate_password(pw)
+    if err:
+        abort(400, description=err)
+    staff = query_one("SELECT id FROM staffs WHERE id=? AND shop_id=?", (staff_id, sid))
+    if not staff:
+        abort(404, description="スタッフが見つかりません")
+    execute("UPDATE staffs SET password_hash=? WHERE id=?", (hash_password(pw), staff_id))
+    # パスワード変更後は既存セッションを無効化
+    execute("DELETE FROM sessions WHERE role IN ('shop','staff') AND user_id=?", (staff_id,))
+    return jsonify({"ok": True})
+
+
 @app.get("/api/admin/shops/<int:sid>/periods/next")
 def admin_shop_next_period(sid):
     require_auth(["admin"])

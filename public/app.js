@@ -3089,11 +3089,104 @@ SCREENS.adminShopDetail = async function (el) {
       const [sum, st] = await Promise.all([api(`/admin/shops/summary/${sid}?start=${start}&end=${end}`), api(`/admin/shops/staffs/${sid}`)]);
       if (!isAlive(tok) || !body.isConnected) return;  // 画面遷移済み
       const tbl = sum.staff.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>氏名</th><th>日</th><th class="t-num">確定</th><th class="t-num">給与</th></tr></thead><tbody>${sum.staff.map((s) => `<tr><td>${esc(s.name)}</td><td>${s.days}</td><td class="t-num num">${s.confirmed_hours}h</td><td class="t-num num">${yen(s.pay)}</td></tr>`).join('')}<tr style="font-weight:800;color:var(--indigo-l)"><td>合計</td><td></td><td class="t-num num">${sum.total_hours}h</td><td class="t-num num">${yen(sum.total_pay)}</td></tr></tbody></table></div>` : '<div class="small text-secondary">確定シフトなし</div>';
-      const slist = st.staffs.map((s) => `<div class="list-row"><div class="staff-cell"><span class="staff-name">${esc(s.name)}</span><span class="staff-sub">${esc(s.staff_code)} ・ ${roleLabel(s.role)}${s.is_resigned ? ' ・ 退職' : ''}</span></div></div>`).join('');
+      const slist = (st.staffs || []).map((s) => `
+        <div class="list-row">
+          <div class="staff-cell">
+            <span class="staff-name">${esc(s.name)}</span>
+            <span class="staff-sub">${esc(s.staff_code)} ・ ${roleLabel(s.role)}${s.is_resigned ? ' ・ 退職' : ''}</span>
+          </div>
+          <div class="flex gap-1">
+            <button class="btn btn-sm btn-light" data-role-edit="${s.id}" data-name="${esc(s.name)}" data-role="${s.role}" title="ロール変更"><i class="bi bi-shield-lock"></i></button>
+            <button class="btn btn-sm btn-light" data-pw-reset="${s.id}" data-name="${esc(s.name)}" title="パスワードリセット"><i class="bi bi-key"></i></button>
+          </div>
+        </div>`).join('');
       body.innerHTML = sectionTitle('bi-people', `スタッフ（${st.staffs.length}名）`) + slist + `<hr style="border-color:var(--line);margin:16px 0">` + sectionTitle('bi-bar-chart', `集計（${start}〜${end}）`) + tbl;
+      // ロール変更ボタン
+      body.querySelectorAll('[data-role-edit]').forEach((b) => b?.addEventListener('click', () => {
+        openAdminRoleModal(sid, +b.dataset.roleEdit, b.dataset.name, b.dataset.role, loadDetail);
+      }));
+      // パスワードリセットボタン
+      body.querySelectorAll('[data-pw-reset]').forEach((b) => b?.addEventListener('click', () => {
+        openAdminPwResetModal(sid, +b.dataset.pwReset, b.dataset.name);
+      }));
     } catch (e) {
       if (!isAlive(tok) || !body.isConnected) return;
       body.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
     }
   }
 };
+
+function openAdminRoleModal(shopId, staffId, staffName, currentRole, onDone) {
+  const opts = [
+    { v: 'manager', label: '店舗管理者（manager）— 店舗権限でログイン' },
+    { v: 'employee', label: '社員（employee）' },
+    { v: 'part_time', label: 'アルバイト（part_time）' },
+    { v: 'student', label: '学生アルバイト（student・月80h上限）' },
+  ];
+  openModal(`<i class="bi bi-shield-lock"></i> ロール変更 — ${esc(staffName)}`,
+    `<p class="small text-secondary mb-2">現在のロール: <strong>${roleLabel(currentRole)}</strong></p>
+     <label class="form-label">新しいロール</label>
+     <select id="admRoleSel" class="form-select">${opts.map((o) => `<option value="${o.v}" ${o.v === currentRole ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>
+     <div class="small text-secondary mt-2"><i class="bi bi-info-circle"></i> 変更すると、このスタッフの既存ログインセッションは無効化されます（再ログインが必要）。</div>
+     <div class="form-error mt-2" id="admRoleErr"></div>`,
+    async (w, close) => {
+      const errBox = w.querySelector('#admRoleErr');
+      const showErr = (m) => { if (errBox) errBox.innerHTML = m ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(m)}` : ''; };
+      showErr('');
+      const newRole = w.querySelector('#admRoleSel').value;
+      try {
+        await api(`/admin/shops/${shopId}/staffs/${staffId}/role`, {
+          method: 'PUT', body: JSON.stringify({ role: newRole })
+        });
+        close();
+        toast(`${staffName} さんのロールを ${roleLabel(newRole)} に変更しました`, 'success');
+        onDone?.();
+      } catch (e) { showErr(e.message || '変更に失敗しました'); }
+    });
+}
+
+function openAdminPwResetModal(shopId, staffId, staffName) {
+  openModal(`<i class="bi bi-key"></i> パスワードリセット — ${esc(staffName)}`,
+    `<p class="small text-secondary mb-2">このスタッフのパスワードを新しいものにリセットします。変更後、再ログインが必要になります。</p>
+     <label class="form-label">新しいパスワード（8文字以上・英数字）</label>
+     <input id="admPwInput" type="password" class="form-control" autocomplete="new-password">
+     <div class="pw-rules mt-2" id="admPwRules">
+       <span class="pw-rule" data-rule="len"><i class="bi bi-circle"></i>8文字以上</span>
+       <span class="pw-rule" data-rule="alpha"><i class="bi bi-circle"></i>英字を含む</span>
+       <span class="pw-rule" data-rule="digit"><i class="bi bi-circle"></i>数字を含む</span>
+     </div>
+     <div class="form-error mt-2" id="admPwErr"></div>`,
+    async (w, close) => {
+      const errBox = w.querySelector('#admPwErr');
+      const showErr = (m) => { if (errBox) errBox.innerHTML = m ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(m)}` : ''; };
+      showErr('');
+      const pw = w.querySelector('#admPwInput').value;
+      const verr = validatePassword(pw);
+      if (verr) { showErr(verr); return; }
+      try {
+        await api(`/admin/shops/${shopId}/staffs/${staffId}/password`, {
+          method: 'PUT', body: JSON.stringify({ new_password: pw })
+        });
+        close();
+        toast(`${staffName} さんのパスワードをリセットしました`, 'success');
+      } catch (e) { showErr(e.message || 'リセットに失敗しました'); }
+    });
+  // リアルタイムパスワード検証
+  setTimeout(() => {
+    const wrap = document.querySelector('.modal-overlay:last-child');
+    if (!wrap) return;
+    const pwInput = wrap.querySelector('#admPwInput');
+    const ruleEls = wrap.querySelectorAll('.pw-rule');
+    const updateRules = () => {
+      const v = pwInput.value || '';
+      const checks = { len: v.length >= 8, alpha: /[A-Za-z]/.test(v), digit: /[0-9]/.test(v) };
+      ruleEls.forEach((el) => {
+        const ok = checks[el.dataset.rule];
+        el.classList.toggle('ok', !!ok && v.length > 0);
+        el.classList.toggle('ng', !ok && v.length > 0);
+        el.querySelector('i').className = ok ? 'bi bi-check-circle-fill' : 'bi bi-x-circle-fill';
+      });
+    };
+    pwInput?.addEventListener('input', () => { updateRules(); wrap.querySelector('#admPwErr').innerHTML = ''; });
+  }, 50);
+}
