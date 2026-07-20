@@ -2674,8 +2674,8 @@ def shop_shifts_post():
     if student_ng:
         print(f"[SHIFT POST] student_only: {student_msg} staff_id={staff_id} {start_dt}〜{end_dt}", flush=True)
         return jsonify({"error": student_msg, "student_only": True}), 400
-    meta = execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason) VALUES (?,?,?,?,?,?,?)",
-                   (shop_id, staff_id, start_dt, end_dt, brk, body.get("status") or "confirmed", body.get("reason") or "手動追加"))
+    meta = execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason, availability) VALUES (?,?,?,?,?,?,?,?)",
+                   (shop_id, staff_id, start_dt, end_dt, brk, body.get("status") or "confirmed", body.get("reason") or "手動追加", body.get("availability")))
     print(f"[SHIFT POST id={meta['last_row_id']}] OK: staff_id={staff_id} {start_dt}〜{end_dt}", flush=True)
     result = {"ok": True, "id": meta["last_row_id"]}
     if adjustments:

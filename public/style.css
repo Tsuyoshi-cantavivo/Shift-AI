@@ -1011,3 +1011,51 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
   color: var(--t-muted);
   white-space: nowrap;
 }
+
+/* 希望表管理：スタッフ別カード */
+.req-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.req-staff-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.req-staff-card:hover {
+  border-color: var(--indigo-l);
+  box-shadow: 0 2px 8px rgba(99,102,241,.12);
+  transform: translateY(-1px);
+}
+.req-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.req-card-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.req-card-count {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: .85rem;
+}
+.req-card-badges {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.req-card-period {
+  margin-top: 6px;
+  font-size: .75rem;
+}

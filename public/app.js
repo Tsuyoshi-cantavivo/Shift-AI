@@ -392,7 +392,7 @@ const NAV_DEFS = {
     { key: 'aiGenerate', icon: 'bi-stars', label: 'AIシフト作成', mobile: true, ai: true },
     { key: 'staffs', icon: 'bi-people', label: 'スタッフ管理', mobile: true },
     { key: 'myshift', icon: 'bi-calendar2-check', label: 'マイシフト・希望' },
-    { key: 'requests', icon: 'bi-inbox', label: '希望休管理' },
+    { key: 'requests', icon: 'bi-inbox', label: '希望表管理' },
     { key: 'analytics', icon: 'bi-graph-up-arrow', label: '人件費分析' },
     { key: 'notifications', icon: 'bi-bell', label: '通知' },
     { key: 'settings', icon: 'bi-gear', label: '設定', mobile: true },
@@ -2230,32 +2230,164 @@ function openMyReqModal(onDone) {
   update();
 }
 
-/* ---------- Requests (希望休管理) ---------- */
+/* ---------- Requests (希望表管理) ---------- */
 SCREENS.requests = async function (el) {
   const tok = navToken();
-  el.innerHTML = pageHead('希望休管理', 'bi-inbox', 'スタッフからの希望シフト一覧') + card(`<div id="reqList"><div class="text-secondary small">読み込み中...</div></div>`);
-  try {
-    const d = await api(`/shop/shifts?start=${todayStr().slice(0,8)+'01'}&end=${plusMonths(1)}`);
+  // 期間を選べるように上部に期間フィルタを追加
+  const today = todayStr();
+  const defaultStart = today.slice(0, 8) + '01';
+  const defaultEnd = plusMonths(2);
+  el.innerHTML = pageHead('希望表管理', 'bi-inbox', 'スタッフごとの希望シフト一覧') +
+    card(`<div class="row mb-3">
+        <div class="col-5"><label class="form-label" for="reqStart">開始</label><input type="date" id="reqStart" class="form-control" value="${defaultStart}"></div>
+        <div class="col-5"><label class="form-label" for="reqEnd">終了</label><input type="date" id="reqEnd" class="form-control" value="${defaultEnd}"></div>
+        <div class="col-2 flex items-end"><button class="btn btn-primary w-full" id="reqLoadBtn">表示</button></div>
+      </div>
+      <div id="reqList"><div class="text-secondary small">「表示」ボタンを押してください</div></div>`);
+  document.getElementById('reqLoadBtn')?.addEventListener('click', () => loadReqList());
+  await loadReqList();
+
+  async function loadReqList() {
     if (!isAlive(tok) || !el.isConnected) return;
-    const reqs = (d.shifts || []).filter((s) => s.status === 'requested');
     const box = document.getElementById('reqList');
     if (!box) return;
-    if (!reqs.length) { box.innerHTML = emptyState('bi-inbox', '希望シフトはありません'); return; }
-    box.innerHTML = `<div class="table-wrap"><table class="data-table"><thead><tr><th>スタッフ</th><th>日付</th><th>時間</th><th>種別</th><th></th></tr></thead><tbody>
-      ${reqs.sort((a,b)=>a.start_datetime.localeCompare(b.start_datetime)).map((s) => `
-        <tr>
-          <td>${esc(s.staff_name)}</td>
-          <td class="num">${esc(s.start_datetime.slice(0,10))} (${wdName(s.start_datetime.slice(0,10))})</td>
-          <td class="num">${s.availability ? badge({any:'いつでも',morning:'早番',evening:'遅番'}[s.availability]||'柔軟','info') : hm(s.start_datetime)+'-'+hm(s.end_datetime)}</td>
-          <td>${badge('希望', 'warning')}</td>
-          <td><button class="btn btn-sm btn-outline-danger" data-del="${s.id}"><i class="bi bi-x"></i></button></td>
-        </tr>`).join('')}</tbody></table></div>`;
-    box.querySelectorAll('[data-del]').forEach((b) => b?.addEventListener('click', async () => {
-      if (!confirm('この希望を削除しますか？')) return;
-      try { await api(`/shop/shifts/${b.dataset.del}`, { method: 'DELETE' }); toast('削除しました', 'success'); navigateTo('requests'); } catch (e) { toast(e.message, 'error'); }
-    }));
-  } catch (e) { document.getElementById('reqList').innerHTML = `<div class="text-danger">${esc(e.message)}</div>`; }
+    const startDate = document.getElementById('reqStart')?.value || defaultStart;
+    const endDate = document.getElementById('reqEnd')?.value || defaultEnd;
+    safeSetHTML(box, '<div class="text-secondary small">読み込み中...</div>');
+    try {
+      // スタッフ一覧と希望シフトを並行取得
+      const [shiftsD, staffsD] = await Promise.all([
+        api(`/shop/shifts?start=${startDate}&end=${endDate}`),
+        api('/shop/staffs'),
+      ]);
+      if (!isAlive(tok) || !el.isConnected) return;
+      const reqs = (shiftsD.shifts || []).filter((s) => s.status === 'requested');
+      const staffs = staffsD.staffs || [];
+      const staffMap = {};
+      staffs.forEach((s) => staffMap[s.id] = s);
+      // staff_id ごとにグループ化
+      const byStaff = {};
+      reqs.forEach((r) => {
+        const sid = r.staff_id;
+        if (!byStaff[sid]) byStaff[sid] = [];
+        byStaff[sid].push(r);
+      });
+      // 表示用配列（希望数降順）
+      const cards = Object.entries(byStaff).map(([sid, list]) => ({
+        staff: staffMap[sid] || { id: sid, name: '不明#' + sid, staff_code: '?', role: '' },
+        list: list.sort((a, b) => a.start_datetime.localeCompare(b.start_datetime)),
+      })).sort((a, b) => b.list.length - a.list.length);
+
+      if (!cards.length) {
+        safeSetHTML(box, '<div class="info-box"><i class="bi bi-info-circle"></i> この期間の希望シフトはありません。スタッフに希望提出を促しましょう。</div>');
+        return;
+      }
+      // サマリ
+      const totalReqs = reqs.length;
+      const restCount = reqs.filter((r) => r.availability === 'rest').length;
+      const flexCount = reqs.filter((r) => r.availability && r.availability !== 'rest').length;
+      const timeCount = totalReqs - restCount - flexCount;
+      // カードグリッド（スタッフ別）
+      safeSetHTML(box,
+        `<div class="info-box mb-3">
+          <strong>集計:</strong> ${cards.length}名 / 計 ${totalReqs}件
+           <span class="badge-soft warning ms-2">時間指定 ${timeCount}</span>
+           <span class="badge-soft info">柔軟 ${flexCount}</span>
+           <span class="badge-soft danger">休希望 ${restCount}</span>
+        </div>
+        <div class="req-cards-grid">
+          ${cards.map((c) => renderStaffReqCard(c)).join('')}
+        </div>`);
+      // カードクリックで個人詳細モーダル
+      box.querySelectorAll('[data-staff-detail]').forEach((b) => b?.addEventListener('click', () => {
+        const sid = +b.dataset.staffDetail;
+        const card = cards.find((c) => c.staff.id === sid);
+        if (card) openStaffReqDetailModal(card);
+      }));
+    } catch (e) {
+      if (!isAlive(tok) || !el.isConnected) return;
+      safeSetHTML(box, `<div class="text-danger">${esc(e.message)}</div>`);
+    }
+  }
 };
+
+function renderStaffReqCard({ staff, list }) {
+  const restCount = list.filter((r) => r.availability === 'rest').length;
+  const flexCount = list.filter((r) => r.availability && r.availability !== 'rest').length;
+  const timeCount = list.length - restCount - flexCount;
+  // 最初と最後の日付
+  const firstDate = list[0]?.start_datetime?.slice(0, 10) || '';
+  const lastDate = list[list.length - 1]?.start_datetime?.slice(0, 10) || '';
+  const roleBadge = staff.role === 'manager' ? badge('店長', 'info')
+    : staff.role === 'employee' ? badge('社員', 'success')
+    : staff.role === 'student' ? badge('学生', 'warning')
+    : badge('バイト', 'muted');
+  return `<div class="req-staff-card" data-staff-detail="${staff.id}">
+    <div class="req-card-header">
+      <div class="req-card-name">
+        <span class="dot ${staff.role === 'manager' || staff.role === 'employee' ? 'evening' : staff.role === 'student' ? 'morning' : 'noon'}"></span>
+        <strong>${esc(staff.name)}</strong>
+        <span class="text-secondary small">${esc(staff.staff_code || '')}</span>
+        ${roleBadge}
+      </div>
+      <div class="req-card-count">
+        <span class="num"><strong>${list.length}</strong>件</span>
+        <i class="bi bi-chevron-right text-muted"></i>
+      </div>
+    </div>
+    <div class="req-card-badges">
+      ${timeCount > 0 ? `<span class="badge-soft warning">時間 ${timeCount}</span>` : ''}
+      ${flexCount > 0 ? `<span class="badge-soft info">柔軟 ${flexCount}</span>` : ''}
+      ${restCount > 0 ? `<span class="badge-soft danger">休希望 ${restCount}</span>` : ''}
+    </div>
+    <div class="req-card-period small text-secondary">
+      ${firstDate === lastDate ? esc(firstDate) : esc(firstDate) + ' 〜 ' + esc(lastDate)}
+    </div>
+  </div>`;
+}
+
+function openStaffReqDetailModal({ staff, list }) {
+  // カレンダー風リスト表示
+  const rows = list.map((r) => {
+    const day = (r.start_datetime || '').slice(0, 10);
+    const st = (r.start_datetime || '').slice(11, 16);
+    const et = (r.end_datetime || '').slice(11, 16);
+    let badgeHtml = '';
+    let timeText = '';
+    if (r.availability === 'rest') {
+      badgeHtml = badge('休希望', 'danger');
+      timeText = '終日（働かない）';
+    } else if (r.availability) {
+      const label = { any: 'いつでも', morning: '早番', evening: '遅番' }[r.availability] || '柔軟';
+      badgeHtml = badge(label, 'info');
+      timeText = `${st} - ${et}（目安）`;
+    } else {
+      badgeHtml = badge('時間指定', 'warning');
+      timeText = `${st} - ${et}`;
+    }
+    return `<tr>
+      <td class="num">${esc(day)} <span class="text-secondary small">(${wdName(day)})</span></td>
+      <td class="num">${esc(timeText)}</td>
+      <td>${badgeHtml}</td>
+      <td class="small text-secondary">${esc(r.reason || '')}</td>
+    </tr>`;
+  }).join('');
+  const m = openModal(`<i class="bi bi-person"></i> ${esc(staff.name)} さんの希望表`,
+    `<div class="my-info-row mb-2">
+       <i class="bi bi-person-badge"></i>
+       <strong>${esc(staff.name)}</strong>
+       <span class="text-secondary">${esc(staff.staff_code || '')}</span>
+       ${staff.role === 'manager' ? badge('店長', 'info') : staff.role === 'employee' ? badge('社員', 'success') : staff.role === 'student' ? badge('学生', 'warning') : badge('バイト', 'muted')}
+       <span class="small text-secondary ms-auto">希望 ${list.length} 件</span>
+     </div>
+     <div class="table-wrap">
+       <table class="data-table">
+         <thead><tr><th>日付</th><th>時間</th><th>種別</th><th>理由</th></tr></thead>
+         <tbody>${rows || '<tr><td colspan="4" class="text-secondary small">希望なし</td></tr>'}</tbody>
+       </table>
+     </div>`,
+    null, { saveLabel: '閉じる' });
+}
 
 /* ---------- Analytics (人件費分析) ---------- */
 SCREENS.analytics = async function (el) {
