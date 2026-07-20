@@ -2,10 +2,10 @@
 # (package.json が存在すると Node.js プロジェクトと誤認されるのを防止)
 
 [phases.setup]
-nixPkgs = ["python311", "gcc"]
+nixPkgs = ["python311", "python311Packages.pip", "gcc"]
 
 [phases.install]
-cmds = ["python -m pip install --upgrade pip", "pip install -r requirements.txt"]
+cmds = ["pip install --upgrade pip", "pip install -r requirements.txt"]
 
 [phases.build]
 cmds = ["echo 'Build step: skip (no compilation needed)'"]
