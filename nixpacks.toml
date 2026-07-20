@@ -1,0 +1,14 @@
+# nixpacks configuration — Railway に「Python プロジェクト」として認識させる
+# (package.json が存在すると Node.js プロジェクトと誤認されるのを防止)
+
+[phases.setup]
+nixPkgs = ["python311", "gcc"]
+
+[phases.install]
+cmds = ["python -m pip install --upgrade pip", "pip install -r requirements.txt"]
+
+[phases.build]
+cmds = ["echo 'Build step: skip (no compilation needed)'"]
+
+[start]
+cmd = "python -m gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 2 --threads 4 --timeout 60 --access-logfile - src.app:app"
