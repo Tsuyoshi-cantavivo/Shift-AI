@@ -428,7 +428,16 @@ function setActiveNav() {
   document.querySelectorAll('.side-item, .bn-item').forEach((b) => b.classList.toggle('active', b.dataset.screen === currentScreen));
   const defs = NAV_DEFS[currentRole] || [];
   const label = defs.find((i) => i.key === currentScreen)?.label || 'ShiftAI';
-  document.getElementById('headerTitle').textContent = label;
+  const titleEl = document.getElementById('headerTitle');
+  if (titleEl) {
+    // 現在の権限表示を末尾に付与（debug用・見やすさのため）
+    const roleDisp = currentRole === 'shop'
+      ? (currentUser?.role === 'manager' ? '【店舗管理者】' : '【店舗】')
+      : currentRole === 'admin' ? '【システム管理者】'
+      : currentRole === 'staff' ? `【スタッフ${currentUser?.role ? ':' + roleLabel(currentUser.role) : ''}】`
+      : '';
+    titleEl.textContent = label + (roleDisp ? ' ' + roleDisp : '');
+  }
 }
 
 function navigateTo(screen) {
