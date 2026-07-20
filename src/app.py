@@ -1505,17 +1505,24 @@ def shop_my_requests_post():
     for sh in items:
         avail = sh.get("availability")
         start_dt = normalize_iso(sh["start_datetime"])
-        if avail:
+        if avail == "rest":
+            # 休希望: 終日扱い（00:00〜23:59）
+            end_dt = normalize_iso(sh.get("end_datetime")) or (start_dt[:10] + "T23:59:59")
+        elif avail:
             end_dt = normalize_iso(sh.get("end_datetime")) or (start_dt[:10] + "T22:00:00")
         else:
             end_dt = normalize_iso(sh["end_datetime"])
-        # 重複チェック（自身の confirmed + 既存希望）
-        overlap, _conflict = _check_staff_overlap(
-            shop_id, staff["id"], start_dt, end_dt, include_requested=True)
-        if overlap:
-            skipped_overlap += 1
-            continue
-        if avail:
+        # 重複チェック（自身の confirmed + 既存希望）。ただし rest 希望は重複OK
+        if avail != "rest":
+            overlap, _conflict = _check_staff_overlap(
+                shop_id, staff["id"], start_dt, end_dt, include_requested=True)
+            if overlap:
+                skipped_overlap += 1
+                continue
+        if avail == "rest":
+            execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, status, reason, availability) VALUES (?,?,?,?,?,?,?)",
+                    (shop_id, staff["id"], start_dt, end_dt, "requested", "管理者:休希望", avail))
+        elif avail:
             execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, status, reason, availability) VALUES (?,?,?,?,?,?,?)",
                     (shop_id, staff["id"], start_dt, end_dt, "requested", "管理者希望(柔軟)", avail))
         else:

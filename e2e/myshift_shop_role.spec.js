@@ -71,7 +71,7 @@ test.describe('店舗管理者のマイシフト（権限エラー解消）', ()
     expect(errors).toEqual([]);
   });
 
-  test('希望を追加 ボタンが機能する', async ({ page }) => {
+  test('希望を追加 ボタンが機能する（時間指定・柔軟・休希望の3パターン選べる）', async ({ page }) => {
     const errors = attachConsoleCollector(page);
     await loginAsManager(page, {
       shopCode: SHOP.shopCode,
@@ -81,12 +81,17 @@ test.describe('店舗管理者のマイシフト（権限エラー解消）', ()
     await page.click('button[data-screen="myshift"]');
     await page.waitForSelector('#addMyReqBtn', { timeout: 10000 });
     await page.click('#addMyReqBtn');
-    // モーダルが開く
+    // モーダルが開く・3パターンのラジオボタンが表示される
     await page.waitForSelector('#myRqDate', { timeout: 5000 });
-    // 項目が表示される
-    expect(await page.locator('#myRqSt').isVisible()).toBeTruthy();
-    expect(await page.locator('#myRqEt').isVisible()).toBeTruthy();
-    expect(await page.locator('#myRqFlex').isVisible()).toBeTruthy();
+    await page.waitForSelector('input[name="myRqType"][value="time"]');
+    await page.waitForSelector('input[name="myRqType"][value="flex"]');
+    await page.waitForSelector('input[name="myRqType"][value="rest"]');
+    // デフォルトは time（時間指定）が選択されている
+    const timeRadio = page.locator('input[name="myRqType"][value="time"]');
+    expect(await timeRadio.isChecked()).toBeTruthy();
+    // 休希望を選ぶと時間入力欄が非表示になる
+    await page.check('input[name="myRqType"][value="rest"]');
+    await page.waitForSelector('#myRqRestNote', { state: 'visible', timeout: 3000 });
     expect(errors).toEqual([]);
   });
 });

@@ -2075,14 +2075,14 @@ SCREENS.myshift = async function (el) {
       if (!list.length) {
         safeSetHTML(reqsBox, '<div class="text-secondary small">提出中の希望はありません。「希望を追加」ボタンから提出できます。</div>');
       } else {
-        safeSetHTML(reqsBox, `<div class="list-rows">${list.map((r) => `
-          <div class="list-row">
-            <div><strong class="num">${esc(r.start_datetime.slice(0, 16).replace('T', ' '))}</strong> 〜 <span class="num">${esc((r.end_datetime || '').slice(11, 16))}</span>
-              ${r.availability ? badge({ any: 'いつでも', morning: '早番', evening: '遅番' }[r.availability] || '柔軟', 'info') : badge('希望', 'warning')}
-              <div class="small text-secondary">${esc(r.reason || '')}</div>
-            </div>
-            <button class="btn btn-sm btn-outline-danger" data-del="${r.id}"><i class="bi bi-x"></i></button>
-          </div>`).join('')}</div>`);
+          safeSetHTML(reqsBox, `<div class="list-rows">${list.map((r) => `
+            <div class="list-row">
+              <div><strong class="num">${esc(r.start_datetime.slice(0, 16).replace('T', ' '))}</strong> 〜 <span class="num">${esc((r.end_datetime || '').slice(11, 16))}</span>
+                ${r.availability === 'rest' ? badge('休希望', 'danger') : r.availability ? badge({ any: 'いつでも', morning: '早番', evening: '遅番' }[r.availability] || '柔軟', 'info') : badge('希望', 'warning')}
+                <div class="small text-secondary">${esc(r.reason || '')}</div>
+              </div>
+              <button class="btn btn-sm btn-outline-danger" data-del="${r.id}"><i class="bi bi-x"></i></button>
+            </div>`).join('')}</div>`);
         reqsBox.querySelectorAll('[data-del]').forEach((b) => b?.addEventListener('click', async () => {
           if (!confirm('この希望を削除しますか？')) return;
           try {
@@ -2112,24 +2112,39 @@ SCREENS.myshift = async function (el) {
 
 function openMyReqModal(onDone) {
   const today = todayStr();
-  openModal('<i class="bi bi-pencil-square"></i> 希望シフトを提出',
-    `<p class="small text-secondary mb-2">日時指定か「柔軟希望（早番/遅番/いつでも）」で提出できます。<br>提出後も「希望休管理」で編集でき、AI自動生成に反映されます。</p>
-     <div class="row mb-2">
-       <div class="col-6"><label class="form-label" for="myRqDate">日付</label><input type="date" id="myRqDate" class="form-control" value="${today}"></div>
-       <div class="col-3"><label class="form-label" for="myRqSt">開始</label><input type="time" id="myRqSt" class="form-control" value="09:00"></div>
-       <div class="col-3"><label class="form-label" for="myRqEt">終了</label><input type="time" id="myRqEt" class="form-control" value="18:00"></div>
+  const wrap = openModal('<i class="bi bi-pencil-square"></i> 希望を提出',
+    `<p class="small text-secondary mb-2">以下の3パターンから選べます:</p>
+     <div class="mb-2">
+       <div class="form-check">
+         <input class="form-check-input" type="radio" name="myRqType" value="time" checked id="rqTypeTime">
+         <label class="form-check-label" for="rqTypeTime"><strong>① 時間指定</strong>（働きたい時間を指定）</label>
+       </div>
+       <div class="form-check">
+         <input class="form-check-input" type="radio" name="myRqType" value="flex" id="rqTypeFlex">
+         <label class="form-check-label" for="rqTypeFlex"><strong>② 柔軟希望</strong>（時間は目安・シフト時間内で調整可）</label>
+       </div>
+       <div class="form-check">
+         <input class="form-check-input" type="radio" name="myRqType" value="rest" id="rqTypeRest">
+         <label class="form-check-label" for="rqTypeRest"><strong>③ 休希望</strong>（その日は働かない）</label>
+       </div>
      </div>
-     <label class="form-check">
-       <input type="checkbox" id="myRqFlex" class="form-check-input">
-       <span class="form-check-label">柔軟希望（時間は目安・シフト時間内で調整可）</span>
-     </label>
+     <div class="row mb-2">
+       <div class="col-12"><label class="form-label" for="myRqDate">日付 <span class="text-danger">*</span></label><input type="date" id="myRqDate" class="form-control" value="${today}"></div>
+     </div>
+     <div id="myRqTimeRow" class="row mb-2">
+       <div class="col-6"><label class="form-label" for="myRqSt">開始</label><input type="time" id="myRqSt" class="form-control" value="09:00"></div>
+       <div class="col-6"><label class="form-label" for="myRqEt">終了</label><input type="time" id="myRqEt" class="form-control" value="18:00"></div>
+     </div>
      <div id="myRqFlexBox" style="display:none">
-       <label class="form-label mt-2">希望時間帯</label>
+       <label class="form-label">希望時間帯</label>
        <select id="myRqAvail" class="form-select">
          <option value="any">いつでもOK</option>
          <option value="morning">早番（朝〜昼）</option>
          <option value="evening">遅番（夕方〜夜）</option>
        </select>
+     </div>
+     <div id="myRqRestNote" style="display:none" class="info-box mt-2">
+       <i class="bi bi-info-circle"></i> この日は働かない希望として提出します。AI自動生成でこの希望が優先されます。
      </div>
      <div class="form-error mt-2" id="myRqErr"></div>`,
     async (w, close) => {
@@ -2137,14 +2152,26 @@ function openMyReqModal(onDone) {
       const showErr = (m) => { if (errBox) errBox.innerHTML = m ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(m)}` : ''; };
       showErr('');
       const date = w.querySelector('#myRqDate').value;
+      if (!date) return showErr('日付を入力してください');
+      const type = w.querySelector('input[name="myRqType"]:checked').value;
       const st = w.querySelector('#myRqSt').value;
       const et = w.querySelector('#myRqEt').value;
-      const flex = w.querySelector('#myRqFlex').checked;
-      const avail = flex ? w.querySelector('#myRqAvail').value : null;
-      if (!date) return showErr('日付を入力してください');
-      if (!flex && (!st || !et)) return showErr('開始・終了時刻を入力してください');
-      const start_iso = `${date}T${st || '00:00'}:00`;
-      const end_iso = `${date}T${et || '23:59'}:00`;
+      let start_iso, end_iso, avail = null, reason = '管理者希望提出';
+      if (type === 'rest') {
+        start_iso = `${date}T00:00:00`;
+        end_iso = `${date}T23:59:59`;
+        avail = 'rest';
+        reason = '休希望(管理者)';
+      } else if (type === 'flex') {
+        start_iso = `${date}T${st || '00:00'}:00`;
+        end_iso = `${date}T${et || '23:59'}:00`;
+        avail = w.querySelector('#myRqAvail').value;
+        reason = '柔軟希望(管理者)';
+      } else {
+        if (!st || !et) return showErr('開始・終了時刻を入力してください');
+        start_iso = `${date}T${st}:00`;
+        end_iso = `${date}T${et}:00`;
+      }
       try {
         const body = { shifts: [{ start_datetime: start_iso, end_datetime: end_iso }] };
         if (avail) body.shifts[0].availability = avail;
@@ -2156,23 +2183,19 @@ function openMyReqModal(onDone) {
         showErr(e.message || '提出に失敗しました');
       }
     });
-  // 柔軟希望チェックで時間入力を無効化
-  setTimeout(() => {
-    const wrap = document.querySelector('.modal-overlay:last-child');
-    if (!wrap) return;
-    const flex = wrap.querySelector('#myRqFlex');
-    const flexBox = wrap.querySelector('#myRqFlexBox');
-    const stInput = wrap.querySelector('#myRqSt');
-    const etInput = wrap.querySelector('#myRqEt');
-    flex?.addEventListener('change', () => {
-      const on = flex.checked;
-      if (flexBox) flexBox.style.display = on ? 'block' : 'none';
-      if (stInput) stInput.disabled = on;
-      if (etInput) etInput.disabled = on;
-      if (on) { stInput?.classList.add('disabled-input'); etInput?.classList.add('disabled-input'); }
-      else { stInput?.classList.remove('disabled-input'); etInput?.classList.remove('disabled-input'); }
-    });
-  }, 50);
+  // ラジオボタンで表示切り替え
+  const radios = wrap.querySelectorAll('input[name="myRqType"]');
+  const timeRow = wrap.querySelector('#myRqTimeRow');
+  const flexBox = wrap.querySelector('#myRqFlexBox');
+  const restNote = wrap.querySelector('#myRqRestNote');
+  function update() {
+    const v = wrap.querySelector('input[name="myRqType"]:checked').value;
+    if (timeRow) timeRow.style.display = (v === 'rest') ? 'none' : 'flex';
+    if (flexBox) flexBox.style.display = (v === 'flex') ? 'block' : 'none';
+    if (restNote) restNote.style.display = (v === 'rest') ? 'block' : 'none';
+  }
+  radios.forEach((r) => r?.addEventListener('change', update));
+  update();
 }
 
 /* ---------- Requests (希望休管理) ---------- */

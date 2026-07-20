@@ -340,7 +340,10 @@ def auto_generate(shop_id, settings, start_date, end_date):
            または cap 内で社会人を同時に配置可能な余力があることを要件とする。
            ※ 厳格過ぎるとシフトが作れなくなるため、ここでは事前の警告用途とし、
               配置後に最終チェック（post_validate）で検知する。
+        【休希望】availability='rest' の日はそのスタッフは配置しない。
         """
+        if (staff_id, day) in rest_days:
+            return False, "rest_request"
         work = minutes_between(start_iso, end_iso)
         is_pt = staff_role.get(staff_id) == "part_time"
         is_student = staff_role.get(staff_id) == "student"
@@ -367,7 +370,10 @@ def auto_generate(shop_id, settings, start_date, end_date):
         固定シフトは契約勤務なので「最低時間・月間上限」では縛らないが、
         **上限人数(R1)** と **同日重複(R2)** は厳守する。
         これにより「必要人数設定」が固定シフトでも保証される（旧: 固定無条件配置バグの修正）。
+        【休希望】availability='rest' の日は固定シフトも配置しない。
         """
+        if (staff_id, day) in rest_days:
+            return False, "rest_request"
         _, sw = state(day)
         if staff_id in sw:
             return False, "already_working"
@@ -437,6 +443,7 @@ def auto_generate(shop_id, settings, start_date, end_date):
         "already_working": "同日内重複",
         "cap": "上限人数到達",
         "monthly_cap": "月間上限到達",
+        "rest_request": "休希望日",
     }
 
     # -----------------------------------------------------------
@@ -460,7 +467,7 @@ def auto_generate(shop_id, settings, start_date, end_date):
     overcap_fixed = []  # 上限超過でスキップされた固定（warnings/explanationsへ）
 
     # -----------------------------------------------------------
-    # Step2a: 時間指定希望（availability 無）
+    # Step2a: 時間指定希望（availability 無し）
     # -----------------------------------------------------------
     # ★ 入力ソース: wish_history（永久履歴）+ shifts.requested（後方互換）
     # これにより、AI自動生成を何度繰り返してもスタッフ希望が消失しない。
@@ -484,6 +491,17 @@ def auto_generate(shop_id, settings, start_date, end_date):
             "SELECT sh.*, s.role FROM shifts sh JOIN staffs s ON sh.staff_id=s.id "
             "WHERE sh.shop_id=? AND sh.status='requested' AND sh.start_datetime>=? AND sh.start_datetime<=?",
             (shop_id, start_date + "T00:00:00", end_date + "T23:59:59"))
+
+    # 休希望（availability='rest'）のスタッフ/日付のセットを作成
+    # このセットに入るスタッフは、その日の配置候補から外す
+    rest_days = set()  # (staff_id, day_str)
+    for r in requests:
+        if r.get("availability") == "rest":
+            rest_days.add((r["staff_id"], r["start_datetime"][:10]))
+    if rest_days:
+        # 休希望は配置候補から外すため、timed/flex リストから除去
+        requests = [r for r in requests if r.get("availability") != "rest"]
+
     timed = [r for r in requests if not r.get("availability")]
     flex = [r for r in requests if r.get("availability")]
 
