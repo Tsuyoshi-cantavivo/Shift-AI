@@ -2147,11 +2147,17 @@ async function loadShiftHours(body) {
     </div>
     <hr style="border-color:var(--line);margin:16px 0">
     <div class="section-title mb-2"><i class="bi bi-calendar-x"></i> 祝日・特別休業日</div>
-    <p class="small text-secondary mb-2">上記「祝日」設定を適用する日付を登録します。ここで登録した日付には祝日設定が適用されます。</p>
+    <p class="small text-secondary mb-2">上記「祝日」設定を適用する日付を登録します。<strong>日本の祝日</strong>は自動取り込み可能です（特別休業日は手動で追加してください）。</p>
+    <div class="flex gap-2 mb-2 flex-wrap">
+      <button class="btn btn-light" id="shImportJapanese" title="日本の祝日（今年〜3年分）を一括取り込み"><i class="bi bi-flag"></i> 日本の祝日を取り込む</button>
+      <button class="btn btn-light" id="shPreviewJapanese" title="取り込まれる祝日を事前確認"><i class="bi bi-eye"></i> 祝日を確認</button>
+    </div>
+    <div id="shJapanesePreview" class="holiday-preview mb-2" style="display:none"></div>
     <div class="row mb-2">
       <div class="col-8"><input type="date" id="shHolidayDate" class="form-control"></div>
       <div class="col-4"><button class="btn btn-light w-100" id="shAddHoliday"><i class="bi bi-plus-lg"></i> 追加</button></div>
     </div>
+    <div class="small text-secondary mb-1">上記「追加」ボタンは特別休業日（店の都合で休む日）の登録用です。日本の祝日は上の「日本の祝日を取り込む」をご利用ください。</div>
     <div id="shHolidayList"></div>
     <div class="flex gap-2 mt-3">
       <button class="btn btn-primary" id="shSave"><i class="bi bi-check-lg"></i> 保存</button>
@@ -2218,6 +2224,50 @@ async function loadShiftHours(body) {
       toast('祝日を追加しました', 'success');
       input.value = '';
       loadHolidays();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+
+  // 日本の祝日プレビュー
+  wrap.querySelector('#shPreviewJapanese')?.addEventListener('click', async () => {
+    const previewBox = wrap.querySelector('#shJapanesePreview');
+    if (!previewBox) return;
+    previewBox.style.display = 'block';
+    safeSetHTML(previewBox, '<div class="small text-secondary">計算中...</div>');
+    try {
+      const d = await api('/shop/holidays/japanese-preview');
+      const list = (d.holidays || []);
+      if (!list.length) {
+        safeSetHTML(previewBox, '<div class="small text-secondary">該当年の祝日がありません</div>');
+        return;
+      }
+      const grouped = {};
+      list.forEach((h) => {
+        const y = h.date.slice(0, 4);
+        (grouped[y] = grouped[y] || []).push(h);
+      });
+      const html = Object.keys(grouped).map((y) => `
+        <div class="holiday-preview-year">
+          <div class="small fw-bold mt-1">${y}年（${grouped[y].length}日）</div>
+          <div class="holiday-preview-chips">
+            ${grouped[y].map((h) => `<span class="holiday-chip" title="${esc(h.name)}">${esc(h.date.slice(5))} ${esc(h.name)}</span>`).join('')}
+          </div>
+        </div>`).join('');
+      safeSetHTML(previewBox, html);
+    } catch (e) {
+      safeSetHTML(previewBox, `<div class="text-danger small">${esc(e.message)}</div>`);
+    }
+  });
+
+  // 日本の祝日一括取り込み
+  wrap.querySelector('#shImportJapanese')?.addEventListener('click', async () => {
+    if (!confirm('日本の祝日（今年〜翌々年）を一括取り込みしますか？\n既存の祝日と重複する日はスキップされます。')) return;
+    try {
+      const r = await api('/shop/holidays/import-japanese', { method: 'POST', body: JSON.stringify({}) });
+      toast(`日本の祝日を ${r.imported} 件取り込みました（${r.skipped} 件スキップ）`, 'success');
+      loadHolidays();
+      // プレビュー表示があれば隠す
+      const previewBox = wrap.querySelector('#shJapanesePreview');
+      if (previewBox) previewBox.style.display = 'none';
     } catch (e) { toast(e.message, 'error'); }
   });
 

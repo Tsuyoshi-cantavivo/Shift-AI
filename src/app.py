@@ -21,6 +21,7 @@ from utils import (
 )
 import shift_engine
 import ai
+import holidays_jp
 
 # .env を読み込むが、既に環境変数が設定されている場合は上書きしない。
 # （テスト・E2Eで外部からDB_PATH等を与える場合、.env の値で潰されないように）
@@ -1089,6 +1090,100 @@ def shop_holidays_del(d):
     shop, shop_id, _ = _shop_ctx()
     execute("DELETE FROM shop_holidays WHERE shop_id=? AND holiday_date=?", (shop_id, d))
     return jsonify({"ok": True})
+
+
+@app.post("/api/shop/holidays/import-japanese")
+def shop_holidays_import_japanese():
+    """日本の祝日を一括インポート。
+
+    body:
+      - years: [2026, 2027, ...] 指定無し時は今年 + 翌年 + 翌々年（3年分）
+      - overwrite: bool 既存の祝日を上書きするか（デフォルト false）
+
+    戻り値: {ok, imported: int, skipped: int, holidays: [{date, name}]}
+    """
+    shop, shop_id, _ = _shop_ctx()
+    body = request.get_json(silent=True) or {}
+    overwrite = bool(body.get("overwrite", False))
+    # 対象年
+    years = body.get("years")
+    if not years or not isinstance(years, list):
+        from utils import jst_today
+        y0 = jst_today().year
+        years = [y0, y0 + 1, y0 + 2]
+    # 計算
+    all_holidays = []
+    for y in years:
+        try:
+            for h in holidays_jp.japanese_holidays(int(y)):
+                all_holidays.append(h)
+        except Exception:
+            continue
+    # 重複排除
+    seen = set()
+    unique = []
+    for h in all_holidays:
+        if h["date"] not in seen:
+            seen.add(h["date"])
+            unique.append(h)
+    # 既存取得
+    try:
+        existing = query_all("SELECT holiday_date FROM shop_holidays WHERE shop_id=?", (shop_id,))
+        existing_dates = {r["holiday_date"] for r in existing}
+    except Exception:
+        existing_dates = set()
+    # 登録
+    imported = 0
+    skipped = 0
+    for h in unique:
+        if h["date"] in existing_dates and not overwrite:
+            skipped += 1
+            continue
+        try:
+            if overwrite and h["date"] in existing_dates:
+                execute("UPDATE shop_holidays SET note=? WHERE shop_id=? AND holiday_date=?",
+                        (h["name"], shop_id, h["date"]))
+            else:
+                execute("INSERT OR IGNORE INTO shop_holidays (shop_id, holiday_date, note) VALUES (?,?,?)",
+                        (shop_id, h["date"], h["name"]))
+            imported += 1
+        except Exception:
+            skipped += 1
+    return jsonify({"ok": True, "imported": imported, "skipped": skipped, "holidays": unique,
+                    "years": years})
+
+
+@app.get("/api/shop/holidays/japanese-preview")
+def shop_holidays_japanese_preview():
+    """日本の祝日プレビュー（保存せず計算結果だけ返す）。
+    クエリ: ?years=2026,2027,2028
+    """
+    shop, shop_id, _ = _shop_ctx()
+    years_str = request.args.get("years", "")
+    if years_str:
+        try:
+            years = [int(y) for y in years_str.split(",") if y.strip()]
+        except ValueError:
+            years = []
+    else:
+        from utils import jst_today
+        y0 = jst_today().year
+        years = [y0, y0 + 1, y0 + 2]
+    result = []
+    for y in years:
+        try:
+            result.extend(holidays_jp.japanese_holidays(y))
+        except Exception:
+            continue
+    # 重複排除
+    seen = set()
+    unique = []
+    for h in result:
+        if h["date"] not in seen:
+            seen.add(h["date"])
+            unique.append(h)
+    unique.sort(key=lambda x: x["date"])
+    return jsonify({"holidays": unique, "years": years})
 
 
 # --- スタッフ ---

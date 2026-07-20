@@ -158,4 +158,52 @@ test.describe('シフト時間設定タブ', () => {
     await page.waitForSelector('.holiday-row[data-date="2026-01-01"]', { state: 'detached', timeout: 5000 });
     expect(errors).toEqual([]);
   });
+
+  test('日本の祝日をプレビューできる', async ({ page }) => {
+    const errors = attachConsoleCollector(page);
+    await loginAsManager(page, {
+      shopCode: SHOP.shopCode,
+      managerCode: SHOP.managerCode,
+      password: SHOP.managerPassword,
+    });
+    await page.click('button[data-screen="settings"]');
+    await page.waitForSelector('.tab[data-tab="shifthours"]');
+    await page.click('.tab[data-tab="shifthours"]');
+    await page.waitForSelector('#shPreviewJapanese', { timeout: 10000 });
+
+    // プレビューボタン
+    await page.click('#shPreviewJapanese');
+    await page.waitForSelector('#shJapanesePreview .holiday-chip', { timeout: 8000 });
+    // 元日が含まれる
+    const chips = await page.locator('#shJapanesePreview .holiday-chip').count();
+    expect(chips).toBeGreaterThan(10);
+    expect(errors).toEqual([]);
+  });
+
+  test('日本の祝日を一括取り込みできる', async ({ page }) => {
+    const errors = attachConsoleCollector(page);
+    await loginAsManager(page, {
+      shopCode: SHOP.shopCode,
+      managerCode: SHOP.managerCode,
+      password: SHOP.managerPassword,
+    });
+    await page.click('button[data-screen="settings"]');
+    await page.waitForSelector('.tab[data-tab="shifthours"]');
+    await page.click('.tab[data-tab="shifthours"]');
+    await page.waitForSelector('#shImportJapanese', { timeout: 10000 });
+
+    // confirm ダイアログを自動承認
+    page.on('dialog', (d) => d.accept().catch(() => {}));
+    // 一括取り込み
+    await page.click('#shImportJapanese');
+    // 成功トースト or 祝日リストに追加されるのを待つ
+    await Promise.race([
+      page.waitForSelector('.toast', { timeout: 8000 }),
+      page.waitForSelector('.holiday-row', { timeout: 8000 }),
+    ]);
+    // 少なくとも1件の祝日（元日など）が含まれる
+    const holidayCount = await page.locator('.holiday-row').count();
+    expect(holidayCount).toBeGreaterThan(5);  // 数年分で数十件
+    expect(errors).toEqual([]);
+  });
 });

@@ -962,3 +962,30 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 }
 .holiday-list .list-row { padding: 8px 10px; }
 .holiday-row { font-size: .9rem; }
+
+/* 日本の祝日プレビュー・チップ */
+.holiday-preview {
+  padding: 10px;
+  background: var(--card-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.holiday-preview-year { margin-bottom: 6px; }
+.holiday-preview-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.holiday-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  font-size: .72rem;
+  color: var(--t-muted);
+  white-space: nowrap;
+}
