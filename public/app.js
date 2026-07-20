@@ -399,7 +399,7 @@ const NAV_DEFS = {
   ],
   staff: [
     { key: 'staffDashboard', icon: 'bi-house-door', label: 'ホーム', mobile: true },
-    { key: 'myshift', icon: 'bi-calendar-check', label: 'マイシフト', mobile: true },
+    { key: 'staffMyshift', icon: 'bi-calendar-check', label: 'マイシフト', mobile: true },
     { key: 'request', icon: 'bi-pencil-square', label: '希望提出', mobile: true },
     { key: 'staffSettings', icon: 'bi-person-gear', label: '設定', mobile: true },
   ],
@@ -2818,7 +2818,7 @@ SCREENS.staffDashboard = async function (el) {
   renderMini(); renderSug();
 };
 
-SCREENS.myshift = function (el) {
+SCREENS.staffMyshift = function (el) {
   el.innerHTML = pageHead('マイシフト', 'bi-calendar-check') +
     card(`<div class="flex justify-between items-center mb-2">${sectionTitle('bi-calendar-check', 'マイシフト')}<button class="btn btn-light btn-sm" id="icsBtn"><i class="bi bi-calendar-plus"></i> カレンダー同期</button></div>
       <div id="mySummary" class="mb-2"></div><div id="staffCalMount"></div>
