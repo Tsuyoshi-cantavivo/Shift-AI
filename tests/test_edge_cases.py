@@ -280,6 +280,8 @@ class TestLongString:
         long_name = "あ" * 10000
         r = client.post("/api/admin/shops", json={
             "shop_code": "LONG", "shop_name": long_name, "password": "Password1",
+            "manager_code": "mgr-long", "manager_password": "Mgr1234long",
+            "manager_name": "店主",
         }, headers=auth(tok))
         assert r.status_code == 200
 

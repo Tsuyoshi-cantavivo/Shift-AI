@@ -1,0 +1,27 @@
+{
+  "name": "shift_saas_flask",
+  "version": "1.0.0",
+  "description": "Flask + SQLite（Cloudflare D1互換）で構築されたシフト管理SaaS。 AI（LLM API）による自然言語希望解析・シフト自動生成機能を搭載。",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tsuyoshi-cantavivo/Shift-AI.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Tsuyoshi-cantavivo/Shift-AI/issues"
+  },
+  "homepage": "https://github.com/Tsuyoshi-cantavivo/Shift-AI#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
+  }
+}

@@ -34,6 +34,7 @@ _TABLES = [
     "shift_pattern_weekday_required",
     "shift_request_periods",
     "shift_patterns",
+    "shop_holidays",
     "sessions",
     "notifications",
     "staffs",

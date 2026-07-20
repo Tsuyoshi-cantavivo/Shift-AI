@@ -14,7 +14,9 @@ import json
 import sqlite3
 from dotenv import load_dotenv
 
-load_dotenv()
+# .env を読み込むが、既に環境変数が設定されている場合は上書きしない。
+# （テスト・E2Eで DB_PATH 等を外部から与える場合、.env の値で潰されないように）
+load_dotenv(override=False)
 
 DB_MODE = os.getenv("DB_MODE", "local")
 DB_PATH = os.getenv("DB_PATH", "shift.db")

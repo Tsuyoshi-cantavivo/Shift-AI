@@ -42,9 +42,16 @@ class TestAdminApis:
         r = client.post("/api/admin/shops", json={
             "shop_code": "NEW", "shop_name": "新店舗",
             "password": "ShopPass1", "settings": {"x": 1},
+            "manager_code": "mgr99", "manager_password": "Mgr12345",
+            "manager_name": "店主1",
         }, headers=auth(tok))
-        assert r.status_code == 200
+        assert r.status_code == 200, r.get_json()
         sid = r.get_json()["id"]
+        # 店舗責任者が作成されていることを検証
+        mgr = dbmod.query_one("SELECT * FROM staffs WHERE shop_id=? AND staff_code=?",
+                              (sid, "mgr99"))
+        assert mgr is not None
+        assert mgr["role"] == "manager"
         # 更新
         r = client.put(f"/api/admin/shops/{sid}", json={
             "shop_name": "改名", "is_active": False,

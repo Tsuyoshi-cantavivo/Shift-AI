@@ -37,6 +37,8 @@ window?.addEventListener('unhandledrejection', (e) => {
 /* ============================================================
    Utilities
    ============================================================ */
+let _navToken = 0;  // 現在画面のトークン（高速遷移で前画面の非同期更新を破棄するため）
+
 async function api(path, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
@@ -48,6 +50,32 @@ async function api(path, options = {}) {
     throw new Error(data.error || ('HTTP ' + res.status));
   }
   return data;
+}
+
+/* 現在画面が生きているか確認するガード関数。
+   高速遷移で前画面の async 処理が DOM を書き換えるのを防ぐために使う。
+   token を省略した場合は _navToken（最新）と比較し、移動済みなら false を返す。
+   例:
+     const tok = navToken();
+     const data = await api(...);
+     if (!isAlive(tok)) return;  // 既に別画面へ遷移済み → DOM更新中止
+     el.innerHTML = ...;
+*/
+function navToken() { return _navToken; }
+function isAlive(token) { return token === _navToken; }
+
+/* 安全な innerHTML setter: 要素が null/undefined または画面遷移済みなら何もしない。
+   DOM破棄後の更新を根本防止（"Cannot set properties of null (setting 'innerHTML')" 回避）。 */
+function safeSetHTML(el, html) {
+  if (!el || !el.isConnected) return false;
+  try { el.innerHTML = html; return true; }
+  catch (e) { console.warn('[ShiftAI] safeSetHTML failed:', e?.message || e); return false; }
+}
+
+/* 安全な querySelector: element が null なら null を返す（オプショナルチェーンの糖衣）。 */
+function $q(parent, selector) {
+  if (!parent) return null;
+  try { return parent.querySelector(selector); } catch { return null; }
 }
 
 function logoutLocal() {
@@ -148,10 +176,16 @@ function badge(text, variant = 'muted') {
   return `<span class="badge-soft ${variant}">${esc(text)}</span>`;
 }
 
-/* ロールコード → 日本語表示（manager/employee/part_time に対応） */
+/* ロールコード → 日本語表示（manager/employee/part_time/student に対応） */
 function roleLabel(role) {
-  return role === 'manager' ? '店舗管理者' : role === 'employee' ? '社員' : 'アルバイト';
+  return role === 'manager' ? '店舗管理者'
+    : role === 'employee' ? '社員'
+    : role === 'student' ? '学生アルバイト'
+    : 'アルバイト';
 }
+
+/* 学生アルバイトの月間上限 */
+const STUDENT_MAX_HOURS = 80;
 
 /* Modal */
 function openModal(title, bodyHtml, onSave, opts = {}) {
@@ -397,6 +431,8 @@ function setActiveNav() {
 }
 
 function navigateTo(screen) {
+  // 画面遷移トークンをインクリメント → 前画面の async 処理が isAlive(tok) で自我判断できる
+  _navToken++;
   // Destroy charts on navigation
   Object.values(chartInstances).forEach((c) => { try { c.destroy(); } catch {} });
   chartInstances = {};
@@ -405,6 +441,7 @@ function navigateTo(screen) {
   currentScreen = screen;
   setActiveNav();
   const content = document.getElementById('content');
+  if (!content) return;
   content.innerHTML = '';
   content.className = 'app-content fade-in';
   const fn = SCREENS[screen];
@@ -571,13 +608,19 @@ function createCalendar(mountEl, opts) {
   let lastTap = 0;
 
   async function refresh() {
+    const tok = navToken();
     setLoading(true);
     try {
       const from = `${state.y}-${String(state.m + 1).padStart(2, '0')}-01`;
       const to = `${state.y}-${String(state.m + 1).padStart(2, '0')}-31`;
       state.shifts = await opts.loader(from, to);
+      // 画面遷移済み or DOM破棄済みなら更新中止
+      if (!isAlive(tok) || !mountEl.isConnected) return;
       draw();
-    } catch (e) { mountEl.innerHTML = `<div class="text-danger">${esc(e.message)}</div>`; }
+    } catch (e) {
+      if (!isAlive(tok) || !mountEl.isConnected) return;
+      safeSetHTML(mountEl, `<div class="text-danger">${esc(e.message)}</div>`);
+    }
     finally { setLoading(false); }
   }
 
@@ -1173,11 +1216,14 @@ async function openChangeRequests() {
 }
 
 async function loadShortage(box, start, end) {
+  if (!box || !box.isConnected) return;
   if (!start || !end) { box.innerHTML = '<div class="text-muted small">期間を指定してください</div>'; return; }
+  const tok = navToken();
   try {
     // 時間帯単位の不足を計算（「夜(17:00)」のような区分単位ではなく）
     await ensureBusinessHours();
     const sd = await api(`/shop/shifts?start=${start}&end=${end}`);
+    if (!isAlive(tok) || !box.isConnected) return;
     const allShifts = sd.shifts || [];
     const byDay = {};
     allShifts.forEach((s) => {
@@ -1215,12 +1261,16 @@ async function loadShortage(box, start, end) {
         });
       });
     }
+    if (!isAlive(tok) || !box.isConnected) return;
     if (!chips.length) {
       box.innerHTML = '<div class="shortage-none"><i class="bi bi-check-circle"></i> 不足なし — 全時間帯充足</div>';
     } else {
       box.innerHTML = chips.join('');
     }
-  } catch (e) { box.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`; }
+  } catch (e) {
+    if (!isAlive(tok) || !box.isConnected) return;
+    box.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
+  }
 }
 
 /* ============================================================
@@ -1230,6 +1280,7 @@ const SCREENS = {};
 
 /* ---------- Dashboard ---------- */
 SCREENS.dashboard = async function (el) {
+  const tok = navToken();
   el.innerHTML = pageHead('ダッシュボード', 'bi-grid-1x2', currentUser.shop_name) +
     `<div class="kpi-grid" id="kpiGrid"><div class="skeleton" style="height:110px;border-radius:16px"></div><div class="skeleton" style="height:110px;border-radius:16px"></div><div class="skeleton" style="height:110px;border-radius:16px"></div><div class="skeleton" style="height:110px;border-radius:16px"></div></div>
     <div class="dash-grid">
@@ -1239,8 +1290,11 @@ SCREENS.dashboard = async function (el) {
 
   try {
     const d = await api('/shop/dashboard');
+    // 画面遷移済み or DOM破棄済みなら更新中止（"Cannot set properties of null" 回避）
+    if (!isAlive(tok) || !el.isConnected) return;
     // KPIs
-    document.getElementById('kpiGrid').innerHTML =
+    const kpiGrid = document.getElementById('kpiGrid');
+    if (kpiGrid) kpiGrid.innerHTML =
       kpiCard('bi-people-fill', '稼働スタッフ', d.staff_count, `社員${d.employee_count} / バイト${d.part_time_count}`, 'indigo') +
       kpiCard('bi-calendar-check', '今日の出勤', d.today_attendance + '名', d.today_shortage ? `${d.today_shortage}枠不足` : '充足', d.today_shortage ? 'amber' : 'green') +
       kpiCard('bi-cash-stack', '今月の人件費', '¥' + (d.month_cost / 1000).toFixed(0) + 'K', `${d.month_hours}h`, 'indigo') +
@@ -1248,7 +1302,7 @@ SCREENS.dashboard = async function (el) {
 
     // Left: charts
     const leftBox = document.getElementById('dashLeft');
-    leftBox.innerHTML =
+    if (leftBox) leftBox.innerHTML =
       card(sectionTitle('bi-bar-chart', '今日の時間帯別人数') + `<div class="chart-box"><canvas id="todayChart"></canvas></div>`) +
       card(sectionTitle('bi-graph-up', '人件費推移（直近30日）') + `<div class="chart-box"><canvas id="costChart"></canvas></div>`);
 
@@ -1256,7 +1310,8 @@ SCREENS.dashboard = async function (el) {
     const todayHours = d.today_hourly.length ? d.today_hourly : [];
     const hours = todayHours.map((h) => h.hour + ':00');
     const counts = todayHours.map((h) => h.count);
-    chartInstances.today = new Chart(document.getElementById('todayChart'), {
+    const todayCanvas = document.getElementById('todayChart');
+    if (todayCanvas) chartInstances.today = new Chart(todayCanvas, {
       type: 'bar',
       data: { labels: hours.length ? hours : ['データなし'], datasets: [{ label: '人数', data: counts.length ? counts : [0], backgroundColor: 'rgba(99,102,241,.6)', borderRadius: 6 }] },
       options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { color: '#64748B' }, grid: { color: 'rgba(148,163,184,.1)' } }, x: { ticks: { color: '#64748B' }, grid: { display: false } } } }
@@ -1264,7 +1319,8 @@ SCREENS.dashboard = async function (el) {
 
     // Cost chart
     const costData = d.daily_cost_series || [];
-    chartInstances.cost = new Chart(document.getElementById('costChart'), {
+    const costCanvas = document.getElementById('costChart');
+    if (costCanvas) chartInstances.cost = new Chart(costCanvas, {
       type: 'line',
       data: { labels: costData.map((c) => c.date.slice(5)), datasets: [{ label: '人件費(円)', data: costData.map((c) => c.cost), borderColor: '#6366F1', backgroundColor: 'rgba(99,102,241,.1)', fill: true, tension: .3, pointRadius: 0 }] },
       options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { ticks: { color: '#64748B', callback: (v) => '¥' + (v / 1000) + 'K' }, grid: { color: 'rgba(148,163,184,.1)' } }, x: { ticks: { color: '#64748B', maxTicksLimit: 8 }, grid: { display: false } } } }
@@ -1274,7 +1330,8 @@ SCREENS.dashboard = async function (el) {
     const rightBox = document.getElementById('dashRight');
     let aiAdvice = 'シフトデータを分析中...';
     try { const rev = await api('/shop/ai/review', { method: 'POST', body: JSON.stringify({ start: todayStr().slice(0, 8) + '01', end: todayStr().slice(0, 8) + '31' }) }); aiAdvice = rev.advice; } catch {}
-    rightBox.innerHTML =
+    if (!isAlive(tok) || !el.isConnected) return;
+    if (rightBox) rightBox.innerHTML =
       card(sectionTitle('bi-stars', 'AIからの提案', badge('AI', 'ai')) + `<div class="reason-text" style="font-size:.88rem;line-height:1.7;white-space:pre-wrap">${esc(aiAdvice)}</div>`) +
       card(sectionTitle('bi-lightning', 'クイック操作') +
         `<button class="btn btn-ai w-full mb-2" id="qGen"><i class="bi bi-stars"></i> AIでシフト作成</button>
@@ -1289,10 +1346,13 @@ SCREENS.dashboard = async function (el) {
     // Notifications
     try {
       const n = await api('/shop/notifications');
-      document.getElementById('dashNotif').innerHTML = n.notifications.length ? n.notifications.slice(0, 4).map((x) => `<div class="notif-item ${x.is_read ? '' : 'unread'}"><div class="nt-title">${esc(x.title)}</div><div class="nt-body">${esc(x.body || '')}</div></div>`).join('') : '<div class="small text-secondary">通知はありません</div>';
+      if (!isAlive(tok) || !el.isConnected) return;
+      const dashNotif = document.getElementById('dashNotif');
+      if (dashNotif) dashNotif.innerHTML = n.notifications.length ? n.notifications.slice(0, 4).map((x) => `<div class="notif-item ${x.is_read ? '' : 'unread'}"><div class="nt-title">${esc(x.title)}</div><div class="nt-body">${esc(x.body || '')}</div></div>`).join('') : '<div class="small text-secondary">通知はありません</div>';
     } catch {}
   } catch (e) {
-    el.innerHTML = card(`<div class="text-danger">${esc(e.message)}</div>`);
+    if (!isAlive(tok) || !el.isConnected) return;
+    safeSetHTML(el, card(`<div class="text-danger">${esc(e.message)}</div>`));
   }
 };
 
@@ -1517,15 +1577,21 @@ SCREENS.shifts = function (el) {
   async function loadSummary() {
     const { start, end } = cur();
     const box = document.getElementById('summaryBox');
+    if (!box) return;
     if (!start || !end) { box.innerHTML = '<div class="text-muted small">期間を指定してください</div>'; return; }
+    const tok = navToken();
     try {
       const d = await api(`/shop/summary?start=${start}&end=${end}`);
+      if (!isAlive(tok) || !box.isConnected) return;
       if (!d.staff.length) { box.innerHTML = '<div class="text-muted small">確定シフトがありません</div>'; return; }
       box.innerHTML = `<div class="table-wrap"><table class="data-table"><thead><tr><th>氏名</th><th>日</th><th class="t-num">確定</th><th class="t-num">見込</th><th class="t-num">深夜</th><th class="t-num">給与</th></tr></thead>
         <tbody>${d.staff.map((s) => `<tr><td><div class="staff-cell"><span class="staff-name">${esc(s.name)}</span><span class="staff-sub">${roleLabel(s.role)}</span></div></td><td>${s.days}</td><td class="t-num num">${s.confirmed_hours}h</td><td class="t-num num">${s.projected_hours}h</td><td class="t-num num">${s.night_hours}h</td><td class="t-num num">${yen(s.pay)}</td></tr>`).join('')}
         <tr style="font-weight:800;color:var(--indigo-l)"><td>合計</td><td></td><td class="t-num num">${d.total_hours}h</td><td class="t-num num">${d.total_projected_hours}h</td><td></td><td class="t-num num">${yen(d.total_pay)}</td></tr>
         </tbody></table></div>`;
-    } catch (e) { box.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`; }
+    } catch (e) {
+      if (!isAlive(tok) || !box.isConnected) return;
+      box.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
+    }
   }
   async function refreshShortage() {
     const { start, end } = cur();
@@ -1684,14 +1750,17 @@ SCREENS.staffs = async function (el) {
   await loadStaffList();
 };
 async function loadStaffList() {
+  const tok = navToken();
   try {
     const data = await api('/shop/staffs');
+    if (!isAlive(tok)) return;
     const list = document.getElementById('staffList');
+    if (!list) return;
     if (!data.staffs.length) { list.innerHTML = emptyState('bi-people', 'スタッフがいません'); return; }
     list.innerHTML = data.staffs.map((s) => `
       <div class="list-row">
         <div class="flex items-center gap-2">
-          <span class="dot ${s.role === 'employee' ? 'evening' : 'noon'}"></span>
+          <span class="dot ${s.role === 'employee' || s.role === 'manager' ? 'evening' : s.role === 'student' ? 'morning' : 'noon'}"></span>
           <div>
             <strong>${esc(s.name)}</strong> <span class="text-secondary">${esc(s.staff_code)}</span>${s.is_resigned ? badge('退職', 'warning') : ''}
             <div class="small text-secondary">${roleLabel(s.role)} ・ 時給${s.hourly_wage}円 ・ 月${s.min_hours_per_month}-${s.max_hours_per_month}h</div>
@@ -1706,21 +1775,27 @@ async function loadStaffList() {
     list.querySelectorAll('[data-edit]').forEach((b) => b?.addEventListener('click', () => showStaffForm(data.staffs.find((x) => x.id == b.dataset.edit))));
     list.querySelectorAll('[data-fix]').forEach((b) => b?.addEventListener('click', () => showFixedShiftModal(+b.dataset.fix, b.dataset.name)));
     list.querySelectorAll('[data-del]').forEach((b) => b?.addEventListener('click', () => confirmDeleteStaff(+b.dataset.del, b.dataset.name)));
-  } catch (e) { document.getElementById('staffList').innerHTML = `<div class="text-danger">${esc(e.message)}</div>`; }
+  } catch (e) {
+    if (!isAlive(tok)) return;
+    const list = document.getElementById('staffList');
+    if (list) list.innerHTML = `<div class="text-danger">${esc(e.message)}</div>`;
+  }
 }
 function showStaffForm(s) {
   const isEdit = !!s;
+  const isStudent = s && s.role === 'student';
   const wrap = openModal(`<i class="bi bi-person-plus"></i> ${isEdit ? 'スタッフ編集' : 'スタッフ追加'}`,
     `<div class="row">
       <div class="col-6"><label class="form-label" for="f_code">コード</label><input id="f_code" class="form-control" value="${s ? esc(s.staff_code) : ''}" ${isEdit ? 'disabled' : ''}></div>
       <div class="col-6"><label class="form-label" for="f_name">氏名</label><input id="f_name" class="form-control" value="${s ? esc(s.name) : ''}"></div>
     </div>
-    <label class="form-label mt-2">ロール</label><select id="f_role" class="form-select"><option value="part_time" ${s && s.role === 'part_time' ? 'selected' : ''}>アルバイト</option><option value="employee" ${s && s.role === 'employee' ? 'selected' : ''}>社員</option><option value="manager" ${s && s.role === 'manager' ? 'selected' : ''}>店舗管理者（店舗権限）</option></select>
+    <label class="form-label mt-2">ロール</label><select id="f_role" class="form-select"><option value="part_time" ${s && s.role === 'part_time' ? 'selected' : ''}>アルバイト</option><option value="student" ${s && s.role === 'student' ? 'selected' : ''}>学生アルバイト（月${STUDENT_MAX_HOURS}h上限）</option><option value="employee" ${s && s.role === 'employee' ? 'selected' : ''}>社員</option><option value="manager" ${s && s.role === 'manager' ? 'selected' : ''}>店舗管理者（店舗権限）</option></select>
     <div class="row mt-2">
       <div class="col-4"><label class="form-label" for="f_wage">時給</label><input id="f_wage" type="number" class="form-control" value="${s ? s.hourly_wage : 1100}"></div>
       <div class="col-4"><label class="form-label" for="f_min">最低h</label><input id="f_min" type="number" class="form-control" value="${s ? s.min_hours_per_month : 0}"></div>
-      <div class="col-4"><label class="form-label" for="f_max">上限h</label><input id="f_max" type="number" class="form-control" value="${s ? s.max_hours_per_month : 160}"></div>
+      <div class="col-4"><label class="form-label" for="f_max">上限h ${isStudent ? `<span class="text-danger small">(学生は${STUDENT_MAX_HOURS})</span>` : ''}</label><input id="f_max" type="number" class="form-control" value="${s ? s.max_hours_per_month : 160}" ${isStudent ? 'max="' + STUDENT_MAX_HOURS + '"' : ''}></div>
     </div>
+    <div class="small text-secondary mt-1" id="f_role_hint" style="display:${isStudent ? 'block' : 'none'}"><i class="bi bi-info-circle"></i> 学生アルバイトは月間${STUDENT_MAX_HOURS}時間上限・学生のみのシフトは作成できません。</div>
     <label class="form-label mt-2">ステータス</label><select id="f_resign" class="form-select"><option value="0" ${!s || !s.is_resigned ? 'selected' : ''}>在籍</option><option value="1" ${s && s.is_resigned ? 'selected' : ''}>退職</option></select>
     <label class="form-label mt-2">パスワード ${isEdit ? '（変更時のみ・8文字以上）' : '（8文字以上・英数字）'}</label>
     <input id="f_pw" type="password" class="form-control" placeholder="${isEdit ? '空欄で変更なし' : 'パスワード'}" autocomplete="new-password">
@@ -1748,6 +1823,13 @@ function showStaffForm(s) {
       // 必須項目
       if (!isEdit && !g('#f_code')) { showErr('コードを入力してください'); return; }
       if (!g('#f_name')) { showErr('氏名を入力してください'); return; }
+      // 学生アルバイト: 月80h上限
+      const role = g('#f_role');
+      const maxH = parseInt(g('#f_max'), 10);
+      if (role === 'student' && maxH > STUDENT_MAX_HOURS) {
+        showErr(`学生アルバイトの月間上限は${STUDENT_MAX_HOURS}時間です（${maxH}hは設定できません）`);
+        return;
+      }
       showErr('');
       try {
         if (isEdit) {
@@ -1761,6 +1843,32 @@ function showStaffForm(s) {
         showErr(e.message || '保存に失敗しました');
       }
     });
+  // ロール変更で「学生」を選択したとき上限のヒントを表示
+  const roleSel = wrap.querySelector('#f_role');
+  const hintBox = wrap.querySelector('#f_role_hint');
+  const maxInput = wrap.querySelector('#f_max');
+  const maxLabel = wrap.querySelector('label[for="f_max"]');
+  function syncRoleUI() {
+    const isStu = roleSel.value === 'student';
+    if (hintBox) hintBox.style.display = isStu ? 'block' : 'none';
+    if (isStu) {
+      maxInput.max = String(STUDENT_MAX_HOURS);
+      if (parseInt(maxInput.value, 10) > STUDENT_MAX_HOURS) maxInput.value = String(STUDENT_MAX_HOURS);
+      if (maxLabel) maxLabel.innerHTML = `上限h <span class="text-danger small">(学生は${STUDENT_MAX_HOURS})</span>`;
+    } else {
+      maxInput.removeAttribute('max');
+      if (maxLabel) maxLabel.innerHTML = '上限h';
+    }
+  }
+  roleSel?.addEventListener('change', syncRoleUI);
+  // 上限h を直接編集した際も学生なら80にクランプ
+  maxInput?.addEventListener('input', () => {
+    if (roleSel.value === 'student') {
+      const v = parseInt(maxInput.value, 10);
+      if (!isNaN(v) && v > STUDENT_MAX_HOURS) maxInput.value = String(STUDENT_MAX_HOURS);
+    }
+  });
+  maxInput?.addEventListener('blur', syncRoleUI);
   // リアルタイム検証: 入力ごとにルールの check/cross を切替
   const pwInput = wrap.querySelector('#f_pw');
   const ruleEls = wrap.querySelectorAll('.pw-rule');
@@ -1849,11 +1957,14 @@ function showFixedShiftModal(staffId, staffName) {
 
 /* ---------- Requests (希望休管理) ---------- */
 SCREENS.requests = async function (el) {
+  const tok = navToken();
   el.innerHTML = pageHead('希望休管理', 'bi-inbox', 'スタッフからの希望シフト一覧') + card(`<div id="reqList"><div class="text-secondary small">読み込み中...</div></div>`);
   try {
     const d = await api(`/shop/shifts?start=${todayStr().slice(0,8)+'01'}&end=${plusMonths(1)}`);
+    if (!isAlive(tok) || !el.isConnected) return;
     const reqs = (d.shifts || []).filter((s) => s.status === 'requested');
     const box = document.getElementById('reqList');
+    if (!box) return;
     if (!reqs.length) { box.innerHTML = emptyState('bi-inbox', '希望シフトはありません'); return; }
     box.innerHTML = `<div class="table-wrap"><table class="data-table"><thead><tr><th>スタッフ</th><th>日付</th><th>時間</th><th>種別</th><th></th></tr></thead><tbody>
       ${reqs.sort((a,b)=>a.start_datetime.localeCompare(b.start_datetime)).map((s) => `
@@ -1918,21 +2029,31 @@ SCREENS.analytics = async function (el) {
 /* ---------- Notifications ---------- */
 SCREENS.notifications = async function (el) {
   el.innerHTML = pageHead('通知', 'bi-bell') + card(`<div id="notifList"><div class="text-muted small">読み込み中...</div></div><button class="btn btn-light w-full mt-3 d-none" id="readAll">すべて既読にする</button>`);
+  const tok = navToken();
   const loadNotifs = async () => {
     try {
       const d = await api('/shop/notifications');
+      if (!isAlive(tok) || !el.isConnected) return;
       const list = document.getElementById('notifList');
+      if (!list) return;
       list.innerHTML = d.notifications.length ? d.notifications.map((n) => `
         <div class="notif-item ${n.is_read ? '' : 'unread'}"><div class="nt-title">${esc(n.title)}</div><div class="nt-body">${esc(n.body || '')}</div><div class="nt-time">${esc((n.created_at || '').replace('T', ' ').slice(0, 16))}</div></div>`).join('')
         : emptyState('bi-bell', '通知はありません');
       const readBtn = document.getElementById('readAll');
-      if (d.unread > 0) { readBtn.classList.remove('d-none'); } else { readBtn.classList.add('d-none'); }
-    } catch (e) { document.getElementById('notifList').innerHTML = `<div class="text-danger">${esc(e.message)}</div>`; }
+      if (readBtn) {
+        if (d.unread > 0) { readBtn.classList.remove('d-none'); } else { readBtn.classList.add('d-none'); }
+      }
+    } catch (e) {
+      if (!isAlive(tok) || !el.isConnected) return;
+      const list = document.getElementById('notifList');
+      if (list) list.innerHTML = `<div class="text-danger">${esc(e.message)}</div>`;
+    }
   };
   await loadNotifs();
   document.getElementById('readAll')?.addEventListener('click', async () => {
     await api('/shop/notifications/read-all', { method: 'PUT' });
     toast('既読にしました', 'success');
+    if (!isAlive(tok) || !el.isConnected) return;
     await loadNotifs(); refreshNotifBadge();
   });
 };
@@ -1943,6 +2064,7 @@ SCREENS.settings = function (el) {
   el.innerHTML = pageHead('設定', 'bi-gear') +
     `<div class="tabs no-print">
       <button class="tab ${settingsTab==='shift'?'active':''}" data-tab="shift">シフト設定</button>
+      <button class="tab ${settingsTab==='shifthours'?'active':''}" data-tab="shifthours">シフト時間設定</button>
       <button class="tab ${settingsTab==='shop'?'active':''}" data-tab="shop">店舗情報</button>
       <button class="tab ${settingsTab==='periods'?'active':''}" data-tab="periods">募集期間</button>
       <button class="tab ${settingsTab==='password'?'active':''}" data-tab="password">パスワード</button>
@@ -1951,7 +2073,202 @@ SCREENS.settings = function (el) {
   renderSettingsTab(el.querySelector('#settingsBody'));
 };
 function renderSettingsTab(body) {
-  ({ shift: renderShiftMatrixTab, shop: renderShopTab, periods: renderPeriodsTab, password: renderPasswordTab }[settingsTab])(body);
+  ({ shift: renderShiftMatrixTab, shifthours: renderShiftHoursTab, shop: renderShopTab, periods: renderPeriodsTab, password: renderPasswordTab }[settingsTab])(body);
+}
+
+/* --- シフト時間設定（シフト作成可能時間・曜日別/一括） --- */
+const SHIFT_HOUR_DAYS = [
+  { key: '1', label: '月曜日', short: '月' },
+  { key: '2', label: '火曜日', short: '火' },
+  { key: '3', label: '水曜日', short: '水' },
+  { key: '4', label: '木曜日', short: '木' },
+  { key: '5', label: '金曜日', short: '金' },
+  { key: '6', label: '土曜日', short: '土' },
+  { key: '0', label: '日曜日', short: '日' },
+  { key: 'holiday', label: '祝日', short: '祝' },
+];
+const DEFAULT_SHIFT_HOURS = {
+  bulk_mode: true,
+  bulk: { start_time: '09:00', end_time: '22:00', is_closed: false },
+  days: {
+    '0': { start_time: '09:00', end_time: '22:00', is_closed: false },
+    '1': { start_time: '09:00', end_time: '22:00', is_closed: false },
+    '2': { start_time: '09:00', end_time: '22:00', is_closed: false },
+    '3': { start_time: '09:00', end_time: '22:00', is_closed: false },
+    '4': { start_time: '09:00', end_time: '22:00', is_closed: false },
+    '5': { start_time: '09:00', end_time: '22:00', is_closed: false },
+    '6': { start_time: '09:00', end_time: '22:00', is_closed: false },
+    'holiday': { start_time: '09:00', end_time: '22:00', is_closed: false },
+  },
+};
+
+function renderShiftHoursTab(body) {
+  body.innerHTML = card(sectionTitle('bi-clock-history', 'シフト時間設定',
+    `<span class="small text-secondary">— シフト作成可能な時間帯を曜日別または一括で設定</span>`) +
+    `<div id="shiftHoursWrap"><div class="text-secondary small">読み込み中...</div></div>`);
+  loadShiftHours(body);
+}
+
+async function loadShiftHours(body) {
+  const wrap = body.querySelector('#shiftHoursWrap');
+  if (!wrap) return;  // タブ切替で要素が既に無い場合は何もしない（null防范）
+  let data;
+  try {
+    data = await api('/shop/shift-hours');
+  } catch (e) {
+    wrap.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
+    return;
+  }
+  // デフォルトとマージして補完
+  const merged = {
+    bulk_mode: data.bulk_mode !== undefined ? !!data.bulk_mode : true,
+    bulk: { ...(DEFAULT_SHIFT_HOURS.bulk), ...(data.bulk || {}) },
+    days: { ...(DEFAULT_SHIFT_HOURS.days), ...(data.days || {}) },
+  };
+  SHIFT_HOUR_DAYS.forEach((d) => {
+    merged.days[d.key] = { ...(DEFAULT_SHIFT_HOURS.days[d.key]), ...(merged.days[d.key] || {}) };
+  });
+
+  wrap.innerHTML = `
+    <p class="small text-secondary mb-3">
+      <i class="bi bi-info-circle"></i>
+      この時間帯は「シフト作成が可能な時間帯」を表します。定休日にチェックを入れた日はシフトが作成されません。
+    </p>
+    <div class="form-check form-switch mb-3">
+      <input class="form-check-input" type="checkbox" id="shBulkMode" ${merged.bulk_mode ? 'checked' : ''}>
+      <label class="form-check-label" for="shBulkMode"><strong>一括設定</strong> <span class="small text-secondary">（全曜日・祝日共通の時間帯を指定）</span></label>
+    </div>
+    <div id="shBulkWrap" style="display:${merged.bulk_mode ? 'block' : 'none'}">
+      ${renderShiftHourRow('一括（全曜日・祝日）', 'bulk', merged.bulk, true)}
+    </div>
+    <div id="shDaysWrap" style="display:${merged.bulk_mode ? 'none' : 'block'}">
+      <div class="section-title mb-2"><i class="bi bi-calendar3"></i> 曜日別設定</div>
+      ${SHIFT_HOUR_DAYS.map((d) => renderShiftHourRow(d.label, 'day_' + d.key, merged.days[d.key], false)).join('')}
+    </div>
+    <hr style="border-color:var(--line);margin:16px 0">
+    <div class="section-title mb-2"><i class="bi bi-calendar-x"></i> 祝日・特別休業日</div>
+    <p class="small text-secondary mb-2">上記「祝日」設定を適用する日付を登録します。ここで登録した日付には祝日設定が適用されます。</p>
+    <div class="row mb-2">
+      <div class="col-8"><input type="date" id="shHolidayDate" class="form-control"></div>
+      <div class="col-4"><button class="btn btn-light w-100" id="shAddHoliday"><i class="bi bi-plus-lg"></i> 追加</button></div>
+    </div>
+    <div id="shHolidayList"></div>
+    <div class="flex gap-2 mt-3">
+      <button class="btn btn-primary" id="shSave"><i class="bi bi-check-lg"></i> 保存</button>
+      <span class="small text-secondary flex items-center">※変更後「保存」を押してください。</span>
+    </div>
+    <div id="shMsg" class="mt-2 small"></div>`;
+
+  // 一括設定トグル
+  const bulkToggle = wrap.querySelector('#shBulkMode');
+  bulkToggle?.addEventListener('change', () => {
+    const bulkMode = bulkToggle.checked;
+    wrap.querySelector('#shBulkWrap').style.display = bulkMode ? 'block' : 'none';
+    wrap.querySelector('#shDaysWrap').style.display = bulkMode ? 'none' : 'block';
+  });
+  // 定休日チェックボックスの挙動（時間入力をグレーアウト）
+  wrap.querySelectorAll('.sh-closed').forEach((cb) => {
+    cb?.addEventListener('change', () => {
+      const row = cb.closest('.sh-row');
+      if (!row) return;
+      const st = row.querySelector('.sh-start');
+      const et = row.querySelector('.sh-end');
+      if (cb.checked) {
+        if (st) { st.disabled = true; st.classList.add('disabled-input'); }
+        if (et) { et.disabled = true; et.classList.add('disabled-input'); }
+      } else {
+        if (st) { st.disabled = false; st.classList.remove('disabled-input'); }
+        if (et) { et.disabled = false; et.classList.remove('disabled-input'); }
+      }
+    });
+  });
+  // 初期表示で closed 状態を反映
+  wrap.querySelectorAll('.sh-closed').forEach((cb) => {
+    if (cb.checked) cb.dispatchEvent(new Event('change'));
+  });
+
+  // 祝日リストのロード
+  const loadHolidays = async () => {
+    try {
+      const hd = await api('/shop/holidays');
+      const list = wrap.querySelector('#shHolidayList');
+      if (!list) return;
+      list.innerHTML = (hd.holidays || []).length ? `<div class="holiday-list">${hd.holidays.map((h) => `
+        <div class="list-row holiday-row" data-date="${esc(h.holiday_date)}">
+          <div><strong>${esc(h.holiday_date)}</strong> ${h.note ? `<span class="text-secondary small">${esc(h.note)}</span>` : ''}</div>
+          <button class="btn btn-sm btn-outline-danger" data-del="${esc(h.holiday_date)}"><i class="bi bi-x"></i></button>
+        </div>`).join('')}</div>` : '<div class="small text-secondary">祝日は登録されていません</div>';
+      list.querySelectorAll('[data-del]').forEach((b) => b?.addEventListener('click', async () => {
+        try {
+          await api(`/shop/holidays/${encodeURIComponent(b.dataset.del)}`, { method: 'DELETE' });
+          toast('祝日を削除しました', 'success');
+          loadHolidays();
+        } catch (e) { toast(e.message, 'error'); }
+      }));
+    } catch (e) {
+      // 祝日APIが未対応の場合は無害
+    }
+  };
+  loadHolidays();
+  wrap.querySelector('#shAddHoliday')?.addEventListener('click', async () => {
+    const input = wrap.querySelector('#shHolidayDate');
+    if (!input || !input.value) { toast('日付を選択してください', 'error'); return; }
+    try {
+      await api('/shop/holidays', { method: 'POST', body: JSON.stringify({ holiday_date: input.value }) });
+      toast('祝日を追加しました', 'success');
+      input.value = '';
+      loadHolidays();
+    } catch (e) { toast(e.message, 'error'); }
+  });
+
+  // 保存
+  wrap.querySelector('#shSave')?.addEventListener('click', async () => {
+    const bulkMode = wrap.querySelector('#shBulkMode').checked;
+    const bulk = readShiftHourRow(wrap, 'bulk');
+    const days = {};
+    SHIFT_HOUR_DAYS.forEach((d) => {
+      days[d.key] = readShiftHourRow(wrap, 'day_' + d.key);
+    });
+    const payload = { bulk_mode: bulkMode, bulk, days };
+    try {
+      await api('/shop/shift-hours', { method: 'PUT', body: JSON.stringify({ shift_hours: payload }) });
+      const msg = wrap.querySelector('#shMsg');
+      if (msg) msg.innerHTML = '<span class="text-success"><i class="bi bi-check-circle"></i> 保存しました</span>';
+      toast('シフト時間設定を保存しました', 'success');
+    } catch (e) {
+      const msg = wrap.querySelector('#shMsg');
+      if (msg) msg.innerHTML = `<span class="text-danger"><i class="bi bi-exclamation-triangle"></i> ${esc(e.message)}</span>`;
+    }
+  });
+}
+
+function renderShiftHourRow(label, key, data, isBulk) {
+  const closed = !!data.is_closed;
+  return `<div class="sh-row ${isBulk ? 'sh-row-bulk' : 'sh-row-day'}">
+    <div class="sh-row-label"><strong>${esc(label)}</strong></div>
+    <div class="sh-row-controls">
+      <label class="form-check sh-closed-label">
+        <input type="checkbox" class="sh-closed" data-key="${key}" ${closed ? 'checked' : ''}>
+        <span class="small">定休日</span>
+      </label>
+      <div class="sh-time-inputs">
+        <input type="time" class="form-control sh-start" data-key="${key}" value="${esc(data.start_time || '09:00')}" ${closed ? 'disabled' : ''}>
+        <span class="sh-time-sep">〜</span>
+        <input type="time" class="form-control sh-end" data-key="${key}" value="${esc(data.end_time || '22:00')}" ${closed ? 'disabled' : ''}>
+      </div>
+    </div>
+  </div>`;
+}
+
+function readShiftHourRow(wrap, key) {
+  const st = wrap.querySelector(`.sh-start[data-key="${key}"]`);
+  const et = wrap.querySelector(`.sh-end[data-key="${key}"]`);
+  const cb = wrap.querySelector(`.sh-closed[data-key="${key}"]`);
+  return {
+    start_time: st?.value || '09:00',
+    end_time: et?.value || '22:00',
+    is_closed: !!(cb?.checked),
+  };
 }
 
 /* --- シフト設定（マトリクス） --- */
@@ -2434,8 +2751,71 @@ SCREENS.adminShops = async function (el) {
   load();
   document.getElementById('addShopBtn')?.addEventListener('click', () =>
     openModal('<i class="bi bi-plus-lg"></i> 店舗追加',
-      `<label class="form-label" for="shCode">店舗コード</label><input id="shCode" class="form-control mb-2"><label class="form-label" for="shName">店舗名</label><input id="shName" class="form-control mb-2"><label class="form-label" for="shPw">パスワード</label><input id="shPw" class="form-control">`,
-      async (w, close) => { try { await api('/admin/shops', { method: 'POST', body: JSON.stringify({ shop_code: w.querySelector('#shCode').value, shop_name: w.querySelector('#shName').value, password: w.querySelector('#shPw').value }) }); close(); toast('追加しました', 'success'); load(); } catch (e) { toast(e.message, 'error'); } }));
+      `<p class="small text-secondary mb-3">店舗情報と、ログイン用の店舗責任者アカウントを同時に作成します。店舗責任者は作成直後から <strong>店舗コード + ユーザーID + パスワード</strong> でログインできます。</p>
+       <div class="row"><div class="col-6"><label class="form-label" for="shCode">店舗コード <span class="text-danger">*</span></label><input id="shCode" class="form-control mb-2" placeholder="例: SHOP001"></div><div class="col-6"><label class="form-label" for="shName">店舗名 <span class="text-danger">*</span></label><input id="shName" class="form-control mb-2" placeholder="例: 渋谷店"></div></div>
+       <label class="form-label" for="shPw">店舗パスワード <span class="text-danger">*</span></label><input id="shPw" type="password" class="form-control mb-2" placeholder="8文字以上・英数字" autocomplete="new-password">
+       <hr style="border-color:var(--line);margin:14px 0">
+       <div class="section-title"><i class="bi bi-person-badge"></i> 店舗責任者アカウント</div>
+       <div class="row mt-2"><div class="col-6"><label class="form-label" for="shMgrCode">ユーザーID <span class="text-danger">*</span></label><input id="shMgrCode" class="form-control mb-2" placeholder="例: manager" autocomplete="username"></div><div class="col-6"><label class="form-label" for="shMgrName">氏名 <span class="text-danger">*</span></label><input id="shMgrName" class="form-control mb-2" placeholder="例: 山田太郎"></div></div>
+       <label class="form-label" for="shMgrPw">パスワード <span class="text-danger">*</span></label><input id="shMgrPw" type="password" class="form-control" placeholder="8文字以上・英数字" autocomplete="new-password">
+       <div class="pw-rules mt-2" id="shPwRules">
+         <span class="pw-rule" data-rule="len"><i class="bi bi-circle"></i>8文字以上</span>
+         <span class="pw-rule" data-rule="alpha"><i class="bi bi-circle"></i>英字を含む</span>
+         <span class="pw-rule" data-rule="digit"><i class="bi bi-circle"></i>数字を含む</span>
+       </div>
+       <div class="form-error mt-2" id="shFormErr"></div>`,
+      async (w, close) => {
+        const g = (id) => (w.querySelector(id)?.value || '').trim();
+        const errBox = w.querySelector('#shFormErr');
+        const showErr = (msg) => { if (errBox) errBox.innerHTML = msg ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(msg)}` : ''; };
+        showErr('');
+        // バリデーション
+        if (!g('#shCode')) return showErr('店舗コードを入力してください');
+        if (!g('#shName')) return showErr('店舗名を入力してください');
+        if (!g('#shMgrCode')) return showErr('店舗責任者のユーザーIDを入力してください');
+        if (!g('#shMgrName')) return showErr('店舗責任者の氏名を入力してください');
+        const shPw = g('#shPw');
+        const mgrPw = g('#shMgrPw');
+        const verr1 = validatePassword(shPw);
+        if (verr1) return showErr('店舗パスワード: ' + verr1);
+        const verr2 = validatePassword(mgrPw);
+        if (verr2) return showErr('店舗責任者パスワード: ' + verr2);
+        try {
+          const result = await api('/admin/shops', { method: 'POST', body: JSON.stringify({
+            shop_code: g('#shCode'), shop_name: g('#shName'), password: shPw,
+            manager_code: g('#shMgrCode'), manager_password: mgrPw, manager_name: g('#shMgrName'),
+          })});
+          close();
+          toast(`店舗「${g('#shName')}」と店舗責任者「${g('#shMgrName')}」を作成しました`, 'success');
+          load();
+        } catch (e) { showErr(e.message || '作成に失敗しました'); }
+      }, { saveLabel: '店舗を作成' }));
+  // リアルタイムパスワード検証（両方のPW入力を監視）
+  setTimeout(() => {
+    const wrap = document.querySelector('.modal-overlay:last-child');
+    if (!wrap) return;
+    const pwInputs = wrap.querySelectorAll('#shPw, #shMgrPw');
+    const ruleEls = wrap.querySelectorAll('#shPwRules .pw-rule');
+    const updateRules = (input) => {
+      const v = input?.value || '';
+      const checks = {
+        len: v.length >= 8,
+        alpha: /[A-Za-z]/.test(v),
+        digit: /[0-9]/.test(v),
+      };
+      ruleEls.forEach((el) => {
+        const k = el.dataset.rule;
+        const ok = checks[k];
+        el.classList.toggle('ok', !!ok && v.length > 0);
+        el.classList.toggle('ng', !ok && v.length > 0);
+        el.querySelector('i').className = ok ? 'bi bi-check-circle-fill' : 'bi bi-x-circle-fill';
+      });
+    };
+    pwInputs.forEach((inp) => inp?.addEventListener('input', () => {
+      updateRules(inp);
+      wrap.querySelector('#shFormErr').innerHTML = '';
+    }));
+  }, 50);
 };
 SCREENS.adminShopDetail = async function (el) {
   const sid = window._adminShopId;
@@ -2446,15 +2826,26 @@ SCREENS.adminShopDetail = async function (el) {
       <div id="detailBody"><div class="text-secondary small">期間を指定してください</div></div>`);
   document.getElementById('backBtn')?.addEventListener('click', () => navigateTo('adminShops'));
   document.getElementById('loadBtn')?.addEventListener('click', () => loadDetail());
-  api(`/admin/shops/${sid}/periods/next`).then((p) => { dStart.value = p.start_date; dEnd.value = p.end_date; loadDetail(); }).catch(() => {});
+  api(`/admin/shops/${sid}/periods/next`).then((p) => {
+    const ds = document.getElementById('dStart'); const de = document.getElementById('dEnd');
+    if (!ds || !de) return;  // 画面遷移済み
+    ds.value = p.start_date; de.value = p.end_date; loadDetail();
+  }).catch(() => {});
   async function loadDetail() {
     const start = dStart.value, end = dEnd.value; if (!start || !end) return;
-    const body = document.getElementById('detailBody'); body.innerHTML = '<div class="text-secondary small">読み込み中...</div>';
+    const body = document.getElementById('detailBody');
+    if (!body) return;  // 画面遷移済み → 更新中止
+    const tok = navToken();
+    body.innerHTML = '<div class="text-secondary small">読み込み中...</div>';
     try {
       const [sum, st] = await Promise.all([api(`/admin/shops/summary/${sid}?start=${start}&end=${end}`), api(`/admin/shops/staffs/${sid}`)]);
+      if (!isAlive(tok) || !body.isConnected) return;  // 画面遷移済み
       const tbl = sum.staff.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>氏名</th><th>日</th><th class="t-num">確定</th><th class="t-num">給与</th></tr></thead><tbody>${sum.staff.map((s) => `<tr><td>${esc(s.name)}</td><td>${s.days}</td><td class="t-num num">${s.confirmed_hours}h</td><td class="t-num num">${yen(s.pay)}</td></tr>`).join('')}<tr style="font-weight:800;color:var(--indigo-l)"><td>合計</td><td></td><td class="t-num num">${sum.total_hours}h</td><td class="t-num num">${yen(sum.total_pay)}</td></tr></tbody></table></div>` : '<div class="small text-secondary">確定シフトなし</div>';
       const slist = st.staffs.map((s) => `<div class="list-row"><div class="staff-cell"><span class="staff-name">${esc(s.name)}</span><span class="staff-sub">${esc(s.staff_code)} ・ ${roleLabel(s.role)}${s.is_resigned ? ' ・ 退職' : ''}</span></div></div>`).join('');
       body.innerHTML = sectionTitle('bi-people', `スタッフ（${st.staffs.length}名）`) + slist + `<hr style="border-color:var(--line);margin:16px 0">` + sectionTitle('bi-bar-chart', `集計（${start}〜${end}）`) + tbl;
-    } catch (e) { body.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`; }
+    } catch (e) {
+      if (!isAlive(tok) || !body.isConnected) return;
+      body.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
+    }
   }
 };

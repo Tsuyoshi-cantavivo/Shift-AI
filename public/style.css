@@ -912,3 +912,53 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
   /* チャートや装飾は印刷しない */
   canvas, .chart-box { display: none !important; }
 }
+
+/* ============================================================
+   シフト時間設定（曜日別/一括）
+   ============================================================ */
+.sh-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+  background: var(--card);
+}
+.sh-row-bulk { background: var(--card-2); border-color: var(--indigo-l); }
+.sh-row-label { font-size: .92rem; }
+.sh-row-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.sh-closed-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.sh-time-inputs {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.sh-time-inputs .form-control {
+  width: 110px;
+}
+.sh-time-sep {
+  color: var(--t-muted);
+  font-weight: 600;
+}
+.sh-start.disabled-input,
+.sh-end.disabled-input {
+  background: var(--bg) !important;
+  color: var(--t-muted) !important;
+  opacity: .5;
+  cursor: not-allowed;
+}
+.holiday-list .list-row { padding: 8px 10px; }
+.holiday-row { font-size: .9rem; }

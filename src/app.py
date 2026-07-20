@@ -22,7 +22,9 @@ from utils import (
 import shift_engine
 import ai
 
-load_dotenv()
+# .env を読み込むが、既に環境変数が設定されている場合は上書きしない。
+# （テスト・E2Eで外部からDB_PATH等を与える場合、.env の値で潰されないように）
+load_dotenv(override=False)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # プロジェクトルート
 PUBLIC_DIR = os.path.join(BASE_DIR, "public")
@@ -624,11 +626,68 @@ def admin_shops():
 
 @app.post("/api/admin/shops")
 def admin_create_shop():
+    """店舗作成（店舗責任者アカウント同時作成対応）。
+
+    body:
+      - shop_code: 必須
+      - shop_name: 必須
+      - password: 必須（店铺自身のPW。後方互換用。空文字可）
+      - settings: dict (optional)
+      - manager_code: 店舗責任者のユーザーコード（管理者が任意指定）
+      - manager_password: 店舗責任者のPW
+      - manager_name: 店舗責任者の氏名
+
+    店舗責任者は role='manager' の staffs 行として作成され、
+    shop_code + manager_code + manager_password で即ログイン可能。
+    """
     require_auth(["admin"])
     body = request.get_json(silent=True) or {}
-    meta = execute("INSERT INTO shops (shop_code, shop_name, password_hash, settings) VALUES (?,?,?,?)",
-                   (body["shop_code"], body["shop_name"], hash_password(body["password"]), json.dumps(body.get("settings") or {})))
-    return jsonify({"ok": True, "id": meta["last_row_id"]})
+    # 必須項目
+    if not body.get("shop_code"):
+        abort(400, description="店舗コードを入力してください")
+    if not body.get("shop_name"):
+        abort(400, description="店舗名を入力してください")
+    shop_pw = body.get("password") or "shopdefault1"
+    err = validate_password(shop_pw)
+    if err:
+        abort(400, description="店舗パスワード: " + err)
+    # 重複チェック
+    dup = query_one("SELECT id FROM shops WHERE shop_code=?", (body["shop_code"],))
+    if dup:
+        abort(400, description=f"店舗コード '{body['shop_code']}' は既に存在します")
+    # 店舗責任者のバリデーション（必須）
+    mgr_code = (body.get("manager_code") or "").strip()
+    mgr_pw = body.get("manager_password") or ""
+    mgr_name = (body.get("manager_name") or "").strip()
+    if not mgr_code:
+        abort(400, description="店舗責任者のユーザーIDを入力してください")
+    if not mgr_name:
+        abort(400, description="店舗責任者の氏名を入力してください")
+    err = validate_password(mgr_pw)
+    if err:
+        abort(400, description="店舗責任者パスワード: " + err)
+    # 店舗を作成
+    meta = execute(
+        "INSERT INTO shops (shop_code, shop_name, password_hash, settings) VALUES (?,?,?,?)",
+        (body["shop_code"], body["shop_name"], hash_password(shop_pw),
+         json.dumps(body.get("settings") or {}, ensure_ascii=False)))
+    shop_id = meta["last_row_id"]
+    # 店舗責任者を manager ロールで作成
+    try:
+        execute(
+            "INSERT INTO staffs (shop_id, staff_code, password_hash, name, role, "
+            "hourly_wage, min_hours_per_month, max_hours_per_month) VALUES (?,?,?,?,?,?,?,?)",
+            (shop_id, mgr_code, hash_password(mgr_pw), mgr_name, "manager",
+             body.get("manager_wage") or 2000, 0, 200))
+    except Exception as e:
+        # ロールバック: 店舗を削除
+        execute("DELETE FROM shops WHERE id=?", (shop_id,))
+        msg = str(e)
+        if "UNIQUE" in msg.upper():
+            abort(400, description=f"ユーザーID '{mgr_code}' は既に存在します（店舗コードと同じ値にするか、別のIDを指定してください）")
+        abort(400, description="店舗責任者の作成に失敗しました: " + msg)
+    return jsonify({"ok": True, "id": shop_id, "shop_id": shop_id,
+                    "manager_code": mgr_code, "manager_name": mgr_name})
 
 
 @app.put("/api/admin/shops/<int:sid>")
@@ -687,6 +746,59 @@ def admin_shop_summary(sid):
 def _shop_ctx():
     require_auth(["shop"])
     return g.user, g.user["id"], parse_settings(g.user.get("settings"))
+
+
+def _check_student_only_shift(shop_id, staff_id, start_iso, exclude_id=None):
+    """学生アルバイトのみで構成されるシフトになるかをチェック。
+
+    指定 staff を追加した場合、当日の当該時間帯に勤務するスタッフが
+    全員 student ロールになる場合は（社会人不在で）NG。
+    戻り値: (is_ng: bool, message: str or None)
+    """
+    try:
+        target = query_one("SELECT role FROM staffs WHERE id=?", (staff_id,))
+    except Exception:
+        target = None
+    if not target:
+        return (False, None)
+    # 学生以外のロールを追加する場合は問題なし
+    if target["role"] != "student":
+        return (False, None)
+    # 当該日の confirmed シフトと重なるスタッフを抽出
+    day = (start_iso or "")[:10]
+    if not day:
+        return (False, None)
+    rows = query_all(
+        "SELECT sh.id, sh.staff_id, sh.start_datetime, sh.end_datetime, s.role "
+        "FROM shifts sh JOIN staffs s ON sh.staff_id=s.id "
+        "WHERE sh.shop_id=? AND sh.status='confirmed' "
+        "AND sh.start_datetime>=? AND sh.start_datetime<=?",
+        (shop_id, day + "T00:00:00", day + "T23:59:59"))
+    try:
+        s_new = parse_iso(start_iso)
+        # 終了時刻が無い場合はとりあえず開始+1hと仮定（簡易チェック）
+        from datetime import timedelta as _td
+        e_new = s_new + _td(hours=1)
+    except Exception:
+        return (False, None)
+    overlapping_roles = set()
+    for r in rows:
+        if exclude_id and str(r["id"]) == str(exclude_id):
+            continue
+        try:
+            s = parse_iso(r["start_datetime"]); e = parse_iso(r["end_datetime"])
+        except Exception:
+            continue
+        # 時間帯が重なるか
+        if s_new < e and s < e_new:
+            overlapping_roles.add(r["role"])
+    # 追加対象（student）を加えた構成
+    overlapping_roles.add("student")
+    # 学生しかいない状態（社会人ロール employee/manager/part_time がいない）
+    non_student_roles = overlapping_roles - {"student"}
+    if not non_student_roles:
+        return (True, "学生アルバイトのみで構成されるシフトは作成できません（社会人スタッフを少なくとも1名配置してください）")
+    return (False, None)
 
 
 @app.get("/api/shop/dashboard")
@@ -815,6 +927,170 @@ def shop_password():
     return jsonify({"ok": True})
 
 
+# ===========================================================
+# シフト時間設定（シフト作成可能時間）
+# ===========================================================
+# 設定スキーマ (shops.settings.shift_hours):
+#   {
+#     "bulk_mode": bool,                # True=一括設定、False=曜日別
+#     "bulk": {"start_time": "09:00", "end_time": "22:00", "is_closed": false},
+#     "days": {                          # 曜日別設定（祝日含む）
+#       "0": {"start_time": "...", "end_time": "...", "is_closed": false},  # 日
+#       "1": {...},  # 月
+#       ...
+#       "6": {...},  # 土
+#       "holiday": {...}  # 祝日
+#     }
+#   }
+_DEFAULT_SHIFT_HOURS = {
+    "bulk_mode": True,
+    "bulk": {"start_time": "09:00", "end_time": "22:00", "is_closed": False},
+    "days": {
+        "0": {"start_time": "09:00", "end_time": "22:00", "is_closed": False},
+        "1": {"start_time": "09:00", "end_time": "22:00", "is_closed": False},
+        "2": {"start_time": "09:00", "end_time": "22:00", "is_closed": False},
+        "3": {"start_time": "09:00", "end_time": "22:00", "is_closed": False},
+        "4": {"start_time": "09:00", "end_time": "22:00", "is_closed": False},
+        "5": {"start_time": "09:00", "end_time": "22:00", "is_closed": False},
+        "6": {"start_time": "09:00", "end_time": "22:00", "is_closed": False},
+        "holiday": {"start_time": "09:00", "end_time": "22:00", "is_closed": False},
+    },
+}
+
+_SHIFT_HOURS_DAY_KEYS = ("0", "1", "2", "3", "4", "5", "6", "holiday")
+
+
+def _normalize_shift_hours(sh):
+    """フロントからの入力を正規化。不正値はデフォルトにフォールバック。"""
+    if not isinstance(sh, dict):
+        return dict(_DEFAULT_SHIFT_HOURS)
+    out = {"bulk_mode": bool(sh.get("bulk_mode", True))}
+    # bulk
+    bulk_in = sh.get("bulk") or {}
+    out["bulk"] = {
+        "start_time": _validate_hhmm(bulk_in.get("start_time"), "09:00"),
+        "end_time": _validate_hhmm(bulk_in.get("end_time"), "22:00"),
+        "is_closed": bool(bulk_in.get("is_closed", False)),
+    }
+    # days
+    days_in = sh.get("days") or {}
+    days_out = {}
+    for k in _SHIFT_HOURS_DAY_KEYS:
+        d = days_in.get(k) or {}
+        days_out[k] = {
+            "start_time": _validate_hhmm(d.get("start_time"), "09:00"),
+            "end_time": _validate_hhmm(d.get("end_time"), "22:00"),
+            "is_closed": bool(d.get("is_closed", False)),
+        }
+    out["days"] = days_out
+    return out
+
+
+def _validate_hhmm(v, default):
+    """HH:MM 形式の簡易バリデーション。"""
+    if not isinstance(v, str):
+        return default
+    parts = v.split(":")
+    if len(parts) != 2:
+        return default
+    try:
+        h, m = int(parts[0]), int(parts[1])
+        if 0 <= h <= 47 and 0 <= m <= 59:
+            return f"{h:02d}:{m:02d}"
+    except ValueError:
+        pass
+    return default
+
+
+@app.get("/api/shop/shift-hours")
+def shop_shift_hours_get():
+    """シフト時間設定を取得。"""
+    shop, shop_id, settings = _shop_ctx()
+    sh = settings.get("shift_hours")
+    if not sh:
+        # 従来の business_hours 設定があればそれを流用（後方互換）
+        sh = dict(_DEFAULT_SHIFT_HOURS)
+    result = _normalize_shift_hours(sh)
+    # 祝日日付リストも併せて返す
+    try:
+        holidays = query_all(
+            "SELECT holiday_date, note FROM shop_holidays WHERE shop_id=? ORDER BY holiday_date",
+            (shop_id,))
+    except Exception:
+        holidays = []
+    result["holidays"] = holidays
+    return jsonify(result)
+
+
+@app.put("/api/shop/shift-hours")
+def shop_shift_hours_put():
+    """シフト時間設定を保存。
+
+    body: shift_hours オブジェクト（bulk_mode, bulk, days）
+    """
+    shop, shop_id, settings = _shop_ctx()
+    body = request.get_json(silent=True) or {}
+    sh = body.get("shift_hours") or body  # トップレベルでも shift_hours キーでも許容
+    normalized = _normalize_shift_hours(sh)
+    cur = dict(settings)
+    cur["shift_hours"] = normalized
+    execute("UPDATE shops SET settings=? WHERE id=?", (json.dumps(cur, ensure_ascii=False), shop_id))
+    # 祝日リストの差分更新（オプション）
+    if "holidays" in body:
+        new_dates = set()
+        for h in (body.get("holidays") or []):
+            d = h.get("holiday_date") if isinstance(h, dict) else h
+            if d:
+                new_dates.add(d)
+        try:
+            existing = query_all("SELECT holiday_date FROM shop_holidays WHERE shop_id=?", (shop_id,))
+            existing_dates = {r["holiday_date"] for r in existing}
+            for d in new_dates - existing_dates:
+                execute("INSERT OR IGNORE INTO shop_holidays (shop_id, holiday_date) VALUES (?,?)", (shop_id, d))
+            for d in existing_dates - new_dates:
+                execute("DELETE FROM shop_holidays WHERE shop_id=? AND holiday_date=?", (shop_id, d))
+        except Exception:
+            pass
+    return jsonify({"ok": True, "shift_hours": normalized})
+
+
+@app.get("/api/shop/holidays")
+def shop_holidays_get():
+    """店舗の祝日・特別休業日リストを取得。"""
+    shop, shop_id, _ = _shop_ctx()
+    try:
+        rows = query_all(
+            "SELECT id, holiday_date, note FROM shop_holidays WHERE shop_id=? ORDER BY holiday_date",
+            (shop_id,))
+    except Exception:
+        rows = []
+    return jsonify({"holidays": rows})
+
+
+@app.post("/api/shop/holidays")
+def shop_holidays_post():
+    """祝日・特別休業日を1件追加。"""
+    shop, shop_id, _ = _shop_ctx()
+    body = request.get_json(silent=True) or {}
+    d = body.get("holiday_date")
+    if not d:
+        abort(400, description="holiday_date が必要です")
+    try:
+        execute("INSERT OR IGNORE INTO shop_holidays (shop_id, holiday_date, note) VALUES (?,?,?)",
+                (shop_id, d, body.get("note") or ""))
+    except Exception as e:
+        abort(400, description="祝日の追加に失敗しました: " + str(e))
+    return jsonify({"ok": True})
+
+
+@app.delete("/api/shop/holidays/<path:d>")
+def shop_holidays_del(d):
+    """祝日・特別休業日を1件削除。"""
+    shop, shop_id, _ = _shop_ctx()
+    execute("DELETE FROM shop_holidays WHERE shop_id=? AND holiday_date=?", (shop_id, d))
+    return jsonify({"ok": True})
+
+
 # --- スタッフ ---
 @app.get("/api/shop/staffs")
 def shop_staffs():
@@ -839,14 +1115,29 @@ def shop_staffs_post():
     dup = query_one("SELECT id FROM staffs WHERE shop_id=? AND staff_code=?", (shop_id, body["staff_code"]))
     if dup:
         abort(400, description=f"コード '{body['staff_code']}' は既に存在します。別のコードを指定してください。")
-    # role のバリデーション（'employee' / 'part_time' / 'manager' 以外は拒否）
+    # role のバリデーション（'employee' / 'part_time' / 'manager' / 'student' 以外は拒否）
     role = body.get("role") or "part_time"
-    if role not in ("employee", "part_time", "manager"):
-        abort(400, description="ロールは employee / part_time / manager のいずれかを指定してください")
+    if role not in ("employee", "part_time", "manager", "student"):
+        abort(400, description="ロールは employee / part_time / manager / student のいずれかを指定してください")
+    # 学生アルバイト: 月80h上限を強制（ロール固有ルール）
+    max_hours = body.get("max_hours_per_month")
+    if role == "student":
+        try:
+            mh = int(max_hours) if max_hours is not None else 80
+        except (ValueError, TypeError):
+            mh = 80
+        if mh > 80:
+            abort(400, description="学生アルバイトの月間上限は80時間です（80時間を超える設定はできません）")
+        max_hours = min(mh, 80)
+    else:
+        try:
+            max_hours = int(max_hours) if max_hours is not None else 160
+        except (ValueError, TypeError):
+            max_hours = 160
     meta = execute("INSERT INTO staffs (shop_id, staff_code, password_hash, name, role, hourly_wage, min_hours_per_month, max_hours_per_month) VALUES (?,?,?,?,?,?,?,?)",
                    (shop_id, body["staff_code"], hash_password(pw), body["name"], role,
                     body.get("hourly_wage") or settings.get("default_hourly_wage") or 1000,
-                    body.get("min_hours_per_month") or 0, body.get("max_hours_per_month") or 160))
+                    body.get("min_hours_per_month") or 0, max_hours))
     return jsonify({"ok": True, "id": meta["last_row_id"]})
 
 
@@ -854,8 +1145,20 @@ def shop_staffs_post():
 def shop_staffs_put(sid):
     shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
+    # 学生アルバイト上限のバリデーション
+    cur_staff = query_one("SELECT role FROM staffs WHERE id=? AND shop_id=?", (sid, shop_id))
+    role = cur_staff["role"] if cur_staff else "part_time"
+    max_hours = body.get("max_hours_per_month")
+    try:
+        mh = int(max_hours) if max_hours is not None else None
+    except (ValueError, TypeError):
+        mh = None
+    if role == "student" and mh is not None and mh > 80:
+        abort(400, description="学生アルバイトの月間上限は80時間です（80時間を超える設定はできません）")
+    if mh is None:
+        mh = 80 if role == "student" else 160
     execute("UPDATE staffs SET name=?, hourly_wage=?, min_hours_per_month=?, max_hours_per_month=?, is_resigned=? WHERE id=? AND shop_id=?",
-            (body["name"], body["hourly_wage"], body["min_hours_per_month"], body["max_hours_per_month"],
+            (body["name"], body["hourly_wage"], body["min_hours_per_month"], mh,
              1 if body.get("is_resigned") else 0, sid, shop_id))
     if body.get("password"):
         err = validate_password(body["password"])
@@ -1413,6 +1716,11 @@ def shop_shifts_post():
     brk = body.get("break_time_minutes")
     if brk is None:
         brk = compute_break_minutes(work)
+    # 学生アルバイトのみ構成チェック（追加前）
+    student_ng, student_msg = _check_student_only_shift(shop_id, staff_id, start_dt)
+    if student_ng:
+        print(f"[SHIFT POST] student_only: {student_msg} staff_id={staff_id} {start_dt}〜{end_dt}", flush=True)
+        return jsonify({"error": student_msg, "student_only": True}), 400
     meta = execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason) VALUES (?,?,?,?,?,?,?)",
                    (shop_id, staff_id, start_dt, end_dt, brk, body.get("status") or "confirmed", body.get("reason") or "手動追加"))
     print(f"[SHIFT POST id={meta['last_row_id']}] OK: staff_id={staff_id} {start_dt}〜{end_dt}", flush=True)
@@ -1461,6 +1769,11 @@ def shop_shifts_put(sid):
     brk = body.get("break_time_minutes")
     if brk is None:
         brk = compute_break_minutes(work)
+    # 学生アルバイトのみ構成チェック（更新後の時間帯で）
+    student_ng, student_msg = _check_student_only_shift(shop_id, staff_id, body["start_datetime"], exclude_id=sid)
+    if student_ng:
+        print(f"[SHIFT PUT sid={sid}] student_only: {student_msg} staff_id={staff_id} {body['start_datetime']}〜{body['end_datetime']}", flush=True)
+        return jsonify({"error": student_msg, "student_only": True}), 400
     execute("UPDATE shifts SET start_datetime=?, end_datetime=?, break_time_minutes=?, status=?, reason=? WHERE id=? AND shop_id=?",
             (body["start_datetime"], body["end_datetime"], brk, body.get("status") or "confirmed", body.get("reason") or "手動調整", sid, shop_id))
     print(f"[SHIFT PUT sid={sid}] OK: staff_id={staff_id} {body['start_datetime']}〜{body['end_datetime']} status={body.get('status')} auto_adjust={auto_adjust}", flush=True)

@@ -77,13 +77,17 @@ class TestAuthAndCrud:
 
         # 店舗ロール → 403
         r = client.post("/api/admin/shops", json={
-            "shop_code": "N1", "shop_name": "店舗N", "password": "pass1234"},
+            "shop_code": "N1", "shop_name": "店舗N", "password": "pass1234",
+            "manager_code": "mgr1", "manager_password": "Mgr1234d",
+            "manager_name": "店主1"},
             headers=auth(shop_token))
         assert r.status_code == 403
 
         # SystemAdmin → 200
         r = client.post("/api/admin/shops", json={
             "shop_code": "NEW1", "shop_name": "新店舗", "password": "pass1234",
+            "manager_code": "mgr1", "manager_password": "Mgr1234d",
+            "manager_name": "店主1",
             "settings": {"default_hourly_wage": 1200}},
             headers=auth(admin_token))
         assert r.status_code == 200, r.get_json()
@@ -91,6 +95,12 @@ class TestAuthAndCrud:
         row = dbmod.query_one("SELECT shop_code, shop_name FROM shops WHERE id=?", (new_id,))
         assert row["shop_code"] == "NEW1"
         assert row["shop_name"] == "新店舗"
+        # 店舗責任者アカウントが同時作成されていることを検証
+        mgr = dbmod.query_one("SELECT * FROM staffs WHERE shop_id=? AND staff_code=?",
+                              (new_id, "mgr1"))
+        assert mgr is not None
+        assert mgr["role"] == "manager"
+        assert mgr["name"] == "店主1"
 
     def test_shop_creates_staff_with_full_fields(self, client):
         shop_id = insert_shop(settings={"default_hourly_wage": 1000})

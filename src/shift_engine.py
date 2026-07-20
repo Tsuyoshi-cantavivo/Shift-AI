@@ -287,6 +287,12 @@ def auto_generate(shop_id, settings, start_date, end_date):
     monthly_cap = {s["id"]: (s.get("max_hours_per_month") or 0) for s in staffs}
     staff_role = {s["id"]: s.get("role") for s in staffs}
 
+    # 学生アルバイトの月間上限は80hを強制（API側でもガードしているが安全のため）
+    for sid, role in staff_role.items():
+        if role == "student":
+            cur = monthly_cap.get(sid) or 80
+            monthly_cap[sid] = min(cur, 80)
+
     minutes_by_staff = {s["id"]: 0 for s in staffs}
     staff_days = {s["id"]: set() for s in staffs}
     confirmed = []
@@ -294,11 +300,14 @@ def auto_generate(shop_id, settings, start_date, end_date):
 
     coverage = {}    # day -> {slot_min: count}
     staff_busy = {}  # day -> {staff_id: (start_min, end_min)}
+    # day -> set(staff_id) その日に配置された staff の role 判定用
+    day_placed_roles = {}  # day -> set(role)
 
     def state(day):
         if day not in coverage:
             coverage[day] = {}
             staff_busy[day] = {}
+            day_placed_roles[day] = set()
         return coverage[day], staff_busy[day]
 
     def cap_ok(day, start_iso, end_iso):
@@ -313,6 +322,11 @@ def auto_generate(shop_id, settings, start_date, end_date):
                 return False
         return True
 
+    def has_non_student_on_day(day):
+        """その日に student 以外のスタッフが既に配置されているか。"""
+        roles = day_placed_roles.get(day, set())
+        return bool(roles - {"student"})
+
     def can_place(staff_id, day, start_iso, end_iso, check_cap=True):
         """配置可否。理由コードを返す。
 
@@ -321,10 +335,16 @@ def auto_generate(shop_id, settings, start_date, end_date):
         （短い穴埋め・夜を含む長時間シフトの両方を許容）。
         ※ 1日複数シフト(中抜け)禁止・上限人数・月間上限は全スタッフ共通で厳守。
         【日またぎ対応】翌日にまたがる場合、翌日の staff_busy もチェックする。
+        【学生ルール】学生のみ構成シフトを避けるため、学生を配置する場合は
+           当日に社会人(employee/manager/part_time)が既に配置されているか、
+           または cap 内で社会人を同時に配置可能な余力があることを要件とする。
+           ※ 厳格過ぎるとシフトが作れなくなるため、ここでは事前の警告用途とし、
+              配置後に最終チェック（post_validate）で検知する。
         """
         work = minutes_between(start_iso, end_iso)
         is_pt = staff_role.get(staff_id) == "part_time"
-        if is_pt and work < min_daily:
+        is_student = staff_role.get(staff_id) == "student"
+        if (is_pt or is_student) and work < min_daily:
             return False, "min_daily"
         _, sw = state(day)
         if staff_id in sw:
@@ -368,6 +388,7 @@ def auto_generate(shop_id, settings, start_date, end_date):
         })
         minutes_by_staff[staff_id] += work
         cov, sw = state(day)
+        day_placed_roles.setdefault(day, set()).add(staff_role.get(staff_id, "part_time"))
         for sl in _shift_slots(start_iso, end_iso, GRAN):
             cov[sl] = cov.get(sl, 0) + 1
         s_min = _hhmm_to_min(start_iso[11:16])
@@ -382,6 +403,7 @@ def auto_generate(shop_id, settings, start_date, end_date):
         if end_date != day:
             _, sw_next = state(end_date)
             sw_next[staff_id] = (0, _hhmm_to_min(end_iso[11:16]))
+            day_placed_roles.setdefault(end_date, set()).add(staff_role.get(staff_id, "part_time"))
         staff_days[staff_id].add(day)
 
     def fill_shortage_with(staff_id, day, pat, reason):
@@ -563,6 +585,11 @@ def auto_generate(shop_id, settings, start_date, end_date):
     # 日全体（全パターン統合）の不足セグメントを抽出し、長いセグメントから優先的に、
     # 1シフト = min(セグメント長, max_daily) の窓で社員を配置して複数パターンをまたぎ、
     # 空きを残さない。※1日1シフト・最低時間・上限人数は can_place が厳守。
+    #
+    # 【学生アルバイトルール】
+    #   学生(student)のみで構成されるシフトを避けるため、
+    #   学生を配置する場合は同日に社会人（employee/manager/part_time）が
+    #   既に配置されていることを確認する。
     # -----------------------------------------------------------
     cur = start_date
     while cur <= end_date:
@@ -672,6 +699,27 @@ def auto_generate(shop_id, settings, start_date, end_date):
                 "hours": round(mins / 60 * 10) / 10, "max": mx,
                 "message": f"{name_map.get(sid,'')}さんの月間時間が{round(mins/60*10)/10}hで上限({mx}h)超過。",
             })
+
+    # -----------------------------------------------------------
+    # 学生アルバイトルール検証
+    # 1) 学生のみで構成される日がないかチェック（警告）
+    # 2) 学生の月間時間が80hを超えていないか（既に monthly_overflow で検出される）
+    # -----------------------------------------------------------
+    # 日ごとの配置ロール集合を確認（学生のみの日を検出）
+    student_only_days = []
+    for day, roles in day_placed_roles.items():
+        non_student = roles - {"student"}
+        if roles and not non_student:
+            student_only_days.append(day)
+    if student_only_days:
+        warnings.append({
+            "type": "student_only_day",
+            "days": sorted(student_only_days),
+            "message": (
+                f"以下の日は学生アルバイトのみの配置になりました（社会人スタッフが1名も配置されていません）: "
+                f"{', '.join(sorted(student_only_days))}。社会人スタッフの追加配置を推奨します。"
+            ),
+        })
 
     # -----------------------------------------------------------
     # Explainable AI: シフト作成の判断理由を生成

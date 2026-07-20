@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS staffs (
   password_hash         TEXT NOT NULL,
   name                  TEXT NOT NULL,
   role                  TEXT DEFAULT 'part_time'
-                          CHECK(role IN ('employee','part_time','manager')),
+                          CHECK(role IN ('employee','part_time','manager','student')),
   hourly_wage           INTEGER DEFAULT 1000,
   min_hours_per_month   INTEGER DEFAULT 0,
   max_hours_per_month   INTEGER DEFAULT 160,
@@ -188,3 +188,21 @@ CREATE TABLE IF NOT EXISTS wish_history (
 );
 CREATE INDEX IF NOT EXISTS idx_wish_shop_period ON wish_history(shop_id, start_datetime);
 CREATE INDEX IF NOT EXISTS idx_wish_staff ON wish_history(staff_id);
+
+-- -----------------------------------------------------------
+-- shop_holidays: 店舗ごとの祝日・特別休業日
+--
+-- 【設計意図】
+-- 「シフト時間設定」の「祝日」テンプレートをいつ適用するかを決定する。
+-- 国民の祝日は店舗側で任意に登録し、シフト時間設定の「祝日」設定が
+-- 適用される。曜日別設定(0-6)とは独立して運用される。
+-- -----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS shop_holidays (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  shop_id    INTEGER NOT NULL,
+  holiday_date TEXT NOT NULL,
+  note       TEXT,
+  UNIQUE(shop_id, holiday_date),
+  FOREIGN KEY (shop_id) REFERENCES shops(id)
+);
+CREATE INDEX IF NOT EXISTS idx_holidays_shop ON shop_holidays(shop_id, holiday_date);
