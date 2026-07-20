@@ -596,8 +596,13 @@ async function ensureBusinessHours() {
 
 /* 時間帯別不足計算（タイムライン・印刷・不足通知で共通利用）
    戻り値: [{ hour, required, placed, gap }] — gap>0 の時間帯が不足
-   【日またぎ対応】hour は拡張時間（0-47）。overnight シフトも正しくカウント。 */
-function _computeHourlyGaps(shifts, dayStr) {
+   【日またぎ対応】hour は拡張時間（0-47）。overnight シフトも正しくカウント。
+   【オプション】includeRequested=true のとき、スタッフ希望(requested)も
+     カバレッジに含める。AIドラフト(requested, reason='AIドラフト...')は除外。
+     タイムライン表示では希望出し済みのスタッフを「配置済み相当」と扱い、
+     「希望が出ているのに不足扱い」という誤表示を防ぐ。 */
+function _computeHourlyGaps(shifts, dayStr, opts) {
+  const includeRequested = !!(opts && opts.includeRequested);
   const pats = appState.patterns;
   if (!pats || !pats.length) return [];
   const wd = new Date(dayStr + 'T00:00:00').getDay();
@@ -619,11 +624,17 @@ function _computeHourlyGaps(shifts, dayStr) {
     }
   });
   // confirmed シフトで各時間帯の配置人数をカウント（overnight は +24）
+  // 【includeRequested】スタッフ希望(requested, AIドラフト以外)もカバーに含める
   const hourPlaced = {};
   (shifts || []).forEach((s) => {
-    if (s.status !== 'confirmed' && s.status !== 'modifying') return;
+    const isConfirmed = (s.status === 'confirmed' || s.status === 'modifying');
+    const reason = s.reason || '';
+    const isUserRequest = includeRequested && s.status === 'requested'
+      && !reason.startsWith('AIドラフト') && !reason.startsWith('AI生成');
+    if (!isConfirmed && !isUserRequest) return;
     const sMin = _extMinFromIso(s.start_datetime, dayStr);
     const eMin = _extMinFromIso(s.end_datetime, dayStr);
+    if (isNaN(sMin) || isNaN(eMin)) return;
     const sH = Math.floor(sMin / 60);
     const eH = Math.ceil(eMin / 60);
     for (let h = sH; h < eH; h++) {
@@ -843,7 +854,8 @@ function buildPrintTimelineHtml(list, anchorDate) {
   }).join('');
 
   // 時間帯別不足バー（印刷用）— anchorDate (day) を基準に計算
-  const gaps = day ? _computeHourlyGaps(list, day) : [];
+  // 印刷版でもスタッフ希望をカバー扱い（タイムラインと一貫性）
+  const gaps = day ? _computeHourlyGaps(list, day, { includeRequested: true }) : [];
   let gapRowHtml = '';
   if (gaps.length) {
     const merged = _mergeHourlyGaps(gaps);
@@ -1007,7 +1019,9 @@ function openDayTimeline(date, allShifts, editable, onChange) {
   }).join('');
 
   // 時間帯別不足バー（赤で視覚化）
-  const gaps = _computeHourlyGaps(list, date);
+  // ★ タイムライン表示では「希望を出しているスタッフ」もカバー扱いし、
+  //   「4-6に1人いるのに1人不足」のような誤表示を防ぐ
+  const gaps = _computeHourlyGaps(list, date, { includeRequested: true });
   let gapRow = '';
   if (gaps.length) {
     const merged = _mergeHourlyGaps(gaps);
