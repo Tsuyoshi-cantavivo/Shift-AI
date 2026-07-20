@@ -813,35 +813,73 @@ def admin_debug_db_schema():
     })
 
 
+def db_module_get_conn():
+    """db モジュル経由で生のコネクションを取得（マイグレーション用）。"""
+    import db as _db
+    return _db.get_conn()
+
+
 @app.post("/api/admin/db/migrate")
 def admin_db_migrate():
-    """本番DBを最新スキーマにマイグレーション。
+    """本番DBを最新スキーマにマイグレーション（安全版）。
 
-    - staffs テーブルに 'student' ロールを許可（TABLE 再構築）
-    - shop_holidays テーブルが無ければ作成
-    - 各店舗に manager ロールのスタッフが無ければ、shops.password_hash を
-      引き継いだ manager を自動作成（旧仕様 → 新仕様への救済）
+    【安全策】
+    1. PRAGMA foreign_keys = OFF（接続単位）
+    2. BEGIN TRANSACTION で囲む（DDLもロールバック可能）
+    3. CREATE staffs_new → INSERT FROM staffs → DROP staffs → RENAME
+    4. 既存 staffs の列構成を動的取得して互換性保持
+    5. COMMIT 後 foreign_keys = ON に戻す
     """
     require_auth(["admin"])
     import sqlite3 as _sqlite3
     log = []
-    # 1. staffs テーブルの schema 確認
+    # 1. 現在の staffs テーブル状態確認
     try:
         rows = query_all("SELECT sql FROM sqlite_master WHERE name='staffs'")
         cur_schema = rows[0]["sql"] if rows else ""
     except Exception as e:
-        return jsonify({"ok": False, "error": f"staffs テーブルの取得に失敗: {e}"}), 500
+        cur_schema = ""
+        log.append(f"⚠ staffs スキーマ取得エラー: {e}")
 
-    needs_rebuild = "student" not in cur_schema.lower()
+    # 既存 staffs が無い or 壊れている場合、まず復元を試みる
+    if not cur_schema or "staffs" not in cur_schema.lower():
+        log.append("⚠ staffs テーブルが見つかりません。復元モードに移行します。")
+        restore_result = _restore_staffs_table_internal(log)
+        if not restore_result:
+            return jsonify({"ok": False, "error": "staffs 復元に失敗しました", "log": log}), 500
+        # 復元後のスキーマ再取得
+        try:
+            rows = query_all("SELECT sql FROM sqlite_master WHERE name='staffs'")
+            cur_schema = rows[0]["sql"] if rows else ""
+        except Exception:
+            cur_schema = ""
+
+    needs_rebuild = "student" not in (cur_schema or "").lower()
     if needs_rebuild:
         log.append("staffs テーブルを 'student' ロール対応版に再構築します...")
         conn = db_module_get_conn()
         try:
+            # 外部キーを一時OFF（接続単位）
+            conn.execute("PRAGMA foreign_keys = OFF")
             cur = conn.cursor()
+            # 既存 staffs の列を動的取得（互換性のため）
+            cur.execute("PRAGMA table_info(staffs)")
+            existing_cols = [r[1] for r in cur.fetchall()]
+            log.append(f"既存 staffs の列: {existing_cols}")
+            # 必要な列だけ安全にコピー
+            target_cols = ['id', 'shop_id', 'staff_code', 'password_hash', 'name', 'role',
+                           'hourly_wage', 'min_hours_per_month', 'max_hours_per_month',
+                           'is_resigned', 'created_at']
+            common_cols = [c for c in target_cols if c in existing_cols]
+            col_list = ', '.join(common_cols)
+            log.append(f"コピー対象列: {common_cols}")
+
+            cur.execute("BEGIN")
             # バックアップ
-            cur.execute("DROP TABLE IF EXISTS staffs_backup")
-            cur.execute("CREATE TABLE staffs_backup AS SELECT * FROM staffs")
-            # 新スキーマで再作成（'student' 含む）
+            cur.execute("DROP TABLE IF EXISTS staffs_migrate_backup")
+            cur.execute("CREATE TABLE staffs_migrate_backup AS SELECT * FROM staffs")
+            # 新スキーマで作成
+            cur.execute("DROP TABLE IF EXISTS staffs_new")
             cur.execute("""
                 CREATE TABLE staffs_new (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -860,28 +898,34 @@ def admin_db_migrate():
                   FOREIGN KEY (shop_id) REFERENCES shops(id)
                 )
             """)
-            # データコピー
-            cur.execute("""
-                INSERT INTO staffs_new (id, shop_id, staff_code, password_hash, name, role,
-                                       hourly_wage, min_hours_per_month, max_hours_per_month,
-                                       is_resigned, created_at)
-                SELECT id, shop_id, staff_code, password_hash, name, role,
-                       hourly_wage, min_hours_per_month, max_hours_per_month,
-                       is_resigned, created_at FROM staffs
-            """)
+            # データコピー（共通列のみ・足りない列はデフォルト値）
+            if common_cols:
+                cur.execute(f"INSERT INTO staffs_new ({col_list}) SELECT {col_list} FROM staffs")
+                copy_count = cur.execute("SELECT COUNT(*) FROM staffs_new").fetchone()[0]
+                log.append(f"✓ {copy_count} 行コピー完了")
             # 入れ替え
             cur.execute("DROP TABLE staffs")
             cur.execute("ALTER TABLE staffs_new RENAME TO staffs")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_staffs_shop ON staffs(shop_id)")
+            cur.execute("COMMIT")
             conn.commit()
             log.append("✓ staffs テーブルを再構築しました（student ロール対応）")
         except Exception as e:
-            conn.rollback()
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
             log.append(f"✗ staffs 再構築失敗: {e}")
+            # staffs_backup から自動復元
+            log.append("自動復元を試みます...")
+            _restore_staffs_table_internal(log)
             return jsonify({"ok": False, "error": str(e), "log": log}), 500
         finally:
-            try: conn.close()
-            except Exception: pass
+            try:
+                conn.execute("PRAGMA foreign_keys = ON")
+                conn.close()
+            except Exception:
+                pass
     else:
         log.append("✓ staffs テーブルは既に 'student' ロール対応済み")
 
@@ -922,7 +966,6 @@ def admin_db_migrate():
                 (shop["id"],))
             if existing:
                 continue
-            # manager スタッフを自動作成（PW引き継ぎ）
             try:
                 execute(
                     "INSERT INTO staffs (shop_id, staff_code, password_hash, name, role, "
@@ -954,10 +997,135 @@ def admin_db_migrate():
     })
 
 
-def db_module_get_conn():
-    """db モジュル経由で生のコネクションを取得（マイグレーション用）。"""
-    import db as _db
-    return _db.get_conn()
+def _restore_staffs_table_internal(log):
+    """staffs テーブル消失時の内部復元関数（log は破壊的に追記）。"""
+    # 候補: staffs_migrate_backup, staffs_backup, staffs_new
+    for backup_name in ("staffs_migrate_backup", "staffs_backup", "staffs_new"):
+        try:
+            rows = query_all(f"SELECT name FROM sqlite_master WHERE name='{backup_name}'")
+            if not rows:
+                continue
+            log.append(f"復元元発見: {backup_name}")
+            conn = db_module_get_conn()
+            try:
+                conn.execute("PRAGMA foreign_keys = OFF")
+                cur = conn.cursor()
+                # バックアップの列を取得
+                cur.execute(f"PRAGMA table_info({backup_name})")
+                cols = [r[1] for r in cur.fetchall()]
+                log.append(f"{backup_name} の列: {cols}")
+                # 新 staffs を作る
+                cur.execute("DROP TABLE IF EXISTS staffs")
+                cur.execute("""
+                    CREATE TABLE staffs (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      shop_id INTEGER NOT NULL,
+                      staff_code TEXT NOT NULL,
+                      password_hash TEXT NOT NULL,
+                      name TEXT NOT NULL,
+                      role TEXT DEFAULT 'part_time'
+                        CHECK(role IN ('employee','part_time','manager','student')),
+                      hourly_wage INTEGER DEFAULT 1000,
+                      min_hours_per_month INTEGER DEFAULT 0,
+                      max_hours_per_month INTEGER DEFAULT 160,
+                      is_resigned INTEGER DEFAULT 0,
+                      created_at TEXT DEFAULT (datetime('now')),
+                      UNIQUE(shop_id, staff_code),
+                      FOREIGN KEY (shop_id) REFERENCES shops(id)
+                    )
+                """)
+                # バックアップからコピー（共通列のみ）
+                target_cols = ['id', 'shop_id', 'staff_code', 'password_hash', 'name', 'role',
+                               'hourly_wage', 'min_hours_per_month', 'max_hours_per_month',
+                               'is_resigned', 'created_at']
+                common_cols = [c for c in target_cols if c in cols]
+                col_list = ', '.join(common_cols)
+                if common_cols:
+                    cur.execute(f"INSERT INTO staffs ({col_list}) SELECT {col_list} FROM {backup_name}")
+                    cnt = cur.execute("SELECT COUNT(*) FROM staffs").fetchone()[0]
+                    log.append(f"✓ {cnt} 行復元完了")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_staffs_shop ON staffs(shop_id)")
+                conn.commit()
+                log.append(f"✓ staffs を {backup_name} から復元しました")
+                return True
+            finally:
+                try:
+                    conn.execute("PRAGMA foreign_keys = ON")
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            log.append(f"⚠ {backup_name} からの復元失敗: {e}")
+            continue
+
+    # どのバックアップも無い → shops から最低限の manager を作る
+    log.append("バックアップが見つかりません。shops から最低限の manager を再構築します...")
+    try:
+        conn = db_module_get_conn()
+        try:
+            conn.execute("PRAGMA foreign_keys = OFF")
+            cur = conn.cursor()
+            cur.execute("DROP TABLE IF EXISTS staffs")
+            cur.execute("""
+                CREATE TABLE staffs (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  shop_id INTEGER NOT NULL,
+                  staff_code TEXT NOT NULL,
+                  password_hash TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  role TEXT DEFAULT 'part_time'
+                    CHECK(role IN ('employee','part_time','manager','student')),
+                  hourly_wage INTEGER DEFAULT 1000,
+                  min_hours_per_month INTEGER DEFAULT 0,
+                  max_hours_per_month INTEGER DEFAULT 160,
+                  is_resigned INTEGER DEFAULT 0,
+                  created_at TEXT DEFAULT (datetime('now')),
+                  UNIQUE(shop_id, staff_code),
+                  FOREIGN KEY (shop_id) REFERENCES shops(id)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_staffs_shop ON staffs(shop_id)")
+            # shops の各店舗に manager を PW 引き継ぎで作成
+            cur.execute("SELECT id, shop_code, shop_name, password_hash FROM shops")
+            shops = cur.fetchall()
+            for shop in shops:
+                cur.execute(
+                    "INSERT OR IGNORE INTO staffs (shop_id, staff_code, password_hash, name, role, "
+                    "hourly_wage, min_hours_per_month, max_hours_per_month) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (shop[0], "manager", shop[3], shop[2] + " 店主", "manager", 2000, 0, 200))
+            conn.commit()
+            log.append(f"✓ shops ({len(shops)} 店舗) から manager を再構築しました")
+            return True
+        finally:
+            try:
+                conn.execute("PRAGMA foreign_keys = ON")
+                conn.close()
+            except Exception:
+                pass
+    except Exception as e:
+        log.append(f"✗ shops からの復元も失敗: {e}")
+        return False
+
+
+@app.post("/api/admin/db/restore-staffs")
+def admin_db_restore_staffs():
+    """staffs テーブル消失時の緊急復元（単独エンドポイント）。"""
+    require_auth(["admin"])
+    log = []
+    ok = _restore_staffs_table_internal(log)
+    return jsonify({"ok": ok, "log": log})
+
+
+@app.get("/api/admin/db/diagnostic")
+def admin_db_diagnostic():
+    """DBの全テーブル一覧と各スキーマを表示（障害調査用）。"""
+    require_auth(["admin"])
+    try:
+        tables = query_all("SELECT name, sql FROM sqlite_master WHERE type='table' ORDER BY name")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+    return jsonify({"ok": True, "tables": tables})
 
 
 @app.put("/api/admin/shops/<int:sid>/staffs/<int:staff_id>/password")
