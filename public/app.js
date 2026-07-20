@@ -2404,7 +2404,10 @@ async function loadShiftHours(body) {
     <div id="shHolidayList"></div>
     <div class="flex gap-2 mt-3">
       <button class="btn btn-primary" id="shSave"><i class="bi bi-check-lg"></i> 保存</button>
-      <span class="small text-secondary flex items-center">※変更後「保存」を押してください。</span>
+      <label class="form-check ms-2 flex items-center" style="gap:6px">
+        <input type="checkbox" id="shSyncPatterns" class="form-check-input" checked>
+        <span class="small">シフトパターン（AI生成で使用）にも反映する <strong class="text-danger">（推奨）</strong></span>
+      </label>
     </div>
     <div id="shMsg" class="mt-2 small"></div>`;
 
@@ -2522,12 +2525,18 @@ async function loadShiftHours(body) {
     SHIFT_HOUR_DAYS.forEach((d) => {
       days[d.key] = readShiftHourRow(wrap, 'day_' + d.key);
     });
+    const syncPatterns = !!(wrap.querySelector('#shSyncPatterns')?.checked);
     const payload = { bulk_mode: bulkMode, bulk, days };
     try {
-      await api('/shop/shift-hours', { method: 'PUT', body: JSON.stringify({ shift_hours: payload }) });
+      // sync_patterns はトップレベルで送る（APIが body.get('sync_patterns') で探すため）
+      const r = await api('/shop/shift-hours', { method: 'PUT', body: JSON.stringify({ shift_hours: payload, sync_patterns: syncPatterns }) });
       const msg = wrap.querySelector('#shMsg');
-      if (msg) msg.innerHTML = '<span class="text-success"><i class="bi bi-check-circle"></i> 保存しました</span>';
-      toast('シフト時間設定を保存しました', 'success');
+      let logHtml = '';
+      if (r.sync_log && r.sync_log.length) {
+        logHtml = '<div class="text-info"><i class="bi bi-info-circle"></i> ' + r.sync_log.map((s) => esc(s)).join('<br>') + '</div>';
+      }
+      if (msg) msg.innerHTML = '<span class="text-success"><i class="bi bi-check-circle"></i> 保存しました</span>' + logHtml;
+      toast('シフト時間設定を保存しました' + (syncPatterns ? '（パターンにも反映）' : ''), 'success');
     } catch (e) {
       const msg = wrap.querySelector('#shMsg');
       if (msg) msg.innerHTML = `<span class="text-danger"><i class="bi bi-exclamation-triangle"></i> ${esc(e.message)}</span>`;

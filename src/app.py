@@ -1727,6 +1727,8 @@ def shop_shift_hours_put():
     """シフト時間設定を保存。
 
     body: shift_hours オブジェクト（bulk_mode, bulk, days）
+    body.sync_patterns: true の場合、shift_patterns テーブルにも
+    時間を反映する（AI生成エンジンは shift_patterns を使うため重要）。
     """
     shop, shop_id, settings = _shop_ctx()
     body = request.get_json(silent=True) or {}
@@ -1735,6 +1737,37 @@ def shop_shift_hours_put():
     cur = dict(settings)
     cur["shift_hours"] = normalized
     execute("UPDATE shops SET settings=? WHERE id=?", (json.dumps(cur, ensure_ascii=False), shop_id))
+
+    # オプション: shift_patterns テーブルへ時間を同期
+    sync_log = []
+    if body.get("sync_patterns"):
+        existing = query_all(
+            "SELECT id, pattern_name, required_staff FROM shift_patterns WHERE shop_id=?",
+            (shop_id,))
+        # bulk_mode=True: 単一時間で全パターン更新
+        # bulk_mode=False: 曜日別モード → 既存パターンは代表時間（月曜）で更新、
+        #                   パターン無ければ月曜の時間で新規作成
+        if normalized["bulk_mode"]:
+            ref = normalized["bulk"]
+        else:
+            ref = normalized["days"].get("1") or normalized["bulk"]
+        ref_st = ref["start_time"]
+        ref_et = ref["end_time"]
+        if existing:
+            for pat in existing:
+                execute(
+                    "UPDATE shift_patterns SET start_time=?, end_time=? WHERE id=? AND shop_id=?",
+                    (ref_st, ref_et, pat["id"], shop_id))
+            sync_log.append(
+                f"{len(existing)} 個の既存パターンを {ref_st}-{ref_et} に更新"
+                + ("（※曜日別設定時は代表時間=月曜で全パターン統一）" if not normalized["bulk_mode"] else "")
+            )
+        else:
+            execute(
+                "INSERT INTO shift_patterns (shop_id, pattern_name, start_time, end_time, required_staff) "
+                "VALUES (?,?,?,?,?)",
+                (shop_id, "通し", ref_st, ref_et, 2))
+            sync_log.append(f"新規パターン「通し」を {ref_st}-{ref_et} で作成（必要人数2）")
     # 祝日リストの差分更新（オプション）
     if "holidays" in body:
         new_dates = set()
@@ -1751,7 +1784,7 @@ def shop_shift_hours_put():
                 execute("DELETE FROM shop_holidays WHERE shop_id=? AND holiday_date=?", (shop_id, d))
         except Exception:
             pass
-    return jsonify({"ok": True, "shift_hours": normalized})
+    return jsonify({"ok": True, "shift_hours": normalized, "sync_log": sync_log})
 
 
 @app.get("/api/shop/holidays")
