@@ -53,6 +53,19 @@ async function ensureShop(request, { shopCode, shopName, managerCode, managerPas
 }
 
 /**
+ * システム管理者としてログイン。
+ */
+async function loginAsAdmin(page, request) {
+  await ensureAdmin(request);
+  await page.goto('/');
+  await page.fill('#loginShopCode', 'admin');
+  await page.fill('#loginUserCode', 'admin');
+  await page.fill('#loginPassword', 'admin123');
+  await page.click('#loginBtn');
+  await page.waitForSelector('#appView:not(.d-none)', { timeout: 10000 });
+}
+
+/**
  * ブラウザで店舗管理者としてログイン。
  */
 async function loginAsManager(page, { shopCode, managerCode, password }) {
@@ -88,6 +101,7 @@ function attachConsoleCollector(page) {
 module.exports = {
   ensureAdmin,
   ensureShop,
+  loginAsAdmin,
   loginAsManager,
   attachConsoleCollector,
 };

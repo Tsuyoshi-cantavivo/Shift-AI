@@ -755,12 +755,55 @@ def admin_shop_staff_update_role(sid, staff_id):
     if new_role == "student":
         cur = query_one("SELECT max_hours_per_month FROM staffs WHERE id=?", (staff_id,))
         if cur and (cur.get("max_hours_per_month") or 0) > 80:
-            execute("UPDATE staffs SET max_hours_per_month=80 WHERE id=?", (staff_id,))
-            extra["max_hours_per_month"] = 80
-    execute("UPDATE staffs SET role=? WHERE id=? AND shop_id=?", (new_role, staff_id, sid))
+            try:
+                execute("UPDATE staffs SET max_hours_per_month=80 WHERE id=?", (staff_id,))
+                extra["max_hours_per_month"] = 80
+            except Exception as e:
+                print(f"[admin_role_change] max_hours update failed: {e}", flush=True)
+    # ロール変更実行（DBスキーマ古い場合のCHECK制約違反を分かりやすく）
+    try:
+        execute("UPDATE staffs SET role=? WHERE id=? AND shop_id=?", (new_role, staff_id, sid))
+    except Exception as e:
+        msg = str(e)
+        print(f"[admin_role_change] UPDATE failed: {msg}", flush=True)
+        if "CHECK" in msg.upper() and "role" in msg.upper():
+            abort(500, description=(
+                "データベースのCHECK制約違反によりロール変更に失敗しました。"
+                "本番DBのスキーマが古い可能性があります（student ロール未対応）。"
+                "Railway側でマイグレーションを実行するか、DBをリセットしてください。"
+                f"（詳細: {msg}）"
+            ))
+        abort(500, description=f"ロール変更に失敗しました: {msg}")
+    # 変更確認（本当に UPDATE されたか検証）
+    verify = query_one("SELECT role FROM staffs WHERE id=?", (staff_id,))
+    if not verify or verify["role"] != new_role:
+        print(f"[admin_role_change] UPDATE silent failure: expected={new_role} actual={verify['role'] if verify else None}", flush=True)
+        abort(500, description=f"ロール変更が反映されませんでした（DBの制約またはロックの可能性）。")
     # 既存セッションを無効化（role 変更後は再ログインを強制するため安全）
     execute("DELETE FROM sessions WHERE role IN ('shop','staff') AND user_id=?", (staff_id,))
-    return jsonify({"ok": True, "staff_id": staff_id, "old_role": old_role, "new_role": new_role, **extra})
+    return jsonify({"ok": True, "staff_id": staff_id, "old_role": old_role, "new_role": new_role,
+                    "verified_role": verify["role"], **extra})
+
+
+@app.get("/api/admin/debug/db-schema")
+def admin_debug_db_schema():
+    """デバッグ用: 本番DBの staffs テーブル構造を確認（スキーマが古いかチェック）。"""
+    require_auth(["admin"])
+    try:
+        rows = query_all("SELECT sql FROM sqlite_master WHERE name='staffs'")
+        schema = rows[0]["sql"] if rows else "(staffs table not found)"
+    except Exception as e:
+        schema = f"(error: {e})"
+    # staffs 行数と role 列の分布
+    try:
+        role_stats = query_all("SELECT role, COUNT(*) as cnt FROM staffs GROUP BY role")
+    except Exception as e:
+        role_stats = [{"role": "(error)", "cnt": 0, "error": str(e)}]
+    return jsonify({
+        "staffs_schema": schema,
+        "role_distribution": role_stats,
+        "supports_student_role": "student" in schema.lower(),
+    })
 
 
 @app.put("/api/admin/shops/<int:sid>/staffs/<int:staff_id>/password")
@@ -782,6 +825,85 @@ def admin_shop_staff_reset_password(sid, staff_id):
     # パスワード変更後は既存セッションを無効化
     execute("DELETE FROM sessions WHERE role IN ('shop','staff') AND user_id=?", (staff_id,))
     return jsonify({"ok": True})
+
+
+@app.post("/api/admin/shops/<int:sid>/staffs")
+def admin_shop_staffs_post(sid):
+    """システム管理者が店舗にスタッフを追加。
+
+    body:
+      - staff_code: 必須（任意の文字列）
+      - name: 必須
+      - password: 必須
+      - role: manager/employee/part_time/student（デフォルト part_time）
+      - hourly_wage: 数値（デフォルト 1000）
+    """
+    require_auth(["admin"])
+    body = request.get_json(silent=True) or {}
+    if not body.get("staff_code"):
+        abort(400, description="ユーザーコードを入力してください")
+    if not body.get("name"):
+        abort(400, description="氏名を入力してください")
+    pw = body.get("password") or ""
+    err = validate_password(pw)
+    if err:
+        abort(400, description=err)
+    role = body.get("role") or "part_time"
+    if role not in ("manager", "employee", "part_time", "student"):
+        abort(400, description="role は manager / employee / part_time / student のいずれかを指定してください")
+    # 店舗存在確認
+    shop = query_one("SELECT id FROM shops WHERE id=?", (sid,))
+    if not shop:
+        abort(404, description="店舗が見つかりません")
+    # 重複チェック
+    dup = query_one("SELECT id FROM staffs WHERE shop_id=? AND staff_code=?", (sid, body["staff_code"]))
+    if dup:
+        abort(400, description=f"ユーザーコード '{body['staff_code']}' は既に存在します")
+    # 学生アルバイトは80h上限
+    max_hours = 80 if role == "student" else (body.get("max_hours_per_month") or 160)
+    meta = execute(
+        "INSERT INTO staffs (shop_id, staff_code, password_hash, name, role, hourly_wage, "
+        "min_hours_per_month, max_hours_per_month) VALUES (?,?,?,?,?,?,?,?)",
+        (sid, body["staff_code"], hash_password(pw), body["name"], role,
+         body.get("hourly_wage") or 1000, 0, max_hours))
+    return jsonify({"ok": True, "id": meta["last_row_id"], "role": role,
+                    "staff_code": body["staff_code"], "name": body["name"]})
+
+
+@app.post("/api/admin/shops/<int:sid>/migrate-legacy-manager")
+def admin_shop_migrate_legacy_manager(sid):
+    """旧仕様の店主ログインを新仕様の manager スタッフに昇格。
+
+    shops テーブルの password_hash を引き継いだ manager ロールのスタッフを
+    作成する。これにより、パスワードを再設定せずに新仕様へ移行できる。
+
+    body:
+      - staff_code: 必須（任意の文字列。例: 'manager', 'yamada' 等）
+      - name: 未指定時は shop_name + ' 店主'
+    """
+    require_auth(["admin"])
+    body = request.get_json(silent=True) or {}
+    staff_code = (body.get("staff_code") or "").strip()
+    if not staff_code:
+        abort(400, description="ユーザーコードを入力してください")
+    shop = query_one("SELECT * FROM shops WHERE id=?", (sid,))
+    if not shop:
+        abort(404, description="店舗が見つかりません")
+    # 既に同じ staff_code が存在する場合はエラー
+    dup = query_one("SELECT id FROM staffs WHERE shop_id=? AND staff_code=?", (sid, staff_code))
+    if dup:
+        abort(400, description=f"ユーザーコード '{staff_code}' は既に存在します")
+    name = body.get("name") or (shop["shop_name"] + " 店主")
+    # shops テーブルの password_hash を引き継ぐ
+    meta = execute(
+        "INSERT INTO staffs (shop_id, staff_code, password_hash, name, role, "
+        "hourly_wage, min_hours_per_month, max_hours_per_month) VALUES (?,?,?,?,?,?,?,?)",
+        (sid, staff_code, shop["password_hash"], name, "manager",
+         body.get("hourly_wage") or 2000, 0, body.get("max_hours_per_month") or 200))
+    return jsonify({"ok": True, "id": meta["last_row_id"],
+                    "shop_code": shop["shop_code"], "shop_name": shop["shop_name"],
+                    "staff_code": staff_code, "name": name,
+                    "note": "shops テーブルのパスワードを引き継ぎました。同じパスワードでログインできます。"})
 
 
 @app.get("/api/admin/shops/<int:sid>/periods/next")

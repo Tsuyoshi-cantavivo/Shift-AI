@@ -3092,10 +3092,16 @@ SCREENS.adminShopDetail = async function (el) {
   const shop = (await api('/admin/shops')).shops.find((x) => x.id === sid) || { shop_name: '店舗#' + sid, shop_code: '' };
   el.innerHTML = pageHead(shop.shop_name, 'bi-shop', shop.shop_code) +
     card(`<button class="btn btn-sm btn-light mb-2" id="backBtn"><i class="bi bi-arrow-left"></i> 戻る</button>
+      <div class="flex gap-2 flex-wrap mb-3">
+        <button class="btn btn-primary btn-sm" id="addStaffBtn"><i class="bi bi-person-plus"></i> スタッフ追加</button>
+        <button class="btn btn-light btn-sm" id="migrateBtn" title="旧仕様店主のPWを引き継いで manager スタッフを作成"><i class="bi bi-arrow-up-circle"></i> 旧仕様から manager 昇格</button>
+      </div>
       <div class="row mb-3"><div class="col-5"><label class="form-label" for="dStart">開始</label><input type="date"  id="dStart" class="form-control"></div><div class="col-5"><label class="form-label" for="dEnd">終了</label><input type="date"  id="dEnd" class="form-control"></div><div class="col-2 flex items-end"><button class="btn btn-primary w-full" id="loadBtn">表示</button></div></div>
       <div id="detailBody"><div class="text-secondary small">期間を指定してください</div></div>`);
   document.getElementById('backBtn')?.addEventListener('click', () => navigateTo('adminShops'));
   document.getElementById('loadBtn')?.addEventListener('click', () => loadDetail());
+  document.getElementById('addStaffBtn')?.addEventListener('click', () => openAdminAddStaffModal(sid, loadDetail));
+  document.getElementById('migrateBtn')?.addEventListener('click', () => openAdminMigrateModal(sid, shop, loadDetail));
   api(`/admin/shops/${sid}/periods/next`).then((p) => {
     const ds = document.getElementById('dStart'); const de = document.getElementById('dEnd');
     if (!ds || !de) return;  // 画面遷移済み
@@ -3211,4 +3217,98 @@ function openAdminPwResetModal(shopId, staffId, staffName) {
     };
     pwInput?.addEventListener('input', () => { updateRules(); wrap.querySelector('#admPwErr').innerHTML = ''; });
   }, 50);
+}
+
+function openAdminAddStaffModal(shopId, onDone) {
+  openModal(`<i class="bi bi-person-plus"></i> スタッフ追加`,
+    `<p class="small text-secondary mb-2">任意のユーザーコードとロールでスタッフを作成します。</p>
+     <div class="row">
+       <div class="col-6"><label class="form-label" for="admStaffCode">ユーザーコード <span class="text-danger">*</span></label><input id="admStaffCode" class="form-control" placeholder="例: yamada"></div>
+       <div class="col-6"><label class="form-label" for="admStaffName">氏名 <span class="text-danger">*</span></label><input id="admStaffName" class="form-control"></div>
+     </div>
+     <label class="form-label mt-2">ロール</label>
+     <select id="admStaffRole" class="form-select">
+       <option value="manager">店舗管理者（manager）— 店舗権限でログイン</option>
+       <option value="employee" selected>社員（employee）</option>
+       <option value="part_time">アルバイト（part_time）</option>
+       <option value="student">学生アルバイト（student・月80h上限）</option>
+     </select>
+     <label class="form-label mt-2">パスワード（8文字以上・英数字）</label>
+     <input id="admStaffPw" type="password" class="form-control" autocomplete="new-password">
+     <div class="pw-rules mt-2" id="admStaffPwRules">
+       <span class="pw-rule" data-rule="len"><i class="bi bi-circle"></i>8文字以上</span>
+       <span class="pw-rule" data-rule="alpha"><i class="bi bi-circle"></i>英字を含む</span>
+       <span class="pw-rule" data-rule="digit"><i class="bi bi-circle"></i>数字を含む</span>
+     </div>
+     <div class="form-error mt-2" id="admStaffErr"></div>`,
+    async (w, close) => {
+      const errBox = w.querySelector('#admStaffErr');
+      const showErr = (m) => { if (errBox) errBox.innerHTML = m ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(m)}` : ''; };
+      showErr('');
+      const code = w.querySelector('#admStaffCode').value.trim();
+      const name = w.querySelector('#admStaffName').value.trim();
+      const role = w.querySelector('#admStaffRole').value;
+      const pw = w.querySelector('#admStaffPw').value;
+      if (!code) return showErr('ユーザーコードを入力してください');
+      if (!name) return showErr('氏名を入力してください');
+      const verr = validatePassword(pw);
+      if (verr) return showErr(verr);
+      try {
+        await api(`/admin/shops/${shopId}/staffs`, {
+          method: 'POST', body: JSON.stringify({ staff_code: code, name, password: pw, role })
+        });
+        close();
+        toast(`${name} さんを追加しました（${roleLabel(role)}）`, 'success');
+        onDone?.();
+      } catch (e) { showErr(e.message || '追加に失敗しました'); }
+    });
+  // リアルタイムパスワード検証
+  setTimeout(() => {
+    const wrap = document.querySelector('.modal-overlay:last-child');
+    if (!wrap) return;
+    const pwInput = wrap.querySelector('#admStaffPw');
+    const ruleEls = wrap.querySelectorAll('#admStaffPwRules .pw-rule');
+    const updateRules = () => {
+      const v = pwInput.value || '';
+      const checks = { len: v.length >= 8, alpha: /[A-Za-z]/.test(v), digit: /[0-9]/.test(v) };
+      ruleEls.forEach((el) => {
+        const ok = checks[el.dataset.rule];
+        el.classList.toggle('ok', !!ok && v.length > 0);
+        el.classList.toggle('ng', !ok && v.length > 0);
+        el.querySelector('i').className = ok ? 'bi bi-check-circle-fill' : 'bi bi-x-circle-fill';
+      });
+    };
+    pwInput?.addEventListener('input', () => { updateRules(); wrap.querySelector('#admStaffErr').innerHTML = ''; });
+  }, 50);
+}
+
+function openAdminMigrateModal(shopId, shop, onDone) {
+  openModal(`<i class="bi bi-arrow-up-circle"></i> 旧仕様から manager 昇格 — ${esc(shop.shop_name || '')}`,
+    `<p class="small text-secondary mb-2">
+       旧仕様（shops テーブルのパスワード直接利用）でログインしていた店主を、
+       新仕様の <strong>manager ロール</strong> に昇格させます。<br>
+       <strong>パスワードは旧仕様のものを引き継ぎ</strong>ます（同じPWでログイン可）。
+     </p>
+     <div class="row">
+       <div class="col-6"><label class="form-label" for="admMigrateCode">ユーザーコード <span class="text-danger">*</span></label><input id="admMigrateCode" class="form-control" placeholder="例: manager / yamada 等"></div>
+       <div class="col-6"><label class="form-label" for="admMigrateName">氏名</label><input id="admMigrateName" class="form-control" placeholder="未入力時は店舗名+店主"></div>
+     </div>
+     <div class="small text-secondary mt-2"><i class="bi bi-info-circle"></i> 任意のユーザーコードで構いません（'manager' でなくてもOK）。</div>
+     <div class="form-error mt-2" id="admMigrateErr"></div>`,
+    async (w, close) => {
+      const errBox = w.querySelector('#admMigrateErr');
+      const showErr = (m) => { if (errBox) errBox.innerHTML = m ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(m)}` : ''; };
+      showErr('');
+      const code = w.querySelector('#admMigrateCode').value.trim();
+      const name = w.querySelector('#admMigrateName').value.trim();
+      if (!code) return showErr('ユーザーコードを入力してください');
+      try {
+        const r = await api(`/admin/shops/${shopId}/migrate-legacy-manager`, {
+          method: 'POST', body: JSON.stringify({ staff_code: code, name: name || undefined })
+        });
+        close();
+        toast(`昇格しました: ${r.staff_code}（PWは旧仕様のまま）`, 'success');
+        onDone?.();
+      } catch (e) { showErr(e.message || '昇格に失敗しました'); }
+    });
 }
