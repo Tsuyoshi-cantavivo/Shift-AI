@@ -8,6 +8,7 @@ from utils import (
     weekday_sun0, max_consecutive_run, time_overlaps, shift_covers_pattern,
     covers_pattern_substantial, calc_next_period, validate_password,
     parse_settings, build_ics, _hhmm_to_min,
+    norm_hhmm, norm_dt_iso, combine_dt_overnight,
 )
 
 
@@ -335,3 +336,48 @@ class TestBuildIcs:
 class TestCombineDt:
     def test_combine(self):
         assert combine_dt("2026-08-05", "09:00") == "2026-08-05T09:00:00"
+
+    def test_combine_pads_single_digit_hour(self):
+        """【インシデント対策】"7:00" のような非ゼロ埋め時刻でも "07:00" に正規化。"""
+        assert combine_dt("2026-08-05", "7:00") == "2026-08-05T07:00:00"
+        assert combine_dt("2026-08-05", "4:00") == "2026-08-05T04:00:00"
+
+    def test_combine_dt_overnight_pads_single_digit(self):
+        s, e = combine_dt_overnight("2026-08-05", "7:00", "11:00")
+        assert s == "2026-08-05T07:00:00"
+        assert e == "2026-08-05T11:00:00"
+
+    def test_combine_dt_overnight_next_day(self):
+        """翌日またぎ: end <= start なら end は翌日扱い。"""
+        s, e = combine_dt_overnight("2026-08-05", "22:00", "02:00")
+        assert s == "2026-08-05T22:00:00"
+        assert e == "2026-08-06T02:00:00"
+
+    def test_combine_dt_overnight_full(self):
+        """Full パターン 04:00-02:00 (翌日またぎ)。"""
+        s, e = combine_dt_overnight("2026-08-05", "04:00", "02:00")
+        assert s == "2026-08-05T04:00:00"
+        assert e == "2026-08-06T02:00:00"
+
+
+class TestNormTime:
+    def test_norm_hhmm_pads(self):
+        assert norm_hhmm("7:00") == "07:00"
+        assert norm_hhmm("07:00") == "07:00"
+        assert norm_hhmm("4:30") == "04:30"
+        assert norm_hhmm("") == "00:00"
+        assert norm_hhmm(None) == "00:00"
+        assert norm_hhmm("invalid") == "00:00"
+
+    def test_norm_dt_iso_pads_hour(self):
+        assert norm_dt_iso("2026-08-01T7:00:00") == "2026-08-01T07:00:00"
+        assert norm_dt_iso("2026-08-01T04:00:00") == "2026-08-01T04:00:00"
+        assert norm_dt_iso("2026-08-01T09:00") == "2026-08-01T09:00:00"
+
+    def test_norm_dt_iso_handles_edge(self):
+        assert norm_dt_iso("") == ""
+        assert norm_dt_iso(None) is None
+        assert norm_dt_iso("invalid") == "invalid"
+
+    def test_norm_dt_iso_no_change_when_valid(self):
+        assert norm_dt_iso("2026-08-01T07:00:00") == "2026-08-01T07:00:00"

@@ -18,6 +18,7 @@ from auth import hash_password, verify_password, gen_token, strip_password
 from utils import (
     calc_next_period, jst_now, jst_today, minutes_between, compute_break_minutes,
     night_minutes, validate_password, parse_settings, build_ics, parse_iso, normalize_iso,
+    norm_hhmm, norm_dt_iso, add_days,
 )
 import shift_engine
 import ai
@@ -2271,6 +2272,11 @@ def shop_shifts_auto():
     #   - AIドラフト系の requested を削除（前回生成をクリア）
     #   - ★スタッフ希望（requested, reason NOT LIKE 'AIドラフト%'）は保持
     # 即確定時は従来通り全削除（シフトを完全に置き換える）。
+    # ★【希望表管理画面は wish_history を見る設計（Bug E 修正）】
+    # 従来は「AI生成で shifts.requested が消えると希望表管理からも消える」
+    # 問題があったが、希望表管理は wish_history（永久履歴）ベースに変更済み。
+    # そのためここでは従来通り「期間内の requested を削除」してOK。
+    # （ shifts.requested は「調整待ちアクション」の扱い。wish_history とは別。）
     if draft:
         execute(
             "DELETE FROM shifts WHERE shop_id=? AND "
@@ -3300,6 +3306,74 @@ def ensure_db():
         # スキーマ初期化失敗は致命的 → ログを出して伝播
         print(f"[ensure_db] FAIL: {e}", flush=True)
         raise
+    # ★ データ正規化（インシデント対策）
+    # 過去バージョンで "2026-08-01T7:00:00" のような非ゼロ埋め時刻が
+    # shifts / wish_history に保存されていた問題を修復する。
+    # また、wish_history で end <= start（同日）の翌日またぎ希望も修復する。
+    try:
+        _normalize_datetime_data()
+    except Exception as e:
+        print(f"[ensure_db] WARN: data normalization failed (skipped): {e}", flush=True)
+
+
+def _normalize_datetime_data():
+    """起動時データ正規化。
+
+    1. shifts / wish_history の start_datetime, end_datetime を
+       "YYYY-MM-DDTHH:MM:SS" 形式にゼロ埋め（"T7:00:00" → "T07:00:00"）。
+    2. wish_history で end_datetime <= start_datetime（同日）のレコードは
+       翌日またぎ希望が誤って同日保存されていたインシデントの修復。
+       end_datetime を start と同じ日付の翌日の同時刻に補正。
+    3. shift_patterns / fixed_shifts の start_time, end_time を "HH:MM" にゼロ埋め。
+    """
+    # --- 1. shifts / wish_history の datetime ゼロ埋め ---
+    for table in ("shifts", "wish_history"):
+        try:
+            rows = query_all(f"SELECT id, start_datetime, end_datetime FROM {table}")
+        except Exception:
+            continue
+        for r in rows:
+            sid = r["id"]
+            s_old = r.get("start_datetime") or ""
+            e_old = r.get("end_datetime") or ""
+            s_new = norm_dt_iso(s_old)
+            e_new = norm_dt_iso(e_old)
+            # --- 2. wish_history の翌日またぎ誤保存修復 ---
+            # end <= start かつ same day なら end を翌日に
+            if table == "wish_history" and s_new and e_new:
+                if e_new <= s_new:
+                    # end を翌日に繰り越す（HH:MM:SS 部分は保持）
+                    try:
+                        e_new = f"{add_days(s_new[:10], 1)}T{e_new[11:]}"
+                    except Exception:
+                        pass
+            if s_new != s_old or e_new != e_old:
+                try:
+                    execute(
+                        f"UPDATE {table} SET start_datetime=?, end_datetime=? WHERE id=?",
+                        (s_new, e_new, sid))
+                except Exception as e:
+                    print(f"[ensure_db] WARN: update {table} id={sid} failed: {e}", flush=True)
+
+    # --- 3. shift_patterns / fixed_shifts の time ゼロ埋め ---
+    for table in ("shift_patterns", "fixed_shifts"):
+        try:
+            rows = query_all(f"SELECT id, start_time, end_time FROM {table}")
+        except Exception:
+            continue
+        for r in rows:
+            rid = r["id"]
+            s_old = r.get("start_time") or ""
+            e_old = r.get("end_time") or ""
+            s_new = norm_hhmm(s_old)
+            e_new = norm_hhmm(e_old)
+            if s_new != s_old or e_new != e_old:
+                try:
+                    execute(
+                        f"UPDATE {table} SET start_time=?, end_time=? WHERE id=?",
+                        (s_new, e_new, rid))
+                except Exception as e:
+                    print(f"[ensure_db] WARN: update {table} id={rid} failed: {e}", flush=True)
 
 
 # gunicorn 等でインポートされた場合もスキーマを整備（起動時に1回）

@@ -16,8 +16,53 @@ def jst_today():
 
 
 # ---------- 日付・時刻 ----------
+def norm_hhmm(time_s):
+    """時刻文字列を "HH:MM" 形式にゼロ埋め正規化。
+
+    入力例: "7:00" → "07:00", "09:00" → "09:00", "" → "00:00"
+    ※ DB に "7:00" のような非ゼロ埋め時刻が保存されているケースや、
+      HTML <input type="time"> の値がブラウザ依存で "7:00" になるケースを救う。
+    """
+    if not time_s:
+        return "00:00"
+    parts = str(time_s).split(":")
+    if len(parts) < 2:
+        return "00:00"
+    try:
+        h = int(parts[0])
+        m = int(parts[1])
+    except ValueError:
+        return "00:00"
+    return f"{h:02d}:{m:02d}"
+
+
+def norm_dt_iso(s):
+    """ISO datetime を "YYYY-MM-DDTHH:MM:SS" 形式に正規化。
+
+    入力例: "2026-08-01T7:00:00" → "2026-08-01T07:00:00"
+            "2026-08-01T09:00"   → "2026-08-01T09:00:00"
+    ※ DB に非ゼロ埋め時刻が混入したインシデントのデータ修正用。
+    """
+    if not s:
+        return s
+    s = str(s)
+    if "T" not in s or len(s) < 11:
+        return s
+    date_part, _, time_part = s.partition("T")
+    # 秒がない場合は補完
+    if time_part.count(":") == 1:
+        time_part = time_part + ":00"
+    hh, _, rest = time_part.partition(":")
+    try:
+        hh_int = int(hh)
+    except ValueError:
+        return s
+    norm_time = f"{hh_int:02d}:{rest}"
+    return f"{date_part}T{norm_time}"
+
+
 def combine_dt(date_s, time_s):
-    return f"{date_s}T{time_s}:00"
+    return f"{date_s}T{norm_hhmm(time_s)}:00"
 
 
 def combine_dt_overnight(date_s, start_time_s, end_time_s):
@@ -26,13 +71,17 @@ def combine_dt_overnight(date_s, start_time_s, end_time_s):
     例: combine_dt_overnight("2026-08-03", "22:00", "05:00")
       → ("2026-08-03T22:00:00", "2026-08-04T05:00:00")
     戻り値: (start_iso, end_iso)
+    【時刻ゼロ埋め】start/end に "7:00" のような非ゼロ埋めが渡された場合も
+      "07:00" に正規化して返す（DB登録時のインシデント再発防止）。
     """
-    ps = _hhmm_to_min(start_time_s)
-    pe = _hhmm_to_min(end_time_s)
+    ns = norm_hhmm(start_time_s)
+    ne = norm_hhmm(end_time_s)
+    ps = _hhmm_to_min(ns)
+    pe = _hhmm_to_min(ne)
     if pe <= ps:
         next_day = add_days(date_s, 1)
-        return f"{date_s}T{start_time_s}:00", f"{next_day}T{end_time_s}:00"
-    return f"{date_s}T{start_time_s}:00", f"{date_s}T{end_time_s}:00"
+        return f"{date_s}T{ns}:00", f"{next_day}T{ne}:00"
+    return f"{date_s}T{ns}:00", f"{date_s}T{ne}:00"
 
 
 def parse_iso(s):

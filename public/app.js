@@ -97,9 +97,27 @@ function logoutLocal() {
 
 const WD = ['日', '月', '火', '水', '木', '金', '土'];
 function wdName(d) { return WD[new Date(d + 'T00:00:00').getDay()]; }
-function hm(iso) { return iso ? iso.slice(11, 16) : '--:--'; }
+/* ISO datetime から時分を抽出。ゼロ埋め無し "T7:00:00" 等にも対応。
+   【背景】過去バージョンでDBに "2026-08-01T7:00:00" のような
+   非ゼロ埋め時刻が保存されていた。slice(11,16) だと "7:00:" に化ける
+   ため正規化してから抽出する。 */
+function hm(iso) {
+  if (!iso) return '--:--';
+  const t = String(iso).slice(11);
+  const m = t.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return '--:--';
+  return `${m[1].padStart(2, '0')}:${m[2]}`;
+}
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
-function slotClass(iso) { const h = parseInt(iso.slice(11, 13)); if (h < 12) return 'morning'; if (h < 16) return 'noon'; return 'evening'; }
+/* 時刻→時間帯クラス。parseInt なので非ゼロ埋めでも崩れにくいが、
+   不正入力時は朝扱いで安全側に倒す。 */
+function slotClass(iso) {
+  const h = parseInt(String(iso || '').slice(11, 13), 10);
+  if (isNaN(h)) return 'morning';
+  if (h < 12) return 'morning';
+  if (h < 16) return 'noon';
+  return 'evening';
+}
 function yen(n) { return '¥' + (n || 0).toLocaleString(); }
 function buzz(ms = 8) { try { navigator.vibrate?.(ms); } catch (e) {} }
 
@@ -506,11 +524,15 @@ function _dateDiffDays(fromStr, toStr) {
 
 function _extMinFromIso(iso, anchorDate) {
   // iso を anchorDate 基準の「拡張分」に変換。翌日なら +1440。
+  // 【時刻パースは正規化して行う】"T7:00:00" のような非ゼロ埋めでもOK
+  const t = String(iso || '').slice(11);
+  const m = t.match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return NaN;  // パース失敗時は NaN で伝播（呼び出し元でisNaN判定）
+  const h = +m[1];
+  const mn = +m[2];
   const isoDate = (iso || '').slice(0, 10);
-  const h = +(iso || '').slice(11, 13);
-  const m = +(iso || '').slice(14, 16);
   const diff = anchorDate ? _dateDiffDays(anchorDate, isoDate) : 0;
-  return (h + diff * 24) * 60 + m;
+  return (h + diff * 24) * 60 + mn;
 }
 
 function _extHourLabel(h) {
@@ -533,9 +555,17 @@ function _extHourToIsoTime(h, m, anchorDate) {
   return { date: dateStr, time: `${hh}:${mm}` };
 }
 
+/* "H:MM" / "HH:MM" → 時刻数値(時,分)。不正時は NaN。 */
+function _parseTimeParts(t) {
+  const m = String(t || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return [NaN, NaN];
+  return [+m[1], +m[2]];
+}
+
 /* 店舗の営業時間をパターン（shift_patterns）の最小開始/最大終了から算出してキャッシュ。
    タイムライン表示で「日によって時間軸が変わる」のを防ぎ、営業時間全体を固定表示する。
-   【日またぎ対応】end_time <= start_time の overnight パターンは end に +24 する。 */
+   【日またぎ対応】end_time <= start_time の overnight パターンは end に +24 する。
+   【時刻パース堅牢化】"7:00" のような非ゼロ埋め時刻でも正しく解析する。 */
 async function ensureBusinessHours() {
   // 【キャッシュ戦略】毎回 /shop/patterns を取り直して計算する。
   // パターン編集後にキャッシュが古くなり「9-19」等の古い表示に固定される
@@ -549,16 +579,16 @@ async function ensureBusinessHours() {
     if (!pats.length) { appState.businessHours = fallback; return fallback; }
     let start = 48, end = 0;
     pats.forEach((p) => {
-      const sh = +(p.start_time || '').slice(0, 2);
-      let peH = +(p.end_time || '').slice(0, 2);
-      const peM = +(p.end_time || '').slice(3, 5);
+      const [sh] = _parseTimeParts(p.start_time);
+      let [peH, peM] = _parseTimeParts(p.end_time);
+      if (isNaN(sh) || isNaN(peH)) return;  // 不正時刻は無視
       // overnight (翌日またぎ): end <= start なら翌日扱いで +24
       if (peH < sh || (peH === sh && peM === 0)) peH += 24;
       else if (peM > 0) peH += 1;  // 終了分がある場合は +1 時間切り上げ
-      if (!isNaN(sh)) start = Math.min(start, sh);
-      if (!isNaN(peH)) end = Math.max(end, peH);
+      start = Math.min(start, sh);
+      end = Math.max(end, peH);
     });
-    if (start >= end) { appState.businessHours = fallback; return fallback; }
+    if (start >= end || isNaN(start) || isNaN(end)) { appState.businessHours = fallback; return fallback; }
     appState.businessHours = { start, end };
     return appState.businessHours;
   } catch { return fallback; }
@@ -575,8 +605,11 @@ function _computeHourlyGaps(shifts, dayStr) {
   // 各パターンから曜日別必要人数を取得（overnight は +24 時間拡張）
   const hourReq = {}; // 拡張hour → required
   pats.forEach((p) => {
-    const ps = +(p.start_time || '').slice(0, 2);
-    let pe = +(p.end_time || '').slice(0, 2);
+    const [ps0] = _parseTimeParts(p.start_time);
+    let [pe0] = _parseTimeParts(p.end_time);
+    if (isNaN(ps0) || isNaN(pe0)) return;
+    const ps = ps0;
+    let pe = pe0;
     if (pe <= ps) pe += 24;  // overnight
     const wr = (p.weekday_required || {});
     const req = wr[String(wd)] != null ? +wr[String(wd)] : (p.required_staff || 0);
@@ -763,6 +796,7 @@ function buildPrintTimelineHtml(list, anchorDate) {
   list.forEach((s) => {
     const sMin = _extMinFromIso(s.start_datetime, day);
     const eMin = _extMinFromIso(s.end_datetime, day);
+    if (isNaN(sMin) || isNaN(eMin)) return;  // 不正時刻は集計から除外
     minH = Math.min(minH, Math.floor(sMin / 60));
     maxH = Math.max(maxH, Math.ceil(eMin / 60));
   });
@@ -916,12 +950,15 @@ function openDayTimeline(date, allShifts, editable, onChange) {
   // 時間軸は「営業時間」をベースにし、シフトが営業時間外にはみ出す場合のみ拡張。
   // これにより「シフトが無い時間帯が消える」「日によって軸が変わる」を防ぐ。
   // 【日またぎ】anchor=date で拡張分計算。翌日へ延びるシフトは +1440 分で計算。
+  // 【NaN対策】壊れた時刻のシフトは minH/maxH 計算から除外（1件の不良で
+  //   全バーが消えるインシデントの再発防止）。
   const bh = appState.businessHours || { start: 9, end: 22 };
   let minH = bh.start, maxH = bh.end;
   // date で始まるシフトで範囲拡張を判定
   list.filter((s) => s.start_datetime.slice(0, 10) === date).forEach((s) => {
     const sMin = _extMinFromIso(s.start_datetime, date);
     const eMin = _extMinFromIso(s.end_datetime, date);
+    if (isNaN(sMin) || isNaN(eMin)) return;  // 不正時刻は集計から除外
     minH = Math.min(minH, Math.floor(sMin / 60));
     maxH = Math.max(maxH, Math.ceil(eMin / 60));
   });
@@ -942,6 +979,10 @@ function openDayTimeline(date, allShifts, editable, onChange) {
       // 表示範囲 [0%, 100%] にクリップし、「前日から継続」マークを付ける。
       const sMin = _extMinFromIso(s.start_datetime, date);
       let eMin = _extMinFromIso(s.end_datetime, date);
+      // 【NaN対策】時刻パース失敗のシフトは安全なプレースホルダ表示に倒す
+      if (isNaN(sMin) || isNaN(eMin)) {
+        return `<div class="tl-bar ${slotClass(s.start_datetime)}" data-id="${s.id}" title="${hm(s.start_datetime)}-${hm(s.end_datetime)} (時刻不正)" style="left:0%;width:5%">${hm(s.start_datetime)}?</div>`;
+      }
       if (eMin <= sMin) eMin = sMin + 60;
       const rawLeft = ((sMin - rangeMin) / rangeLen) * 100;
       const rawRight = ((eMin - rangeMin) / rangeLen) * 100;
@@ -2291,32 +2332,45 @@ SCREENS.requests = async function (el) {
     const endDate = document.getElementById('reqEnd')?.value || defaultEnd;
     safeSetHTML(box, '<div class="text-secondary small">読み込み中...</div>');
     try {
-      // スタッフ一覧と希望シフトを並行取得
-      const [shiftsD, staffsD] = await Promise.all([
+      // ★【インシデント対策】希望表は wish_history を見る（シフト確定後も残す）
+      // 従来は shifts.requested を見ていたため、AI生成や確定で希望が画面から消えた。
+      // wish_history は永久履歴なので、シフトが確定しても希望は残り続ける。
+      const [wishesD, shiftsD, staffsD] = await Promise.all([
+        api(`/shop/wishes?start=${startDate}&end=${endDate}`),
         api(`/shop/shifts?start=${startDate}&end=${endDate}`),
         api('/shop/staffs'),
       ]);
       if (!isAlive(tok) || !el.isConnected) return;
-      // ★AIドラフト（reason LIKE 'AIドラフト%'）は「スタッフ希望」ではないので除外
-      // ドラフトは「シフト画面」で確認でき、スタッフ希望は「希望表管理」で確認する
-      const reqs = (shiftsD.shifts || []).filter((s) =>
-        s.status === 'requested' &&
-        !(s.reason || '').startsWith('AIドラフト') &&
-        !(s.reason || '').startsWith('AI生成'));
+      // wish_history から希望を取得（note で AIドラフト等を除外することも可能だが、
+      // wish_history にはスタッフ希望・管理者希望のみ保存されるのでそのまま使う）
+      const reqs = (wishesD.wishes || []).filter((w) => {
+        const note = w.note || '';
+        // AIドラフト由来の wish_history は存在しないが念のため除外
+        return !note.startsWith('AIドラフト') && !note.startsWith('AI生成');
+      });
       const staffs = staffsD.staffs || [];
       const staffMap = {};
       staffs.forEach((s) => staffMap[s.id] = s);
-      // staff_id ごとにグループ化
+      // シフトが確定済みか判定するためのマップ (staff_id, date) → confirmed の有無
+      const confirmedKey = new Set();
+      (shiftsD.shifts || []).forEach((s) => {
+        if (s.status === 'confirmed') {
+          confirmedKey.add(`${s.staff_id}|${(s.start_datetime || '').slice(0, 10)}`);
+        }
+      });
+      // staff_id ごとにグループ化。各希望に confirmed フラグを付与
       const byStaff = {};
       reqs.forEach((r) => {
         const sid = r.staff_id;
         if (!byStaff[sid]) byStaff[sid] = [];
+        // この希望が確定済みシフトに対応しているか（同スタッフ・同日のconfirmed）
+        r._confirmed = confirmedKey.has(`${sid}|${(r.start_datetime || '').slice(0, 10)}`);
         byStaff[sid].push(r);
       });
       // 表示用配列（希望数降順）
       const cards = Object.entries(byStaff).map(([sid, list]) => ({
-        staff: staffMap[sid] || { id: sid, name: '不明#' + sid, staff_code: '?', role: '' },
-        list: list.sort((a, b) => a.start_datetime.localeCompare(b.start_datetime)),
+        staff: staffMap[sid] || { id: +sid, name: '不明#' + sid, staff_code: '?', role: '' },
+        list: list.sort((a, b) => (a.start_datetime || '').localeCompare(b.start_datetime || '')),
       })).sort((a, b) => b.list.length - a.list.length);
 
       if (!cards.length) {
@@ -2356,6 +2410,7 @@ function renderStaffReqCard({ staff, list }) {
   const restCount = list.filter((r) => r.availability === 'rest').length;
   const flexCount = list.filter((r) => r.availability && r.availability !== 'rest').length;
   const timeCount = list.length - restCount - flexCount;
+  const confirmedCount = list.filter((r) => r._confirmed).length;
   // 最初と最後の日付
   const firstDate = list[0]?.start_datetime?.slice(0, 10) || '';
   const lastDate = list[list.length - 1]?.start_datetime?.slice(0, 10) || '';
@@ -2380,6 +2435,7 @@ function renderStaffReqCard({ staff, list }) {
       ${timeCount > 0 ? `<span class="badge-soft warning">時間 ${timeCount}</span>` : ''}
       ${flexCount > 0 ? `<span class="badge-soft info">柔軟 ${flexCount}</span>` : ''}
       ${restCount > 0 ? `<span class="badge-soft danger">休希望 ${restCount}</span>` : ''}
+      ${confirmedCount > 0 ? `<span class="badge-soft success">確定済 ${confirmedCount}</span>` : ''}
     </div>
     <div class="req-card-period small text-secondary">
       ${firstDate === lastDate ? esc(firstDate) : esc(firstDate) + ' 〜 ' + esc(lastDate)}
@@ -2406,11 +2462,13 @@ function openStaffReqDetailModal({ staff, list }) {
       badgeHtml = badge('時間指定', 'warning');
       timeText = `${st} - ${et}`;
     }
+    const stateBadge = r._confirmed ? badge('確定済', 'success') : badge('調整待ち', 'warning');
     return `<tr>
       <td class="num">${esc(day)} <span class="text-secondary small">(${wdName(day)})</span></td>
       <td class="num">${esc(timeText)}</td>
       <td>${badgeHtml}</td>
-      <td class="small text-secondary">${esc(r.reason || '')}</td>
+      <td>${stateBadge}</td>
+      <td class="small text-secondary">${esc(r.note || r.reason || '')}</td>
     </tr>`;
   }).join('');
   const m = openModal(`<i class="bi bi-person"></i> ${esc(staff.name)} さんの希望表`,
@@ -2418,15 +2476,15 @@ function openStaffReqDetailModal({ staff, list }) {
        <i class="bi bi-person-badge"></i>
        <strong>${esc(staff.name)}</strong>
        <span class="text-secondary">${esc(staff.staff_code || '')}</span>
-       ${staff.role === 'manager' ? badge('店長', 'info') : staff.role === 'employee' ? badge('社員', 'success') : staff.role === 'student' ? badge('学生', 'warning') : badge('バイト', 'muted')}
-       <span class="small text-secondary ms-auto">希望 ${list.length} 件</span>
-     </div>
-     <div class="table-wrap">
-       <table class="data-table">
-         <thead><tr><th>日付</th><th>時間</th><th>種別</th><th>理由</th></tr></thead>
-         <tbody>${rows || '<tr><td colspan="4" class="text-secondary small">希望なし</td></tr>'}</tbody>
-       </table>
-     </div>`,
+        ${staff.role === 'manager' ? badge('店長', 'info') : staff.role === 'employee' ? badge('社員', 'success') : staff.role === 'student' ? badge('学生', 'warning') : badge('バイト', 'muted')}
+        <span class="small text-secondary ms-auto">希望 ${list.length} 件</span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead><tr><th>日付</th><th>時間</th><th>種別</th><th>状態</th><th>メモ</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="5" class="text-secondary small">希望なし</td></tr>'}</tbody>
+        </table>
+      </div>`,
     null, { saveLabel: '閉じる' });
 }
 
@@ -3153,13 +3211,37 @@ SCREENS.request = async function (el) {
       <button class="btn btn-primary w-full mt-2" data-t="time">この時間で設定</button></div>`, null);
     w.querySelectorAll('[data-t]').forEach((b) => b?.addEventListener('click', () => {
       const t = b.dataset.t;
-      if (t === 'time') { const st = w.querySelector('#wpStart').value, en = w.querySelector('#wpEnd').value; wishState[day] = { type: 'time', start: `${day}T${st}:00`, end: `${day}T${en}:00` }; }
+      if (t === 'time') {
+        const st = w.querySelector('#wpStart').value, en = w.querySelector('#wpEnd').value;
+        // ★【翌日またぎ対応】end <= start の場合は翌日扱い。
+        // 従来は同日保存して「9-2」の負の時間長になるインシデントがあった。
+        const [sh, sm] = st.split(':').map(Number);
+        const [eh, em] = en.split(':').map(Number);
+        let endDay = day;
+        if (eh < sh || (eh === sh && em <= sm)) {
+          // 翌日
+          const dd = new Date(day + 'T00:00:00'); dd.setDate(dd.getDate() + 1);
+          endDay = `${dd.getFullYear()}-${String(dd.getMonth()+1).padStart(2,'0')}-${String(dd.getDate()).padStart(2,'0')}`;
+        }
+        wishState[day] = { type: 'time', start: `${day}T${st}:00`, end: `${endDay}T${en}:00` };
+      }
       else wishState[day] = { type: t };
       buzz(10); w.remove(); drawWish();
     }));
   }
   document.getElementById('wPrev')?.addEventListener('click', () => { wishMonth.m--; if (wishMonth.m < 0) { wishMonth.m = 11; wishMonth.y--; } drawWish(); });
   document.getElementById('wNext')?.addEventListener('click', () => { wishMonth.m++; if (wishMonth.m > 11) { wishMonth.m = 0; wishMonth.y++; } drawWish(); });
+  /* "HH:MM" 2つを比較して end <= start なら end を翌日日付で返す。
+     戻り: { endDate: "YYYY-MM-DD" } */
+  function _calcOvernightEndDay(day, startTime, endTime) {
+    const [sh, sm] = (startTime || '').split(':').map(Number);
+    const [eh, em] = (endTime || '').split(':').map(Number);
+    if (eh < sh || (eh === sh && em <= sm)) {
+      const dd = new Date(day + 'T00:00:00'); dd.setDate(dd.getDate() + 1);
+      return `${dd.getFullYear()}-${String(dd.getMonth()+1).padStart(2,'0')}-${String(dd.getDate()).padStart(2,'0')}`;
+    }
+    return day;
+  }
   function fillWishesFromAI(d) {
     const ng = new Set(d.ng_weekdays || []); const isTime = d.preferred_slot === 'time' && d.preferred_start && d.preferred_end;
     const pref = isTime ? 'time' : (d.preferred_slot === 'morning' ? 'morning' : d.preferred_slot === 'evening' ? 'evening' : 'any');
@@ -3167,13 +3249,20 @@ SCREENS.request = async function (el) {
     const inPeriod = (ds) => wishPeriod && ds >= wishPeriod.start_date && ds <= wishPeriod.end_date;
     // HH:MM → HH:MM:00 に正規化（サーバーが %H:%M:%S パースのため）
     const padTime = (t) => /^\d{1,2}:\d{2}$/.test(t || '') ? t + ':00' : t;
+    // ★【翌日またり】preferred_end <= preferred_start なら各dayごとに end を翌日扱い
     for (let day = 1; day <= dim; day++) {
       const ds = `${wishMonth.y}-${String(wishMonth.m+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
       const wd = new Date(ds + 'T00:00:00').getDay();
       if (!inPeriod(ds)) continue; // 募集期間外はスキップ
       if (ng.has(wd)) { wishState[ds] = { type: 'rest' }; continue; }
       if (need && filled >= need) { wishState[ds] = { type: 'rest' }; continue; }
-      wishState[ds] = isTime ? { type: 'time', start: `${ds}T${padTime(d.preferred_start)}`, end: `${ds}T${padTime(d.preferred_end)}` } : { type: pref }; filled++;
+      if (isTime) {
+        const endDay = _calcOvernightEndDay(ds, d.preferred_start, d.preferred_end);
+        wishState[ds] = { type: 'time', start: `${ds}T${padTime(d.preferred_start)}`, end: `${endDay}T${padTime(d.preferred_end)}` };
+      } else {
+        wishState[ds] = { type: pref };
+      }
+      filled++;
     }
     drawWish();
   }
