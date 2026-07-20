@@ -1416,13 +1416,20 @@ def shop_dashboard():
     # 不足計算
     overrides = shift_engine.load_weekday_overrides(shop_id)
     shortage = shift_engine.compute_shortage(month_shifts, patterns, month_start, month_end, overrides)
-    today_shortage = [s for s in shortage if s["date"] == today]
+    # ★【重なりパターン補正】複数パターンが時間帯を重ねる場合、パターン別集計だと
+    # 「同じ時間帯がN回カウントされる」過大表示になる（インシデント）。
+    # 時間帯別の一意不足で「今日の不足枠数」「月間不足枠数」を算出する。
+    unique_shortage = shift_engine.compute_shortage_unique_hours(
+        month_shifts, patterns, month_start, month_end, overrides)
+    today_unique = [s for s in unique_shortage if s["date"] == today]
 
     return jsonify({
         "today_attendance": len(today_shifts),
         "today_shifts": [{"name": s["staff_name"], "start": s["start_datetime"][11:16], "end": s["end_datetime"][11:16], "role": s["staff_role"]} for s in today_shifts],
         "today_hourly": [{"hour": h, "count": c} for h, c in sorted(hourly.items())],
-        "today_shortage": len(today_shortage),
+        # 表示用の「枠数」は時間帯別一意（重なりをマージ）
+        "today_shortage": len(today_unique),
+        "today_shortage_breakdown": today_unique,
         "month_cost": total_cost,
         "month_hours": round(total_hours, 1),
         "staff_count": len(active_staff),
@@ -1433,7 +1440,7 @@ def shop_dashboard():
         "pending_approvals": len(creq),
         "unread_notifications": len(notif),
         "daily_cost_series": [{"date": d, "cost": c} for d, c in sorted(daily_cost.items())][-30:],
-        "shortage_total": len(shortage),
+        "shortage_total": len(unique_shortage),
         "patterns": [{"name": p["pattern_name"], "start": p["start_time"], "end": p["end_time"], "required": p["required_staff"]} for p in patterns],
     })
 
@@ -2244,7 +2251,10 @@ def shop_shifts_auto():
     if dry:
         return jsonify({"ok": True, "dry_run": True, "confirmed_count": len(result["confirmed"]),
                         "pending_count": len(result["pending"]), "minutes_by_staff": result["minutes_by_staff"],
-                        "shortage": result.get("shortage", []), "warnings": result.get("warnings", []),
+                        "shortage": result.get("shortage", []),
+                        "shortage_unique_count": len(result.get("shortage_unique", [])),
+                        "shortage_count": len(result.get("shortage_unique", [])),
+                        "warnings": result.get("warnings", []),
                         "explanations": result.get("explanations", []),
                         "preview": [{"staff_id": c["staff_id"], "start": c["start"], "end": c["end"], "break": c["break"], "reason": c["reason"]} for c in result["confirmed"]]})
 
@@ -2317,6 +2327,7 @@ def shop_shifts_auto():
     return jsonify({"ok": True, "draft": draft,
                     "confirmed_count": len(result["confirmed"]), "pending_count": pending_count,
                     "minutes_by_staff": result["minutes_by_staff"], "shortage": result.get("shortage", []),
+                    "shortage_unique_count": len(result.get("shortage_unique", [])),
                     "warnings": result.get("warnings", []),
                     "explanations": result.get("explanations", []),
                     "message": f"AI生成完了{draft_msg}。{'確定ボタンで通知が飛びます。' if draft else 'スタッフに確定通知を送信しました。'}"})
@@ -2789,7 +2800,14 @@ def shop_shortage():
     shifts = query_all("SELECT * FROM shifts WHERE shop_id=? AND start_datetime>=? AND start_datetime<=?", (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
     pats = query_all("SELECT * FROM shift_patterns WHERE shop_id=?", (shop_id,))
     overrides = shift_engine.load_weekday_overrides(shop_id)
-    return jsonify({"shortage": shift_engine.compute_shortage(shifts, pats, start_d, end_d, overrides)})
+    # ★ パターン別（詳細表示用）と時間帯別一意（カウント用）の両方を返す
+    shortage_by_pattern = shift_engine.compute_shortage(shifts, pats, start_d, end_d, overrides)
+    shortage_unique = shift_engine.compute_shortage_unique_hours(shifts, pats, start_d, end_d, overrides)
+    return jsonify({
+        "shortage": shortage_by_pattern,
+        "shortage_unique": shortage_unique,
+        "shortage_count": len(shortage_unique),
+    })
 
 
 @app.get("/api/shop/shifts/export")
@@ -2912,8 +2930,10 @@ def shop_ai_chat():
         total_cost += cost
         total_hours += work / 60
         staff_hours[sh["staff_name"]] = staff_hours.get(sh["staff_name"], 0) + work / 60
-    # 不足状況
+    # 不足状況（パターン別詳細＋時間帯別一意カウント）
     shortage = shift_engine.compute_shortage(month_shifts, patterns, month_start, month_end, overrides)
+    unique_shortage = shift_engine.compute_shortage_unique_hours(
+        month_shifts, patterns, month_start, month_end, overrides)
     # 今日の出勤
     today_shifts = [s for s in month_shifts if s["start_datetime"][:10] == today]
     today_names = [s["staff_name"] for s in today_shifts]
@@ -2941,7 +2961,7 @@ def shop_ai_chat():
         "month_cost": total_cost,
         "month_hours": round(total_hours, 1),
         "staff_hours": staff_hours,
-        "shortage_count": len(shortage),
+        "shortage_count": len(unique_shortage),
         "shortage_details": shortage[:8],
         "pending_requests": len(req_pending),
         "pending_approvals": len(creq_pending),

@@ -742,6 +742,51 @@ class TestShiftEngine:
         recomputed = [{"date": s["date"], "pattern": s["pattern"]} for s in short]
         assert recomputed == internal
 
+    # ---- compute_shortage_unique_hours: パターン重なり問題の修正 ----
+    def test_compute_shortage_unique_hours_overlapping_patterns(self):
+        """【インシデント対策】重なる時間帯を持つ2パターンが両方不足の場合、
+        unique_hours は重なりをマージして1区間として返す。
+
+        旧バグ: パターン別 compute_shortage は Full(4-14,必要1)+朝(4-6,必要1) で
+        2枠不足と過大カウントしていた。実際は重なる時間は1人いれば十分。
+        """
+        shop_id = insert_shop(settings={"min_daily_hours": 4})
+        # Full: 4:00-14:00 必要1
+        insert_pattern(shop_id, "Full", "04:00", "14:00", 1)
+        # 朝: 4:00-6:00 必要1（Fullと重なる）
+        insert_pattern(shop_id, "朝", "04:00", "06:00", 1)
+        pats = dbmod.query_all("SELECT * FROM shift_patterns WHERE shop_id=?", (shop_id,))
+        # シフト配置なし → 全時間帯不足
+        unique = shift_engine.compute_shortage_unique_hours([], pats, MON, MON)
+        # 重なりをマージして1区間になる（旧 compute_shortage だと2枠）
+        assert len(unique) == 1, f"重なりパターンが1区間にマージされていない: {unique}"
+        assert unique[0]["gap"] == 1
+        assert unique[0]["start_min"] == 4 * 60  # 4:00
+        assert unique[0]["end_min"] == 14 * 60   # 14:00
+
+    def test_compute_shortage_unique_hours_no_overlap(self):
+        """重ならない2パターンの場合は2区間として返す。"""
+        shop_id = insert_shop(settings={"min_daily_hours": 4})
+        insert_pattern(shop_id, "朝", "04:00", "06:00", 1)
+        insert_pattern(shop_id, "夜", "20:00", "23:00", 1)
+        pats = dbmod.query_all("SELECT * FROM shift_patterns WHERE shop_id=?", (shop_id,))
+        unique = shift_engine.compute_shortage_unique_hours([], pats, MON, MON)
+        assert len(unique) == 2, f"重ならないパターンは2区間になるはず: {unique}"
+
+    def test_compute_shortage_unique_hours_overnight(self):
+        """overnight パターン（翌日またぎ）でも正しく1区間になる。"""
+        shop_id = insert_shop(settings={"min_daily_hours": 4})
+        # Full: 04:00 - 翌日02:00 (overnight)
+        insert_pattern(shop_id, "Full", "04:00", "02:00", 1)
+        # 朝: 04:00-06:00（Fullと重なる）
+        insert_pattern(shop_id, "朝", "04:00", "06:00", 1)
+        pats = dbmod.query_all("SELECT * FROM shift_patterns WHERE shop_id=?", (shop_id,))
+        unique = shift_engine.compute_shortage_unique_hours([], pats, MON, MON)
+        # overnight で Full が 04:00-翌日02:00(拡張26:00) まで続く
+        assert len(unique) == 1, f"overnight重なりが1区間になっていない: {unique}"
+        assert unique[0]["start_min"] == 4 * 60   # 4:00
+        assert unique[0]["end_min"] == 26 * 60    # 翌日02:00 = 26:00
+
 
 # ============================================================
 # 2c. 曜日別必要人数（weekday override）のテスト

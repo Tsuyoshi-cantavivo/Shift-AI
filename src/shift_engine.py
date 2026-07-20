@@ -655,6 +655,8 @@ def auto_generate(shop_id, settings, start_date, end_date):
     # -----------------------------------------------------------
     # 不足集計（曜日別オーバーライド適用後の required_staff を使用）
     # -----------------------------------------------------------
+    # shortage_list: パターン別（詳細表示用）
+    # shortage_unique: 時間帯別一意（重なりマージ・カウント用）
     shortage_list = []
     cur = start_date
     while cur <= end_date:
@@ -672,6 +674,15 @@ def auto_generate(shop_id, settings, start_date, end_date):
                     "required": req_c, "placed": min_cov, "shortage": short,
                 })
         cur = add_days(cur, 1)
+
+    # 時間帯別一意不足（重なりパターンをマージ）
+    # confirmed を shifts 互換の辞書にして compute_shortage_unique_hours に通す
+    _shifts_for_count = [
+        {"start_datetime": c["start"], "end_datetime": c["end"], "status": "confirmed"}
+        for c in confirmed
+    ]
+    shortage_unique = compute_shortage_unique_hours(
+        _shifts_for_count, patterns, start_date, end_date, weekday_overrides)
 
     # -----------------------------------------------------------
     # 警告（連勤・月間超過・固定シフト上限超過）
@@ -753,7 +764,8 @@ def auto_generate(shop_id, settings, start_date, end_date):
     return {
         "confirmed": confirmed, "pending": pending,
         "minutes_by_staff": minutes_by_staff,
-        "shortage": shortage_list, "warnings": warnings,
+        "shortage": shortage_list, "shortage_unique": shortage_unique,
+        "warnings": warnings,
         "explanations": explanations,
     }
 
@@ -933,3 +945,84 @@ def compute_shortage(shifts, patterns, start_date, end_date, weekday_overrides=N
                 })
         cur = add_days(cur, 1)
     return shortage
+
+
+def compute_shortage_unique_hours(shifts, patterns, start_date, end_date, weekday_overrides=None):
+    """時間帯(スロット)単位で「一意の不足」を集計して返す。
+
+    compute_shortage はパターン別に不足を列出しするが、複数パターンが
+    時間帯を重なる場合（例: Full 4:00-14:00 必要1 + 朝 4:00-6:00 必要1）、
+    「同じ 4:00-5:00 スロットが2パターンで不足 → 2枠不足」と過大カウントされる
+    問題があった（インシデント）。
+
+    本関数は:
+      - 各スロット(分)ごとに必要人数を **max** で集約（重なりはマージ）
+      - 配置人数を引いた差分が正のスロットだけを数える
+      - 連続する不足スロットは gap の大小に関わらず1つの「区間」にマージし、
+        その区間の最大 gap を探す（"最大N人足りない区間" = N枠不足）
+
+    戻り値: [{"date": "YYYY-MM-DD", "start_min": int, "end_min": int, "gap": int}]
+      start_min/end_min は当日基準の拡張分(0-2880)。overnight は +1440。
+      gap はその区間内での最大不足人数。
+    """
+    coverage = {}
+    for s in shifts:
+        if (s.get("status") or "confirmed") != "confirmed":
+            continue
+        sd = s.get("start_datetime") or s.get("start")
+        ed = s.get("end_datetime") or s.get("end")
+        if not sd or not ed or len(sd) < 16:
+            continue
+        day = sd[:10]
+        cov = coverage.setdefault(day, {})
+        for sl in _shift_slots(sd, ed, GRAN):
+            cov[sl] = cov.get(sl, 0) + 1
+
+    result = []
+    cur = start_date
+    while cur <= end_date:
+        wd = weekday_sun0(datetime.strptime(cur, "%Y-%m-%d").date())
+        day_patterns = []
+        for pat in patterns:
+            p = dict(pat)
+            ov = (weekday_overrides or {}).get((pat.get("id"), wd))
+            if ov is not None:
+                p["required_staff"] = ov
+            day_patterns.append(p)
+        # max集約した要件マップ(_day_requirements と同等)
+        req_map = _day_requirements(day_patterns, GRAN, wd, weekday_overrides)
+        cov = coverage.get(cur, {})
+        # 連続スロットを走査して gap>0 の区間をマージ
+        # gap の大小に関わらず連続する不足スロットは1つの区間にまとめ、
+        # 区間内の最大 gap を探す（"最大N人足りない" = N枠不足）
+        slots = sorted([s for s, v in req_map.items() if v > 0])
+        i = 0
+        while i < len(slots):
+            s = slots[i]
+            req = req_map[s]
+            placed = cov.get(s, 0)
+            gap = req - placed
+            if gap <= 0:
+                i += 1
+                continue
+            # 連続区間の終端を探す（次スロットも gap>0 なら拡張）
+            j = i + 1
+            max_gap = gap
+            while j < len(slots) and slots[j] - slots[j - 1] == GRAN:
+                req_j = req_map[slots[j]]
+                placed_j = cov.get(slots[j], 0)
+                gap_j = req_j - placed_j
+                if gap_j <= 0:
+                    break
+                if gap_j > max_gap:
+                    max_gap = gap_j
+                j += 1
+            result.append({
+                "date": cur,
+                "start_min": s,
+                "end_min": slots[j - 1] + GRAN,
+                "gap": max_gap,
+            })
+            i = j
+        cur = add_days(cur, 1)
+    return result

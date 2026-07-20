@@ -1614,7 +1614,7 @@ async function runGenerate() {
       `<div class="kpi-grid mb-3" style="grid-template-columns:repeat(3,1fr)">
         <div class="kpi-card kpi-green"><div class="kpi-label">確定予定</div><div class="kpi-value num">${prev.confirmed_count}</div></div>
         <div class="kpi-card kpi-amber"><div class="kpi-label">調整待ち</div><div class="kpi-value num">${prev.pending_count}</div></div>
-        <div class="kpi-card kpi-red"><div class="kpi-label">不足枠</div><div class="kpi-value num">${(prev.shortage || []).length}</div></div>
+        <div class="kpi-card kpi-red"><div class="kpi-label">不足枠</div><div class="kpi-value num">${prev.shortage_unique_count != null ? prev.shortage_unique_count : (prev.shortage || []).length}</div></div>
       </div>`) +
     card(sectionTitle('bi-lightbulb', 'AIの判断理由', badge('Explainable AI', 'ai')) +
       `<div class="explanation-list">${explanations}</div>`) +
@@ -1840,7 +1840,7 @@ async function runShiftGenInline(cur, loadSummary, refreshShortage) {
        <div class="row g-2 mb-3">
          <div class="col-4"><div class="kpi-card kpi-green" style="margin:0;padding:12px"><div class="kpi-label">確定予定</div><div class="kpi-value num">${prev.confirmed_count}</div></div></div>
          <div class="col-4"><div class="kpi-card kpi-amber" style="margin:0;padding:12px"><div class="kpi-label">調整待ち</div><div class="kpi-value num">${prev.pending_count}</div></div></div>
-         <div class="col-4"><div class="kpi-card kpi-red" style="margin:0;padding:12px"><div class="kpi-label">不足枠</div><div class="kpi-value num">${(prev.shortage || []).length}</div></div></div>
+          <div class="col-4"><div class="kpi-card kpi-red" style="margin:0;padding:12px"><div class="kpi-label">不足枠</div><div class="kpi-value num">${prev.shortage_unique_count != null ? prev.shortage_unique_count : (prev.shortage || []).length}</div></div></div>
        </div>
        ${explanations ? `<div class="small fw-bold text-muted mb-2"><i class="bi bi-lightbulb"></i> AIの判断理由</div><div class="explanation-list mb-3">${explanations}</div>` : ''}
        <div class="small text-muted">※確定すると期間内の「確定シフト」を上書きします。</div>`,
