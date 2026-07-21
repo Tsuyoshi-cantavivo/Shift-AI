@@ -18,6 +18,7 @@ from db import query_all
 from utils import (
     weekday_sun0, combine_dt, combine_dt_overnight, minutes_between, compute_break_minutes,
     add_days, max_consecutive_run, _hhmm_to_min, parse_iso,
+    build_staff_tendency, score_shift_for_tendency,
 )
 
 # スロット粒度(分)。1時間単位より細かくしておき、検証Aは時間単位で保証する。
@@ -268,6 +269,23 @@ def auto_generate(shop_id, settings, start_date, end_date):
         "SELECT fs.*, s.role FROM fixed_shifts fs JOIN staffs s ON fs.staff_id=s.id "
         "WHERE s.shop_id=? AND s.is_resigned=0",
         (shop_id,))
+
+    # ★【AI学習】スタッフ勤務傾向を過去90日分の確定シフト + 希望から構築。
+    # 配置時のタイブレーカーとして使用（希望や必須制約より優先度は低い）。
+    # 例: 飯田（あ）さんが午後ばかり勤務してきた → 午後シフトを優先的に配置。
+    try:
+        past_confirmed = query_all(
+            "SELECT staff_id, start_datetime, end_datetime FROM shifts "
+            "WHERE shop_id=? AND status='confirmed' "
+            "AND start_datetime >= datetime('now', '-90 days')",
+            (shop_id,))
+        past_wishes = query_all(
+            "SELECT staff_id, start_datetime, end_datetime FROM wish_history "
+            "WHERE shop_id=? AND start_datetime >= datetime('now', '-90 days')",
+            (shop_id,))
+        tendency_map = build_staff_tendency(past_confirmed, past_wishes)
+    except Exception:
+        tendency_map = {}
 
     # 曜日別オーバーライド適用後のパターン表（shortage集計等で使用）
     def patterns_for_weekday(wd):
@@ -549,20 +567,49 @@ def auto_generate(shop_id, settings, start_date, end_date):
     for r in flex:
         flex_by_day.setdefault(r["start_datetime"][:10], []).append(r)
 
+    # ★【AI学習タイブレーカー】傾向スコアで柔軟希望者をソートするヘルパー。
+    # 優先度: 現在負荷(asc) → 傾向スコア(desc) → staff_id(asc)
+    # 希望は絶対（availability='morning'/'evening'は _slot_matches で弾く）。
+    # 傾向は「同ランクの柔軟('any')希望者間でのみ」優先順位を変える。
+    def flex_sort_key(req, pat, day):
+        load = minutes_by_staff.get(req["staff_id"], 0)
+        # 候補パターンの representative な時刻で傾向スコア計算
+        pat_s_iso, pat_e_iso = combine_dt_overnight(day, pat["start_time"], pat["end_time"])
+        hist = tendency_map.get(req["staff_id"])
+        score = score_shift_for_tendency(hist, pat_s_iso, pat_e_iso) if hist else 0.5
+        return (load, -score, req["staff_id"])  # -score は降順
+
     cur = start_date
     while cur <= end_date:
-        applicants = sorted(flex_by_day.get(cur, []), key=lambda a: minutes_by_staff.get(a["staff_id"], 0))
-        for pat in patterns:
-            for req in list(applicants):
-                if req.get("_used"):
-                    continue
-                _, sw = state(cur)
-                if req["staff_id"] in sw:
-                    continue
-                if not _slot_matches(req.get("availability"), pat):
-                    continue
+        # ★【改善】候補者起点で考える。
+        # 従来は「パターン起点」で最初のパターン(朝等)に柔軟希望者が吸い込まれた。
+        # 候補者起点にし、各候補者が傾向スコアの高いパターンから順に試すことで、
+        # 「午後傾向の飯田さんは午後シフトに優先配置」が実現できる。
+        day_flex = [a for a in flex_by_day.get(cur, []) if not a.get("_used")]
+        # 各候補者を負荷順にソート（負荷が低い人から優先的に配置）
+        day_flex.sort(key=lambda a: (minutes_by_staff.get(a["staff_id"], 0), a["staff_id"]))
+        for req in day_flex:
+            if req.get("_used"):
+                continue
+            _, sw = state(cur)
+            if req["staff_id"] in sw:
+                continue
+            # 候補者にマッチするパターンを抽出し、傾向スコア順にソート
+            matching_patterns = [p for p in patterns if _slot_matches(req.get("availability"), p)]
+            if not matching_patterns:
+                continue
+            # 傾向スコア順（降順）にソート。スコア同じなら required_staff 大きい順。
+            hist = tendency_map.get(req["staff_id"])
+            def pat_score(pat):
+                pat_s_iso, pat_e_iso = combine_dt_overnight(cur, pat["start_time"], pat["end_time"])
+                s = score_shift_for_tendency(hist, pat_s_iso, pat_e_iso) if hist else 0.5
+                return (s, pat.get("required_staff") or 0)
+            matching_patterns.sort(key=pat_score, reverse=True)
+            # スコア高い順に配置トライ
+            for pat in matching_patterns:
                 if fill_shortage_with(req["staff_id"], cur, pat, f"柔軟希望({req.get('availability')})"):
                     req["_used"] = True
+                    break
         cur = add_days(cur, 1)
     for r in flex:
         if not r.get("_used"):
@@ -652,8 +699,11 @@ def auto_generate(shop_id, settings, start_date, end_date):
                 avail = any_pt
             if not avail:
                 break
-            # ソート: 負荷0のスタッフ同士は staff_id で揺れるのを防ぐため、
-            # (現在負荷, ランダムシード的役割の日別hash) で分散
+            # ソート: (現在負荷 asc, 傾向スコア desc, staff_id asc)
+            # ★【AI学習】同負荷のスタッフ間では、傾向スコアの高い方を優先。
+            # ただしセグメント毎に傾向スコアは再計算が必要（時間帯に依存）。
+            # ここでは一旦負荷順にソート。セグメント毎の選択時（for emp loop内）で
+            # 傾向を考慮するため、純粋な負荷ソートでOK。
             avail.sort(key=lambda s: (minutes_by_staff.get(s["id"], 0), s["id"]))
             # 長いセグメントから優先（複数パターンをまたぐ長時間シフトで効率よくカバー）
             day_segs_sorted = sorted(day_segs, key=lambda seg: (seg[1] - seg[0]), reverse=True)
@@ -672,17 +722,30 @@ def auto_generate(shop_id, settings, start_date, end_date):
                 # 【日またぎ対応】拡張スロット(s_min/win_end >= 1440)は翌日の時刻として ISO を生成
                 s_iso = _min_to_iso(cur, s_min)
                 e_iso = _min_to_iso(cur, win_end)
+                # ★【AI学習タイブレーカー】配置可能な社員/バイトを傾向スコア順に評価。
+                # 負荷が同じ場合、傾向に合うスタッフを優先。
+                avail_with_score = []
                 for emp in avail:
                     _, sw2 = state(cur)
                     if emp["id"] in sw2:
                         continue
                     ok, _ = can_place(emp["id"], cur, s_iso, e_iso)
-                    if ok:
-                        role_label = "社員自動配置" if emp["role"] in ("employee", "manager") else "柔軟バイト自動配置"
-                        place(emp["id"], cur, s_iso, e_iso, f"不足補填（{role_label}）")
-                        placed_any = True
-                        progress = True
-                        break
+                    if not ok:
+                        continue
+                    hist = tendency_map.get(emp["id"])
+                    t_score = score_shift_for_tendency(hist, s_iso, e_iso) if hist else 0.5
+                    avail_with_score.append((emp, t_score))
+                # 負荷(asc) → 傾向(desc) でソート
+                avail_with_score.sort(key=lambda x: (
+                    minutes_by_staff.get(x[0]["id"], 0),
+                    -x[1],
+                    x[0]["id"]))
+                for emp, _t_score in avail_with_score:
+                    role_label = "社員自動配置" if emp["role"] in ("employee", "manager") else "柔軟バイト自動配置"
+                    place(emp["id"], cur, s_iso, e_iso, f"不足補填（{role_label}）")
+                    placed_any = True
+                    progress = True
+                    break
                 if placed_any:
                     break
         cur = add_days(cur, 1)

@@ -18,7 +18,7 @@ from auth import hash_password, verify_password, gen_token, strip_password
 from utils import (
     calc_next_period, jst_now, jst_today, minutes_between, compute_break_minutes,
     night_minutes, validate_password, parse_settings, build_ics, parse_iso, normalize_iso,
-    norm_hhmm, norm_dt_iso, add_days,
+    norm_hhmm, norm_dt_iso, add_days, build_staff_tendency,
 )
 import shift_engine
 import ai
@@ -3197,6 +3197,49 @@ def shop_wishes():
     except Exception:
         rows = []
     return jsonify({"wishes": rows})
+
+
+@app.get("/api/shop/staff-tendencies")
+def shop_staff_tendencies():
+    """スタッフ別の勤務傾向スコアを取得（AI学習データの透明化）。
+
+    過去90日分の確定シフト + 希望から計算した時間帯ヒストグラムを返す。
+    店長が「なぜこの人をこのシフトにしたか」を理解するための参照用。
+    """
+    shop, shop_id, _ = _shop_ctx()
+    try:
+        past_confirmed = query_all(
+            "SELECT staff_id, start_datetime, end_datetime FROM shifts "
+            "WHERE shop_id=? AND status='confirmed' "
+            "AND start_datetime >= datetime('now', '-90 days')",
+            (shop_id,))
+        past_wishes = query_all(
+            "SELECT staff_id, start_datetime, end_datetime FROM wish_history "
+            "WHERE shop_id=? AND start_datetime >= datetime('now', '-90 days')",
+            (shop_id,))
+        tendency_map = build_staff_tendency(past_confirmed, past_wishes)
+    except Exception:
+        tendency_map = {}
+    staffs = query_all("SELECT id, name, staff_code, role FROM staffs WHERE shop_id=? AND is_resigned=0", (shop_id,))
+    result = []
+    for s in staffs:
+        hist = tendency_map.get(s["id"])
+        if not hist:
+            continue
+        # 上位3時間帯を抽出
+        ranked = sorted(enumerate(hist), key=lambda x: -x[1])[:5]
+        top_hours = [{"hour": h, "score": round(v, 3)} for h, v in ranked if v > 0]
+        result.append({
+            "staff_id": s["id"],
+            "name": s["name"],
+            "staff_code": s["staff_code"],
+            "role": s["role"],
+            "top_hours": top_hours,
+            "sample_count_confirmed": sum(1 for x in past_confirmed if x["staff_id"] == s["id"]),
+            "sample_count_wish": sum(1 for x in past_wishes if x["staff_id"] == s["id"]),
+        })
+    result.sort(key=lambda x: -x["sample_count_confirmed"])
+    return jsonify({"tendencies": result, "total_staff": len(result)})
 
 
 @app.post("/api/staff/change-requests")

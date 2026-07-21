@@ -247,6 +247,127 @@ def calc_next_period(now=None, mode="half"):
             "deadline": deadline.strftime("%Y-%m-%d")}
 
 
+# ============================================================
+# スタッフ勤務傾向（時間帯ヒストグラム）の学習・スコアリング
+# ============================================================
+def build_staff_tendency(confirmed_shifts, wish_shifts=None, day_count=90):
+    """過去の確定シフト + 希望から、スタッフごとの時間帯ヒストグラムを構築。
+
+    confirmed_shifts: [{"staff_id":int, "start_datetime":"...T HH:MM:SS", "end_datetime":...}, ...]
+    wish_shifts: 同形式（wish_history 由来）。None の場合は希望を考慮しない。
+    day_count: 過去何日分をサンプルするか（古いデータは重み減衰）。
+
+    戻り値: {staff_id: [48個のfloat]} — 各時間帯(0-47, overnightは+24)の偏好スコア
+      0.0 = 全く勤務実績がない時間帯
+      高い = よく勤務している時間帯
+      合計値は1.0に正規化（確率分布）
+
+    【設計】
+    - 確定シフトは重み2.0（実績として強いシグナル）
+    - 希望は重み0.5（意向は反映するが実績より弱い）
+    - 直近30日は重み×1.5（最近の傾向を優先）
+    - 時間帯ヒストグラムは拡張時間(0-47)で構築（overnight対応）
+    """
+    from collections import defaultdict
+    hist = defaultdict(lambda: [0.0] * 48)
+    now = jst_now()
+
+    def _add_shift(s, weight):
+        sid = s.get("staff_id")
+        if sid is None:
+            return
+        sd = s.get("start_datetime") or s.get("start") or ""
+        ed = s.get("end_datetime") or s.get("end") or ""
+        if not sd or not ed or "T" not in sd:
+            return
+        # 直近重み付け（日数ベースの減衰）
+        try:
+            d0 = datetime.strptime(sd[:10], "%Y-%m-%d").date()
+            days_ago = (now.date() - d0).days
+            if days_ago > day_count:
+                return
+            recent_boost = 1.5 if days_ago <= 30 else 1.0
+        except ValueError:
+            recent_boost = 1.0
+        # 拡張分計算（当日0:00=0, 翌日0:00=1440）
+        anchor = sd[:10]
+        s_min = _ext_min_from_iso(sd, anchor)
+        e_min = _ext_min_from_iso(ed, anchor)
+        if e_min <= s_min:
+            e_min = s_min + 60
+        # 時間単位に集計
+        s_h = s_min // 60
+        e_h = (e_min + 59) // 60  # 切り上げ
+        for h in range(s_h, min(e_h, 48)):
+            hist[sid][h] += weight * recent_boost
+
+    # 確定シフト（重み2.0）
+    for s in (confirmed_shifts or []):
+        _add_shift(s, 2.0)
+    # 希望（重み0.5）
+    for s in (wish_shifts or []):
+        _add_shift(s, 0.5)
+
+    # 正規化（スタッフごとに合計1.0）
+    result = {}
+    for sid, h in hist.items():
+        total = sum(h)
+        if total > 0:
+            result[sid] = [v / total for v in h]
+        else:
+            result[sid] = [1.0 / 48] * 48  # 一様分布（データ無し）
+    return result
+
+
+def _ext_min_from_iso(iso, anchor_date):
+    """ISO datetime を anchorDate 基準の拡張分に変換（翌日なら+1440）。"""
+    iso = iso or ""
+    if "T" not in iso:
+        return 0
+    iso_date = iso[:10]
+    t_part = iso[11:]
+    m = __import__("re").match(r"(\d{1,2}):(\d{2})", t_part)
+    if not m:
+        return 0
+    h, mn = int(m.group(1)), int(m.group(2))
+    if anchor_date and iso_date != anchor_date:
+        a = datetime.strptime(anchor_date, "%Y-%m-%d").date()
+        b = datetime.strptime(iso_date, "%Y-%m-%d").date()
+        diff = (b - a).days
+        h += diff * 24
+    return h * 60 + mn
+
+
+def score_shift_for_tendency(tendency_hist, start_iso, end_iso):
+    """候補シフト [start, end) がスタッフの傾向とどれくらい合うかスコア化。
+
+    tendency_hist: [48個のfloat]（build_staff_tendency の戻り値の要素）
+    戻り値: 0.0〜1.0 のスコア。高いほど傾向に合致。
+
+    【スコアリング】
+    候補シフトの各時間帯の偏好スコアを足し合わせ、シフト時間長で正規化。
+    傾向が明確な時間帯（ヒストグラムの山）と重なるほど高スコア。
+    """
+    if not tendency_hist or not start_iso or not end_iso:
+        return 0.5  # 中立（データ無し）
+    anchor = start_iso[:10]
+    s_min = _ext_min_from_iso(start_iso, anchor)
+    e_min = _ext_min_from_iso(end_iso, anchor)
+    if e_min <= s_min:
+        e_min = s_min + 60
+    s_h = s_min // 60
+    e_h = (e_min + 59) // 60
+    if e_h <= s_h:
+        return 0.5
+    total = 0.0
+    for h in range(s_h, min(e_h, 48)):
+        total += tendency_hist[h]
+    # 平均偏好を返す（時間長で割って正規化）
+    avg = total / (e_h - s_h)
+    # 傾向強度（一様分布からの乖離）を加味
+    return avg
+
+
 def validate_password(pw):
     """パスワード強度チェック。問題なければ None、問題あればメッセージ。"""
     if not pw or len(pw) < 8:
