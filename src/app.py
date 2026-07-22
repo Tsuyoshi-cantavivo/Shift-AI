@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timedelta
 from flask import (Flask, request, jsonify, abort, Response, send_file, g)
 from werkzeug.exceptions import HTTPException
+from werkzeug.utils import safe_join
 from dotenv import load_dotenv
 
 import sys
@@ -2810,6 +2811,69 @@ def shop_shifts_put(sid):
     return jsonify(result)
 
 
+@app.patch("/api/shop/shifts/<int:sid>/draft-time")
+def shop_shift_draft_time_patch(sid):
+    """AIドラフトだけを15分単位で直接調整する。"""
+    _, shop_id, _ = _shop_ctx()
+    body = request.get_json(silent=True) or {}
+    draft = query_one("SELECT * FROM shifts WHERE id=? AND shop_id=?", (sid, shop_id))
+    if not draft:
+        abort(404, description="シフトが見つかりません")
+    if draft.get("status") != "requested" or not (draft.get("reason") or "").startswith("AIドラフト"):
+        return jsonify({"error": "AIドラフトだけを直接調整できます"}), 409
+
+    expected_updated_at = body.get("updated_at")
+    current_updated_at = draft.get("updated_at") or draft.get("created_at")
+    if not expected_updated_at:
+        abort(400, description="ドラフトの更新時刻が必要です")
+    if expected_updated_at != current_updated_at:
+        return jsonify({"error": "ほかの調整内容があります。ドラフトを再読み込みしてください", "shift": draft}), 409
+
+    start_datetime = normalize_iso(body.get("start_datetime"))
+    end_datetime = normalize_iso(body.get("end_datetime"))
+    try:
+        start_at = parse_iso(start_datetime)
+        end_at = parse_iso(end_datetime)
+    except (TypeError, ValueError):
+        abort(400, description="開始・終了時刻の形式が不正です")
+    if start_at.second != 0 or end_at.second != 0 or start_at.minute % 15 or end_at.minute % 15:
+        abort(400, description="時刻は15分単位で指定してください")
+    if end_at <= start_at or minutes_between(start_datetime, end_datetime) < 15:
+        abort(400, description="終了は開始の15分後以降にしてください")
+
+    over, required, current = _check_slot_cap(shop_id, start_datetime, end_datetime, exclude_id=sid)
+    if over:
+        return jsonify({"error": f"この時間帯の必要人数は{required}名です（既に{current}名配置済）", "over_cap": True}), 409
+
+    overlap = query_one(
+        "SELECT id, start_datetime, end_datetime FROM shifts "
+        "WHERE shop_id=? AND staff_id=? AND id!=? "
+        "AND (status IN ('confirmed','modifying') OR (status='requested' AND reason LIKE 'AIドラフト%')) "
+        "AND start_datetime < ? AND end_datetime > ? LIMIT 1",
+        (shop_id, draft["staff_id"], sid, end_datetime, start_datetime),
+    )
+    if overlap:
+        return jsonify({"error": "同じスタッフの別シフトと重複します", "overlap": True}), 409
+
+    student_ng, student_msg = _check_student_only_shift(
+        shop_id, draft["staff_id"], start_datetime, exclude_id=sid
+    )
+    if student_ng:
+        return jsonify({"error": student_msg, "student_only": True}), 409
+
+    next_updated_at = jst_now().strftime("%Y-%m-%dT%H:%M:%S.%f")
+    execute(
+        "UPDATE shifts SET start_datetime=?, end_datetime=?, break_time_minutes=?, updated_at=? "
+        "WHERE id=? AND shop_id=? AND COALESCE(updated_at, created_at)=?",
+        (start_datetime, end_datetime, compute_break_minutes(minutes_between(start_datetime, end_datetime)),
+         next_updated_at, sid, shop_id, expected_updated_at),
+    )
+    updated = query_one("SELECT * FROM shifts WHERE id=? AND shop_id=?", (sid, shop_id))
+    if not updated or updated.get("updated_at") != next_updated_at:
+        return jsonify({"error": "ほかの調整内容があります。ドラフトを再読み込みしてください", "shift": updated}), 409
+    return jsonify({"ok": True, "shift": updated})
+
+
 @app.delete("/api/shop/shifts/<int:sid>")
 def shop_shifts_del(sid):
     shop, shop_id, _ = _shop_ctx()
@@ -3381,7 +3445,9 @@ def index():
 def static_files(path):
     if path.startswith("api/"):
         abort(404, description="Not Found")
-    full = os.path.join(PUBLIC_DIR, path)
+    full = safe_join(PUBLIC_DIR, path)
+    if full is None:
+        abort(404, description="Not Found")
     if os.path.isfile(full):
         # app.js / style.css は短時間キャッシュ（常に最新を取得させる）
         if path in ("app.js", "style.css"):
@@ -3407,6 +3473,14 @@ def ensure_db():
     except Exception as e:
         # スキーマ初期化失敗は致命的 → ログを出して伝播
         print(f"[ensure_db] FAIL: {e}", flush=True)
+        raise
+    try:
+        shift_columns = {row["name"] for row in query_all("PRAGMA table_info(shifts)")}
+        if "updated_at" not in shift_columns:
+            execute("ALTER TABLE shifts ADD COLUMN updated_at TEXT")
+            print("[ensure_db] OK: shifts.updated_at added", flush=True)
+    except Exception as e:
+        print(f"[ensure_db] FAIL: shifts.updated_at migration failed: {e}", flush=True)
         raise
     # ★ データ正規化（インシデント対策）
     # 過去バージョンで "2026-08-01T7:00:00" のような非ゼロ埋め時刻が

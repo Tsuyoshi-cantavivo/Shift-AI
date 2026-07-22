@@ -948,6 +948,177 @@ async function openPrintView(start, end) {
   }
 }
 
+function isAiDraftShift(shift) {
+  return shift?.status === 'requested' && String(shift.reason || '').startsWith('AIドラフト');
+}
+
+function installDraftTimelineDrag(modal, { date, list, editable, rangeMin, rangeLen }) {
+  if (!editable) return;
+  const undoButton = modal.querySelector('#tlDraftUndo');
+  const rangeMax = rangeMin + rangeLen;
+  let lastUndo = null;
+  const snap15 = (minute) => Math.round(minute / 15) * 15;
+  const toIso = (minute) => {
+    const info = _extHourToIsoTime(Math.floor(minute / 60), minute % 60, date);
+    return `${info.date}T${info.time}:00`;
+  };
+  const position = (minute) => ((minute - rangeMin) / rangeLen) * 100;
+  const renderBar = (bar, startMinute, endMinute, startIso, endIso) => {
+    bar.style.left = `${Math.max(0, position(startMinute)).toFixed(2)}%`;
+    bar.style.width = `${Math.max(2, position(endMinute) - position(startMinute)).toFixed(2)}%`;
+    bar.title = `${hm(startIso)}-${hm(endIso)}（ドラフト・直接調整可）`;
+    const label = bar.querySelector('.tl-bar-label');
+    if (label) label.textContent = `${hm(startIso)}-${hm(endIso)}`;
+  };
+  const showUndo = () => { if (undoButton) undoButton.hidden = !lastUndo; };
+  const restoreWithError = (bar, before) => {
+    renderBar(bar, before.startMinute, before.endMinute, before.startIso, before.endIso);
+    bar.classList.add('tl-bar-save-error');
+    window.setTimeout(() => bar.classList.remove('tl-bar-save-error'), 450);
+  };
+  const saveChange = async (bar, shift, before, next, rememberUndo) => {
+    bar.classList.add('tl-bar-saving');
+    bar.style.pointerEvents = 'none';
+    try {
+      const result = await api(`/shop/shifts/${shift.id}/draft-time`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          start_datetime: next.startIso,
+          end_datetime: next.endIso,
+          updated_at: shift.updated_at || shift.created_at,
+        }),
+      });
+      Object.assign(shift, result.shift);
+      renderBar(bar, next.startMinute, next.endMinute, shift.start_datetime, shift.end_datetime);
+      if (rememberUndo) { lastUndo = { bar, shift, before }; showUndo(); }
+      toast('ドラフトを保存しました', 'success');
+    } catch (error) {
+      restoreWithError(bar, before);
+      toast(error.message || 'ドラフトの保存に失敗しました', 'error');
+    } finally {
+      bar.classList.remove('tl-bar-saving');
+      bar.style.pointerEvents = '';
+    }
+  };
+
+  undoButton?.addEventListener('click', async () => {
+    if (!lastUndo) return;
+    const history = lastUndo;
+    lastUndo = null;
+    showUndo();
+    const currentStart = _extMinFromIso(history.shift.start_datetime, date);
+    const currentEnd = _extMinFromIso(history.shift.end_datetime, date);
+    await saveChange(history.bar, history.shift, {
+      startMinute: currentStart,
+      endMinute: currentEnd,
+      startIso: history.shift.start_datetime,
+      endIso: history.shift.end_datetime,
+    }, history.before, false);
+  });
+
+  modal.querySelectorAll('.tl-bar[data-draft-editable="true"]').forEach((bar) => {
+    const shift = list.find((item) => String(item.id) === bar.dataset.id);
+    if (!shift || !isAiDraftShift(shift)) return;
+    let active = null;
+    let longPressTimer = null;
+    let pendingTouch = null;
+    const clearPendingTouch = () => {
+      if (longPressTimer) window.clearTimeout(longPressTimer);
+      longPressTimer = null;
+      pendingTouch = null;
+    };
+    const detachGlobalDragListeners = () => {
+      window.removeEventListener('pointermove', updateDrag);
+      window.removeEventListener('pointerup', finishDrag);
+      window.removeEventListener('pointercancel', cancelDrag);
+    };
+    const beginDrag = (event, mode) => {
+      const startMinute = _extMinFromIso(shift.start_datetime, date);
+      const endMinute = _extMinFromIso(shift.end_datetime, date);
+      if (isNaN(startMinute) || isNaN(endMinute)) return;
+      const rect = bar.parentElement.getBoundingClientRect();
+      active = {
+        mode,
+        pointerId: event.pointerId,
+        pointerMinute: snap15(rangeMin + ((event.clientX - rect.left) / rect.width) * rangeLen),
+        before: { startMinute, endMinute, startIso: shift.start_datetime, endIso: shift.end_datetime },
+        next: null,
+      };
+      bar.setPointerCapture?.(event.pointerId);
+      bar.classList.add('tl-bar-dragging');
+      window.addEventListener('pointermove', updateDrag, { passive: false });
+      window.addEventListener('pointerup', finishDrag);
+      window.addEventListener('pointercancel', cancelDrag);
+      event.preventDefault();
+    };
+    const updateDrag = (event) => {
+      if (!active || event.pointerId !== active.pointerId) return;
+      const rect = bar.parentElement.getBoundingClientRect();
+      const pointerMinute = snap15(rangeMin + ((event.clientX - rect.left) / rect.width) * rangeLen);
+      const boundedPointer = Math.max(rangeMin, Math.min(rangeMax, pointerMinute));
+      let startMinute = active.before.startMinute;
+      let endMinute = active.before.endMinute;
+      if (active.mode === 'move') {
+        const delta = boundedPointer - active.pointerMinute;
+        startMinute += delta;
+        endMinute += delta;
+        if (startMinute < rangeMin) { endMinute += rangeMin - startMinute; startMinute = rangeMin; }
+        if (endMinute > rangeMax) { startMinute -= endMinute - rangeMax; endMinute = rangeMax; }
+      } else if (active.mode === 'resize-start') {
+        startMinute = Math.max(rangeMin, Math.min(boundedPointer, endMinute - 15));
+      } else {
+        endMinute = Math.min(rangeMax, Math.max(boundedPointer, startMinute + 15));
+      }
+      active.next = { startMinute, endMinute, startIso: toIso(startMinute), endIso: toIso(endMinute) };
+      renderBar(bar, startMinute, endMinute, active.next.startIso, active.next.endIso);
+      event.preventDefault();
+    };
+    const finishDrag = async (event) => {
+      if (!active || event.pointerId !== active.pointerId) return;
+      detachGlobalDragListeners();
+      clearPendingTouch();
+      const state = active;
+      active = null;
+      bar.classList.remove('tl-bar-dragging');
+      bar.dataset.skipClick = 'true';
+      window.setTimeout(() => { delete bar.dataset.skipClick; }, 0);
+      if (!state.next || (state.next.startIso === state.before.startIso && state.next.endIso === state.before.endIso)) {
+        renderBar(bar, state.before.startMinute, state.before.endMinute, state.before.startIso, state.before.endIso);
+        return;
+      }
+      await saveChange(bar, shift, state.before, state.next, true);
+      event.preventDefault();
+    };
+    const cancelDrag = (event) => {
+      if (!active || event.pointerId !== active.pointerId) return;
+      detachGlobalDragListeners();
+      clearPendingTouch();
+      const before = active.before;
+      active = null;
+      bar.classList.remove('tl-bar-dragging');
+      restoreWithError(bar, before);
+      event.preventDefault();
+    };
+
+    bar.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || bar.classList.contains('tl-bar-saving')) return;
+      const mode = event.target.closest('.tl-drag-handle-start') ? 'resize-start'
+        : event.target.closest('.tl-drag-handle-end') ? 'resize-end' : 'move';
+      if (event.pointerType === 'touch') {
+        pendingTouch = { x: event.clientX, y: event.clientY };
+        longPressTimer = window.setTimeout(() => beginDrag(event, mode), 300);
+      } else {
+        beginDrag(event, mode);
+      }
+    });
+    bar.addEventListener('pointermove', (event) => {
+      if (pendingTouch && !active && Math.hypot(event.clientX - pendingTouch.x, event.clientY - pendingTouch.y) > 8) clearPendingTouch();
+    });
+    bar.addEventListener('pointerup', finishDrag);
+    bar.addEventListener('pointercancel', cancelDrag);
+  });
+}
+
 function openDayTimeline(date, allShifts, editable, onChange) {
   buzz(12);
   // date を anchor として表示。当日タイムラインには「date で始まるシフト」のみ表示。
@@ -1012,8 +1183,11 @@ function openDayTimeline(date, allShifts, editable, onChange) {
         else lbl = `${hm(s.start_datetime)}-${hm(s.end_datetime)}`;
       }
       const contCls = continued ? ' tl-bar-continued' : '';
-      const draftCls = (s.status === 'requested' && (s.reason || '').startsWith('AIドラフト')) ? ' tl-bar-draft' : '';
-      return `<div class="tl-bar ${slotClass(s.start_datetime)}${contCls}${draftCls}" data-id="${s.id}" title="${continued ? '前日から継続: ' : ''}${hm(s.start_datetime)}-${hm(s.end_datetime)}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
+      const isDraft = isAiDraftShift(s);
+      const draftCls = isDraft ? ' tl-bar-draft' : '';
+      const dragAttrs = editable && isDraft ? ' data-draft-editable="true"' : '';
+      const handles = editable && isDraft ? '<span class="tl-drag-handle tl-drag-handle-start" aria-hidden="true"></span><span class="tl-drag-handle tl-drag-handle-end" aria-hidden="true"></span>' : '';
+      return `<div class="tl-bar ${slotClass(s.start_datetime)}${contCls}${draftCls}" data-id="${s.id}"${dragAttrs} title="${continued ? '前日から継続: ' : ''}${hm(s.start_datetime)}-${hm(s.end_datetime)}${isDraft ? '（ドラフト・直接調整可）' : ''}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${handles}<span class="tl-bar-label">${lbl}</span></div>`;
     }).join('');
     return `<div class="tl-row" data-staff-id="${sid}" data-staff-name="${esc(st.name)}"><div class="tl-name">${esc(st.name)}</div><div class="tl-track" data-staff-id="${sid}" title="${editable ? '空き部分をクリックで追加' : ''}">${bars}</div></div>`;
   }).join('');
@@ -1047,13 +1221,15 @@ function openDayTimeline(date, allShifts, editable, onChange) {
   const body =
     `<div class="tl-wrap"><div class="tl-axis-row"><div class="tl-name"></div><div class="tl-axis">${hours.join('')}</div></div>${rows}${gapRow}</div>
      ${emptyNotice}
-     <div class="tl-legend"><span><i style="background:#F59E0B"></i>朝</span><span><i style="background:#10B981"></i>昼</span><span><i style="background:#6366F1"></i>夜</span><span><i style="background:#EF4444"></i>不足</span>${editable ? '<span><i class="bi bi-hand-index" style="font-style:normal;font-size:.7rem"></i>空きをクリックで追加</span>' : ''}<span>バーをタップで${editable ? '編集' : '詳細'}</span></div>
+     <div class="tl-legend"><span><i style="background:#F59E0B"></i>朝</span><span><i style="background:#10B981"></i>昼</span><span><i style="background:#6366F1"></i>夜</span><span><i style="background:#EF4444"></i>不足</span>${editable ? '<span><i class="bi bi-hand-index" style="font-style:normal;font-size:.7rem"></i>空きをクリックで追加</span>' : ''}${editable && list.some(isAiDraftShift) ? '<span><i class="bi bi-arrows-move" style="font-style:normal;font-size:.7rem"></i>AIドラフトはドラッグで調整</span>' : ''}<span>バーをタップで${editable ? '編集' : '詳細'}</span></div>
+     <button class="btn btn-outline-secondary btn-sm mt-2" id="tlDraftUndo" hidden><i class="bi bi-arrow-counterclockwise"></i> 直前の調整を戻す</button>
      ${manualAddBtn}`;
   // PC版は広め(800px)、スマホは画面幅で横スクロール対応
   const modalWidth = window.matchMedia('(min-width: 768px)').matches ? 800 : undefined;
   const w = openModal(`<i class="bi bi-diagram-3"></i> ${esc(date)}（${wdName(date)}）のシフト表`, body, null, { width: modalWidth });
   w.querySelectorAll('.tl-bar').forEach((bar) => bar?.addEventListener('click', (ev) => {
     ev.stopPropagation();
+    if (bar.dataset.skipClick === 'true') return;
     buzz(10);
     w.querySelectorAll('.tl-bar').forEach((b) => b.classList.remove('selected'));
     bar.classList.add('selected');
@@ -1061,6 +1237,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
     if (editable && s) showEditModal(s);
     else if (onChange && s) onChange(s);
   }));
+  installDraftTimelineDrag(w, { date, list, editable, rangeMin, rangeLen });
   // 手動追加ボタン → スタッフを選んで時間自由入力で新規シフト
   if (editable) {
     w.querySelector('#tlManualAdd')?.addEventListener('click', async () => {
