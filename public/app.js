@@ -1814,10 +1814,6 @@ async function runGenerate() {
       `<div class="gen-actions">
         <button class="btn btn-primary btn-lg" style="min-width:260px" id="saveDraftBtn"><i class="bi bi-pencil-square"></i> ドラフト保存（後で調整）</button>
         <div class="small text-secondary mt-2 mb-3">ドラフト保存後、シフト画面で調整 → 「確定」ボタンでスタッフに通知</div>
-        <details class="mt-2">
-          <summary class="small text-secondary cursor-pointer">即確定（従来動作）</summary>
-          <button class="btn btn-outline-secondary btn-sm mt-2" id="confirmGen"><i class="bi bi-check-lg"></i> 今すぐ確定・通知</button>
-        </details>
       </div>`);
 
     // ドラフト保存（推奨・デフォルト）
@@ -1827,17 +1823,6 @@ async function runGenerate() {
         const d = await api('/shop/shifts/auto', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end, draft: true }) });
         setLoading(false);
         toast(`${d.confirmed_count}件をドラフト保存しました（確定前）`, 'success');
-        navigateTo('shifts');
-      } catch (e) { setLoading(false); toast(e.message, 'error'); }
-    });
-    // 即確定（従来動作・折りたたみ）
-    document.getElementById('confirmGen')?.addEventListener('click', async () => {
-      if (!confirm('今すぐ確定して全スタッフに通知を送りますか？\n（推奨: 一旦ドラフト保存して調整→確定）')) return;
-      setLoading(true, 'シフトを確定・通知中...');
-      try {
-        const d = await api('/shop/shifts/auto', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end, draft: false }) });
-        setLoading(false);
-        toast(`${d.confirmed_count}件のシフトを確定・通知しました`, 'success');
         navigateTo('shifts');
       } catch (e) { setLoading(false); toast(e.message, 'error'); }
     });
@@ -1861,7 +1846,6 @@ SCREENS.shifts = function (el) {
         <button class="btn btn-light flex-grow" id="copyBtn"><i class="bi bi-files"></i> コピー</button>
         <button class="btn btn-light" id="printBtn"><i class="bi bi-printer"></i></button>
         <button class="btn btn-success flex-grow" id="finalizeDraftBtn" title="AIドラフト保存中のシフトを一括確定して通知"><i class="bi bi-megaphone"></i> ドラフトを確定・通知</button>
-        <button class="btn btn-ai" id="autoConfirmBtn" title="調整待ち（requested）のシフトを自動調整で一括確定"><i class="bi bi-check2-all"></i> 一括確定（auto）</button>
       </div>
       <div id="genResult" class="mt-2"></div>`) +
     card(sectionTitle('bi-calendar3', '確定シフトカレンダー') + `<div id="calMount"></div>`) +
@@ -1967,27 +1951,6 @@ SCREENS.shifts = function (el) {
       loadSummary();
       refreshShortage();
     } catch (e) { setLoading(false); toast(e.message, 'error'); }
-  });
-
-  // 調整待ち（requested）を一括で自動調整して確定
-  document.getElementById('autoConfirmBtn')?.addEventListener('click', async () => {
-    const { start, end } = cur();
-    if (!start || !end) { toast('期間を指定してください', 'error'); return; }
-    if (!confirm(`${start} 〜 ${end} の調整待ち（requested）シフトを自動調整で一括確定しますか？\n・同日重複の希望は既存シフトと統合\n・上限人数超過は他スタッフ（社員優先）のシフトを短縮`)) return;
-    setLoading(true, '自動調整で確定中...');
-    try {
-      const r = await api('/shop/shifts/auto-confirm', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end }) });
-      setLoading(false);
-      const msg = `${r.total}件中: 確定${r.confirmed}件 / 統合${r.merged}件 / スキップ${r.skipped}件`;
-      toast(msg, r.skipped > 0 ? 'info' : 'success');
-      // 調整内容の詳細を順次表示
-      if (r.adjustments && r.adjustments.length) {
-        r.adjustments.slice(0, 5).forEach((a, i) => setTimeout(() => toast(a.message, 'info'), (i + 1) * 700));
-      }
-      loadSummary(); refreshShortage();
-      if (window._shiftCalCtrl) window._shiftCalCtrl.refresh();
-      refreshNotifBadge();
-    } catch (e) { setLoading(false); toast('一括確定に失敗: ' + e.message, 'error'); }
   });
 
   const calCtrl = createCalendar(document.getElementById('calMount'), {

@@ -623,18 +623,6 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 [data-theme="light"] .tl-bar.tl-bar-draft {
   border-color: rgba(0, 0, 0, 0.4);
 }
-.tl-bar.tl-bar-draft::before {
-  content: 'ドラフト';
-  position: absolute;
-  top: -8px;
-  left: 4px;
-  font-size: 9px;
-  background: var(--warning, #f59e0b);
-  color: white;
-  padding: 1px 4px;
-  border-radius: 3px;
-  white-space: nowrap;
-}
 .tl-bar-draft[data-draft-editable="true"] {
   cursor: grab;
   touch-action: pan-y;
