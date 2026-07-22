@@ -37,3 +37,21 @@ def test_inline_ai_generation_saves_draft_for_timeline_adjustment():
     assert "ドラフトとして保存して調整" in inline_generation
     assert "body: JSON.stringify({ start_date: start, end_date: end, draft: true })" in inline_generation
     assert "この内容で確定" not in inline_generation
+
+
+def test_shift_generation_flow_has_one_explicit_publish_action():
+    source = (ROOT / "public" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="finalizeDraftBtn"' in source
+    assert "ドラフトを確定・通知" in source
+    assert 'id="autoConfirmBtn"' not in source
+    assert "document.getElementById('autoConfirmBtn')" not in source
+    assert "今すぐ確定・通知" not in source
+
+
+def test_draft_bar_keeps_visual_state_without_text_label():
+    styles = (ROOT / "public" / "style.css").read_text(encoding="utf-8")
+
+    assert ".tl-bar.tl-bar-draft" in styles
+    assert ".tl-bar.tl-bar-draft::before" not in styles
+    assert "content: 'ドラフト'" not in styles
