@@ -26,3 +26,14 @@ def test_timeline_styles_communicate_draft_drag_state():
     assert ".tl-drag-handle" in styles
     assert ".tl-bar-dragging" in styles
     assert ".tl-bar-save-error" in styles
+
+
+def test_inline_ai_generation_saves_draft_for_timeline_adjustment():
+    source = (ROOT / "public" / "app.js").read_text(encoding="utf-8")
+    start = source.index("async function runShiftGenInline")
+    end = source.index("\nfunction openAddShiftModal", start)
+    inline_generation = source[start:end]
+
+    assert "ドラフトとして保存して調整" in inline_generation
+    assert "body: JSON.stringify({ start_date: start, end_date: end, draft: true })" in inline_generation
+    assert "この内容で確定" not in inline_generation
