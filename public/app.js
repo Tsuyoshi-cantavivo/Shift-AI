@@ -2010,7 +2010,7 @@ SCREENS.shifts = function (el) {
   }, 200);
 };
 
-/* AI生成: シフト画面内で直接プレビュー→確定（遷移しない） */
+/* AI生成: シフト画面内で直接プレビュー→ドラフト保存（遷移しない） */
 async function runShiftGenInline(cur, loadSummary, refreshShortage) {
   const { start, end } = cur();
   if (!start || !end) { toast('期間を指定してください', 'error'); return; }
@@ -2034,20 +2034,20 @@ async function runShiftGenInline(cur, loadSummary, refreshShortage) {
           <div class="col-4"><div class="kpi-card kpi-red" style="margin:0;padding:12px"><div class="kpi-label">不足枠</div><div class="kpi-value num">${prev.shortage_unique_count != null ? prev.shortage_unique_count : (prev.shortage || []).length}</div></div></div>
        </div>
        ${explanations ? `<div class="small fw-bold text-muted mb-2"><i class="bi bi-lightbulb"></i> AIの判断理由</div><div class="explanation-list mb-3">${explanations}</div>` : ''}
-       <div class="small text-muted">※確定すると期間内の「確定シフト」を上書きします。</div>`,
+       <div class="small text-muted">※ドラフトとして保存後、日別シフト表で時間を調整できます。スタッフへの通知は「ドラフトを確定・通知」を押すまで送信されません。</div>`,
       async (w2, close) => {
-        setLoading(true, 'シフトを確定中...');
+        setLoading(true, 'ドラフトを保存中...');
         try {
-          const d = await api('/shop/shifts/auto', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end }) });
+          const d = await api('/shop/shifts/auto', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end, draft: true }) });
           setLoading(false);
           close();
-          toast(`${d.confirmed_count}件のシフトを確定しました`, 'success');
+          toast(`${d.confirmed_count}件をドラフト保存しました。日別シフト表で調整できます。`, 'success');
           // カレンダーを作成月へジャンプ
           try { const d0 = new Date(start + 'T00:00:00'); if (window._shiftCalCtrl) window._shiftCalCtrl.goToMonth(d0.getFullYear(), d0.getMonth()); } catch {}
           loadSummary(); refreshShortage(); refreshNotifBadge();
         } catch (e) { setLoading(false); toast(e.message, 'error'); }
       });
-    w.querySelector('[data-save]').textContent = 'この内容で確定';
+    w.querySelector('[data-save]').textContent = 'ドラフトとして保存して調整';
   } catch (e) { setLoading(false); genResult.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`; }
 }
 
