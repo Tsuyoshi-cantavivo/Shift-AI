@@ -635,6 +635,40 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
   border-radius: 3px;
   white-space: nowrap;
 }
+.tl-bar-draft[data-draft-editable="true"] {
+  cursor: grab;
+  touch-action: pan-y;
+}
+.tl-bar-draft[data-draft-editable="true"]:active { cursor: grabbing; }
+.tl-bar-label { position: relative; z-index: 1; pointer-events: none; }
+.tl-drag-handle {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  width: 12px;
+  z-index: 2;
+  cursor: ew-resize;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.34);
+}
+.tl-drag-handle-start { left: 2px; }
+.tl-drag-handle-end { right: 2px; }
+.tl-bar-dragging {
+  opacity: .9;
+  transition: none !important;
+  z-index: 5;
+  box-shadow: 0 0 0 3px rgba(255,255,255,.55), 0 8px 16px rgba(0,0,0,.28);
+}
+.tl-bar-saving { opacity: .55; cursor: wait !important; }
+.tl-bar-save-error {
+  animation: tlBarRejected .45s ease-in-out;
+  background: var(--danger) !important;
+}
+@keyframes tlBarRejected {
+  0%, 100% { transform: translateX(0); }
+  30% { transform: translateX(-5px); }
+  70% { transform: translateX(5px); }
+}
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
 .dot.morning { background: #F59E0B; }
 .dot.noon    { background: #10B981; }

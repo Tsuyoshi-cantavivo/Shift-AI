@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS shifts (
   reason              TEXT,
   availability        TEXT,   -- NULL(時間指定) / 'any'(いつでも可) / 'morning'(早番希望) / 'evening'(遅番希望)
   created_at          TEXT DEFAULT (datetime('now')),
+  updated_at          TEXT,
   FOREIGN KEY (staff_id) REFERENCES staffs(id)
 );
 CREATE INDEX IF NOT EXISTS idx_shifts_shop_date ON shifts(shop_id, start_datetime);
