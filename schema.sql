@@ -101,6 +101,8 @@ CREATE TABLE IF NOT EXISTS shifts (
                         CHECK(status IN ('requested','confirmed','modifying')),
   reason              TEXT,
   availability        TEXT,   -- NULL(時間指定) / 'any'(いつでも可) / 'morning'(早番希望) / 'evening'(遅番希望)
+  over_cap_flag       INTEGER DEFAULT 0,  -- 確定時に必要人数超過だった枠に重なる場合 1
+  note                TEXT,               -- 店長の自由メモ（店長画面のみ表示）
   created_at          TEXT DEFAULT (datetime('now')),
   updated_at          TEXT,
   FOREIGN KEY (staff_id) REFERENCES staffs(id)
@@ -207,3 +209,25 @@ CREATE TABLE IF NOT EXISTS shop_holidays (
   FOREIGN KEY (shop_id) REFERENCES shops(id)
 );
 CREATE INDEX IF NOT EXISTS idx_holidays_shop ON shop_holidays(shop_id, holiday_date);
+
+-- -----------------------------------------------------------
+-- audit_logs: システム管理者・店舗の重要操作の監査ログ
+-- action 例: 'shift.finalize', 'creq.approve', 'creq.reject',
+--            'staff.role_change', 'staff.password_reset', 'staff.update',
+--            'staff.create', 'shop.create', 'shop.update'
+-- actor は操作者（admin/shop/staff）。detail は補足（JSON文字列可）。
+-- -----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor_role  TEXT,
+  actor_id    INTEGER,
+  actor_name  TEXT,
+  action      TEXT NOT NULL,
+  target_type TEXT,
+  target_id   INTEGER,
+  shop_id     INTEGER,
+  detail      TEXT,
+  created_at  TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_audit_shop ON audit_logs(shop_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at);

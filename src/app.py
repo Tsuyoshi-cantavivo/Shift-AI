@@ -123,6 +123,25 @@ def notify(shop_id, staff_id, ntype, title, body):
                                 "title": title, "body": body})
 
 
+def audit(action, target_type=None, target_id=None, shop_id=None, detail=None):
+    """監査ログを1件記録。失敗しても業務処理を止めない。
+
+    actor は現在の認証コンテキスト(g.role / g.user)から解決する。
+    shop の g.user は shops 行なので氏名は shop_name、それ以外は name。
+    """
+    try:
+        role = getattr(g, "role", None)
+        user = getattr(g, "user", None) or {}
+        actor_id = user.get("id")
+        actor_name = user.get("shop_name") if role == "shop" else user.get("name")
+        insert_row("audit_logs", {
+            "actor_role": role, "actor_id": actor_id, "actor_name": actor_name,
+            "action": action, "target_type": target_type, "target_id": target_id,
+            "shop_id": shop_id, "detail": detail})
+    except Exception as e:
+        print(f"[audit] WARN: failed to record {action}: {e}", flush=True)
+
+
 def summarize_shifts(shifts, staffs_by_id, settings=None):
     settings = settings or {}
     night_rate = settings.get("night_premium_rate") or 1.0
@@ -362,6 +381,70 @@ def _count_over_cap_slots(shop_id, start_iso, end_iso, exclude_id=None):
         if req > 0 and coverage.get(sl, 0) + 1 > req:
             over_count += 1
     return over_count
+
+
+def _flag_over_cap_shifts(shop_id, start_iso, end_iso):
+    """期間内の confirmed シフトのうち、必要人数を超えるスロットに重なるものへ
+    over_cap_flag=1 を立てる。超過に重ならないものは 0 にリセットする。
+
+    スロットは shift_engine._shift_slots が返す「分単位int」で、日をまたいで
+    繰り返すため coverage/over は (day, slot_min) で管理する（_check_slot_cap と同一モデル）。
+    戻り値: フラグを立てたシフト件数。
+    """
+    pats = query_all("SELECT id, start_time, end_time, required_staff FROM shift_patterns WHERE shop_id=?", (shop_id,))
+    if not pats:
+        return 0
+    weekday_overrides = shift_engine.load_weekday_overrides(shop_id)
+    rows = query_all(
+        "SELECT id, start_datetime, end_datetime, reason, over_cap_flag FROM shifts "
+        "WHERE shop_id=? AND status='confirmed' AND start_datetime>=? AND start_datetime<=?",
+        (shop_id, start_iso, end_iso))
+    if not rows:
+        return 0
+    shift_slots = {}            # shift_id -> (day, [slot_min,...])
+    coverage = {}               # (day, slot_min) -> count
+    for r in rows:
+        day = r["start_datetime"][:10]
+        slots = shift_engine._shift_slots(r["start_datetime"], r["end_datetime"], shift_engine.GRAN)
+        shift_slots[r["id"]] = (day, slots)
+        for sl in slots:
+            coverage[(day, sl)] = coverage.get((day, sl), 0) + 1
+    req_cache = {}
+
+    def _req_for(day):
+        if day not in req_cache:
+            wd = (datetime.strptime(day, "%Y-%m-%d").weekday() + 1) % 7
+            applied = []
+            for pat in pats:
+                ov = weekday_overrides.get((pat.get("id"), wd))
+                p = dict(pat)
+                if ov is not None:
+                    p["required_staff"] = ov
+                applied.append(p)
+            req_cache[day] = shift_engine._day_requirements(applied, shift_engine.GRAN, wd, weekday_overrides)
+        return req_cache[day]
+
+    over = set()                # (day, slot_min) が超過
+    for (day, sl), cnt in coverage.items():
+        req = _req_for(day).get(sl, 0)
+        if req and req > 0 and cnt > req:
+            over.add((day, sl))
+    flagged = 0
+    for r in rows:
+        day, slots = shift_slots[r["id"]]
+        is_over = any((day, sl) in over for sl in slots)
+        new_flag = 1 if is_over else 0
+        new_reason = r["reason"]
+        if is_over:
+            peak = max((coverage.get((day, sl), 0) for sl in slots), default=0)
+            tag = f"必要人数超過（配置{peak}名の時間帯を含む）"
+            if not (new_reason or "").endswith(tag):
+                new_reason = (new_reason + " / " if new_reason else "") + tag
+            flagged += 1
+        if new_flag != (r.get("over_cap_flag") or 0) or new_reason != r["reason"]:
+            execute("UPDATE shifts SET over_cap_flag=?, reason=? WHERE id=? AND shop_id=?",
+                    (new_flag, new_reason, r["id"], shop_id))
+    return flagged
 
 
 def _find_shorten_candidate(o, target_start_iso, target_end_iso, shop_id, exclude_id=None):
@@ -706,6 +789,8 @@ def admin_create_shop():
         if "UNIQUE" in msg.upper():
             abort(400, description=f"ユーザーID '{mgr_code}' は既に存在します（店舗コードと同じ値にするか、別のIDを指定してください）")
         abort(400, description="店舗責任者の作成に失敗しました: " + msg)
+    audit("shop.create", target_type="shop", target_id=shop_id, shop_id=shop_id,
+          detail=body.get("shop_name"))
     return jsonify({"ok": True, "id": shop_id, "shop_id": shop_id,
                     "manager_code": mgr_code, "manager_name": mgr_name})
 
@@ -714,8 +799,11 @@ def admin_create_shop():
 def admin_update_shop(sid):
     require_auth(["admin"])
     body = request.get_json(silent=True) or {}
+    is_active = 1 if body.get("is_active") else 0
     execute("UPDATE shops SET shop_name=?, is_active=? WHERE id=?",
-            (body.get("shop_name"), 1 if body.get("is_active") else 0, sid))
+            (body.get("shop_name"), is_active, sid))
+    audit("shop.update", target_type="shop", target_id=sid, shop_id=sid,
+          detail=f"is_active={is_active}")
     return jsonify({"ok": True})
 
 
@@ -783,8 +871,79 @@ def admin_shop_staff_update_role(sid, staff_id):
         abort(500, description=f"ロール変更が反映されませんでした（DBの制約またはロックの可能性）。")
     # 既存セッションを無効化（role 変更後は再ログインを強制するため安全）
     execute("DELETE FROM sessions WHERE role IN ('shop','staff') AND user_id=?", (staff_id,))
+    audit("staff.role_change", target_type="staff", target_id=staff_id, shop_id=sid,
+          detail=f"{old_role}->{new_role}")
     return jsonify({"ok": True, "staff_id": staff_id, "old_role": old_role, "new_role": new_role,
                     "verified_role": verify["role"], **extra})
+
+
+@app.put("/api/admin/shops/<int:sid>/staffs/<int:staff_id>")
+def admin_shop_staff_update(sid, staff_id):
+    """システム管理者がスタッフ属性を汎用編集する（部分更新可）。
+
+    body: name / role / hourly_wage / min_hours_per_month /
+          max_hours_per_month / is_resigned（いずれも任意）
+    role は既存の専用エンドポイントと違いセッション無効化は行わない
+    （氏名や時給の軽微な編集を想定）。student は月80h上限を強制。
+    """
+    require_auth(["admin"])
+    body = request.get_json(silent=True) or {}
+    staff = query_one("SELECT * FROM staffs WHERE id=? AND shop_id=?", (staff_id, sid))
+    if not staff:
+        abort(404, description="スタッフが見つかりません")
+    fields = {}
+    if body.get("name"):
+        fields["name"] = body["name"]
+    if "role" in body and body.get("role") is not None:
+        if body["role"] not in ("manager", "employee", "part_time", "student"):
+            abort(400, description="role は manager / employee / part_time / student のいずれかを指定してください")
+        fields["role"] = body["role"]
+    if "hourly_wage" in body:
+        fields["hourly_wage"] = int(body["hourly_wage"] or 0)
+    if "min_hours_per_month" in body:
+        fields["min_hours_per_month"] = int(body["min_hours_per_month"] or 0)
+    if "max_hours_per_month" in body:
+        fields["max_hours_per_month"] = int(body["max_hours_per_month"] or 0)
+    if "is_resigned" in body:
+        fields["is_resigned"] = 1 if body["is_resigned"] else 0
+    # student は月80h上限を強制（実効ロールで判定）
+    effective_role = fields.get("role", staff["role"])
+    if effective_role == "student":
+        cur_max = fields.get("max_hours_per_month", staff.get("max_hours_per_month") or 0)
+        if cur_max > 80:
+            fields["max_hours_per_month"] = 80
+    if not fields:
+        return jsonify({"ok": True, "updated": 0})
+    sets = ", ".join(f"{k}=?" for k in fields)
+    execute(f"UPDATE staffs SET {sets} WHERE id=? AND shop_id=?",
+            tuple(fields.values()) + (staff_id, sid))
+    audit("staff.update", target_type="staff", target_id=staff_id, shop_id=sid,
+          detail=",".join(fields.keys()))
+    return jsonify({"ok": True, "updated": len(fields)})
+
+
+@app.get("/api/admin/audit-logs")
+def admin_audit_logs():
+    """監査ログ一覧（新しい順）。shop / action でフィルタ可、既定 limit=100・上限500。"""
+    require_auth(["admin"])
+    shop = request.args.get("shop")
+    action = request.args.get("action")
+    try:
+        limit = min(int(request.args.get("limit", 100)), 500)
+    except (TypeError, ValueError):
+        limit = 100
+    where = []
+    params = []
+    if shop:
+        where.append("shop_id=?")
+        params.append(shop)
+    if action:
+        where.append("action=?")
+        params.append(action)
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    params.append(limit)
+    rows = query_all(f"SELECT * FROM audit_logs {clause} ORDER BY id DESC LIMIT ?", tuple(params))
+    return jsonify({"logs": rows})
 
 
 @app.get("/api/admin/debug/db-schema")
@@ -1148,6 +1307,7 @@ def admin_shop_staff_reset_password(sid, staff_id):
     execute("UPDATE staffs SET password_hash=? WHERE id=?", (hash_password(pw), staff_id))
     # パスワード変更後は既存セッションを無効化
     execute("DELETE FROM sessions WHERE role IN ('shop','staff') AND user_id=?", (staff_id,))
+    audit("staff.password_reset", target_type="staff", target_id=staff_id, shop_id=sid)
     return jsonify({"ok": True})
 
 
@@ -1190,6 +1350,8 @@ def admin_shop_staffs_post(sid):
         "min_hours_per_month, max_hours_per_month) VALUES (?,?,?,?,?,?,?,?)",
         (sid, body["staff_code"], hash_password(pw), body["name"], role,
          body.get("hourly_wage") or 1000, 0, max_hours))
+    audit("staff.create", target_type="staff", target_id=meta["last_row_id"], shop_id=sid,
+          detail=body.get("name"))
     return jsonify({"ok": True, "id": meta["last_row_id"], "role": role,
                     "staff_code": body["staff_code"], "name": body["name"]})
 
@@ -2397,7 +2559,7 @@ def shop_shifts_finalize():
         "AND start_datetime>=? AND start_datetime<=?",
         (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
     if not targets:
-        return jsonify({"ok": True, "finalized": 0, "notified_staff": 0,
+        return jsonify({"ok": True, "finalized": 0, "notified_staff": 0, "over_cap": 0,
                         "message": "確定対象のシフトがありません。AI生成（ドラフト保存）を実行してください。"})
     # 全て confirmed に変換
     finalized_staff = set()
@@ -2413,15 +2575,35 @@ def shop_shifts_finalize():
                 (new_reason, t["id"], shop_id))
         finalized_staff.add(t["staff_id"])
         finalized_count += 1
+    # 必要人数超過の枠に重なる確定シフトへフラグを付与
+    over_cap = _flag_over_cap_shifts(shop_id, start_d + "T00:00:00", end_d + "T23:59:59")
     # スタッフに通知
     for sid in finalized_staff:
         notify(shop_id, sid, "confirmed", "シフトが確定しました", f"{start_d}〜{end_d}のシフトが確定しました。")
     # 店舗にも通知
     notify(shop_id, None, "info", "シフト確定完了",
            f"{start_d}〜{end_d}のシフトを {finalized_count} 件確定し、{len(finalized_staff)} 名に通知しました。")
+    audit("shift.finalize", target_type="shop", target_id=shop_id, shop_id=shop_id,
+          detail=f"{start_d}〜{end_d} finalized={finalized_count} over_cap={over_cap}")
+    msg = f"{finalized_count} 件のシフトを確定し、{len(finalized_staff)} 名のスタッフに通知しました。"
+    if over_cap:
+        msg += f"（うち {over_cap} 件が必要人数超過です）"
     return jsonify({"ok": True, "finalized": finalized_count,
-                    "notified_staff": len(finalized_staff),
-                    "message": f"{finalized_count} 件のシフトを確定し、{len(finalized_staff)} 名のスタッフに通知しました。"})
+                    "notified_staff": len(finalized_staff), "over_cap": over_cap,
+                    "message": msg})
+
+
+@app.patch("/api/shop/shifts/<int:sid>/note")
+def shop_shift_note_patch(sid):
+    """シフトに店長メモを設定/クリアする（店長画面のみ表示）。空文字は NULL 扱い。"""
+    _, shop_id, _ = _shop_ctx()
+    body = request.get_json(silent=True) or {}
+    note = (body.get("note") or "").strip() or None
+    existing = query_one("SELECT id FROM shifts WHERE id=? AND shop_id=?", (sid, shop_id))
+    if not existing:
+        abort(404, description="シフトが見つかりません")
+    execute("UPDATE shifts SET note=? WHERE id=? AND shop_id=?", (note, sid, shop_id))
+    return jsonify({"ok": True, "note": note})
 
 
 # --- シフト コピー ---
@@ -2922,7 +3104,7 @@ def shop_shifts_export():
     rows = query_all("SELECT sh.*, s.name as staff_name, s.role as staff_role, s.staff_code FROM shifts sh JOIN staffs s ON sh.staff_id=s.id WHERE sh.shop_id=? AND sh.start_datetime>=? AND sh.start_datetime<=? ORDER BY sh.start_datetime",
                      (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
     wd = ["日", "月", "火", "水", "木", "金", "土"]
-    lines = ["日付,曜日,開始,終了,休憩(分),実働(分),深夜(分),スタッフコード,氏名,ロール,ステータス"]
+    lines = ["日付,曜日,開始,終了,休憩(分),実働(分),深夜(分),スタッフコード,氏名,ロール,ステータス,超過,メモ"]
     for r in rows:
         d = r["start_datetime"][:10]
         w = wd[(datetime.strptime(d, "%Y-%m-%d").weekday() + 1) % 7]
@@ -2934,6 +3116,8 @@ def shop_shifts_export():
             r.get("staff_code", ""), r.get("staff_name", ""),
             "社員" if r.get("staff_role") == "employee" else "バイト",
             r.get("status", ""),
+            "超過" if (r.get("over_cap_flag") or 0) else "",
+            r.get("note") or "",
         ]
         lines.append(",".join(_csv_safe(c) for c in cells))
     csv = "\ufeff" + "\n".join(lines)
@@ -2961,6 +3145,10 @@ def shop_creq_resolve(crid):
     now = jst_now().strftime("%Y-%m-%d %H:%M:%S")
     if body.get("action") == "reject":
         execute("UPDATE change_requests SET status='rejected', resolved_at=? WHERE id=?", (now, crid))
+        notify(shop_id, cr["staff_id"], "info", "変更申請が却下されました",
+               "ご申請は却下されました。詳細は店舗にご確認ください。")
+        audit("creq.reject", target_type="change_request", target_id=crid, shop_id=shop_id,
+              detail=cr["request_type"])
     else:
         if cr["request_type"] == "cancel" and cr.get("shift_id"):
             execute("DELETE FROM shifts WHERE id=? AND shop_id=?", (cr["shift_id"], shop_id))
@@ -2981,7 +3169,13 @@ def shop_creq_resolve(crid):
             execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason) VALUES (?,?,?,?,?,?,?)",
                     (shop_id, cr["staff_id"], cr["desired_start"], cr["desired_end"], compute_break_minutes(work), "confirmed", "追加申請承認"))
         execute("UPDATE change_requests SET status='approved', resolved_at=? WHERE id=?", (now, crid))
+        # 承認で必要人数超過が生じた場合は該当日の確定シフトへフラグを付与（ブロックしない）
+        day = (cr.get("desired_start") or "")[:10]
+        if day:
+            _flag_over_cap_shifts(shop_id, day + "T00:00:00", day + "T23:59:59")
         notify(shop_id, cr["staff_id"], "info", "変更申請が承認されました", "ご申請の変更を反映しました。")
+        audit("creq.approve", target_type="change_request", target_id=crid, shop_id=shop_id,
+              detail=cr["request_type"])
     return jsonify({"ok": True})
 
 
@@ -3482,6 +3676,18 @@ def ensure_db():
     except Exception as e:
         print(f"[ensure_db] FAIL: shifts.updated_at migration failed: {e}", flush=True)
         raise
+    # over_cap_flag / note（超過確定の可視化・店長メモ）
+    try:
+        shift_columns = {row["name"] for row in query_all("PRAGMA table_info(shifts)")}
+        if "over_cap_flag" not in shift_columns:
+            execute("ALTER TABLE shifts ADD COLUMN over_cap_flag INTEGER DEFAULT 0")
+            print("[ensure_db] OK: shifts.over_cap_flag added", flush=True)
+        if "note" not in shift_columns:
+            execute("ALTER TABLE shifts ADD COLUMN note TEXT")
+            print("[ensure_db] OK: shifts.note added", flush=True)
+    except Exception as e:
+        print(f"[ensure_db] FAIL: shifts over_cap/note migration failed: {e}", flush=True)
+        raise
     # ★ データ正規化（インシデント対策）
     # 過去バージョンで "2026-08-01T7:00:00" のような非ゼロ埋め時刻が
     # shifts / wish_history に保存されていた問題を修復する。
@@ -3490,6 +3696,17 @@ def ensure_db():
         _normalize_datetime_data()
     except Exception as e:
         print(f"[ensure_db] WARN: data normalization failed (skipped): {e}", flush=True)
+    # 監査ログテーブル（作成失敗しても業務は止めない）
+    try:
+        execute(
+            "CREATE TABLE IF NOT EXISTS audit_logs ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, actor_role TEXT, actor_id INTEGER, "
+            "actor_name TEXT, action TEXT NOT NULL, target_type TEXT, target_id INTEGER, "
+            "shop_id INTEGER, detail TEXT, created_at TEXT DEFAULT (datetime('now')))")
+        execute("CREATE INDEX IF NOT EXISTS idx_audit_shop ON audit_logs(shop_id, created_at)")
+        execute("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at)")
+    except Exception as e:
+        print(f"[ensure_db] WARN: audit_logs setup failed (skipped): {e}", flush=True)
 
 
 def _normalize_datetime_data():

@@ -27,6 +27,7 @@ SCHEMA_PATH = os.path.join(_BASE, "schema.sql")
 
 # 外部キー依存関係に従った子→親の削除順序
 _TABLES = [
+    "audit_logs",
     "change_requests",
     "shifts",
     "wish_history",
