@@ -42,6 +42,9 @@ def test_finalize_is_audited(client):
     row = dbmod.query_one("SELECT * FROM audit_logs WHERE action='shift.finalize'")
     assert row is not None
     assert row["actor_role"] == "shop"
+    # created_at は JST（datetime('now') の UTC ではなく jst_now 基準）
+    from utils import jst_now
+    assert (row["created_at"] or "").startswith(jst_now().strftime("%Y-%m-%d"))
 
 
 def test_admin_can_list_and_filter_audit_logs(client):

@@ -94,3 +94,35 @@ def test_finalize_missing_dates_400(client):
     tok = make_session("shop", shop_id, shop_id)
     r = client.post("/api/shop/shifts/finalize", json={}, headers=auth(tok))
     assert r.status_code == 400
+
+
+def test_confirmed_shift_time_edit_is_locked(client):
+    """確定シフトの時間変更は直接編集できず 409 locked を返す。"""
+    shop_id = insert_shop()
+    st = insert_staff(shop_id, "E1", "A", "employee")
+    sid = _confirm(shop_id, st, "09:00", "18:00")
+    tok = make_session("shop", shop_id, shop_id)
+    r = client.put(f"/api/shop/shifts/{sid}", json={
+        "staff_id": st, "start_datetime": f"{DAY}T10:00:00", "end_datetime": f"{DAY}T17:00:00"},
+        headers=auth(tok))
+    assert r.status_code == 409
+    assert r.get_json().get("locked") is True
+    # 時刻・担当を変えない再保存は許可（ロックされない）
+    r2 = client.put(f"/api/shop/shifts/{sid}", json={
+        "staff_id": st, "start_datetime": f"{DAY}T09:00:00", "end_datetime": f"{DAY}T18:00:00"},
+        headers=auth(tok))
+    assert r2.status_code == 200
+
+
+def test_confirmed_shift_edit_bypass_flag(client):
+    """allow_confirmed_edit=True で確定シフトの直接編集を許可（内部エスケープ）。"""
+    shop_id = insert_shop()
+    st = insert_staff(shop_id, "E1", "A", "employee")
+    sid = _confirm(shop_id, st, "09:00", "18:00")
+    tok = make_session("shop", shop_id, shop_id)
+    r = client.put(f"/api/shop/shifts/{sid}", json={
+        "staff_id": st, "start_datetime": f"{DAY}T10:00:00", "end_datetime": f"{DAY}T17:00:00",
+        "allow_confirmed_edit": True}, headers=auth(tok))
+    assert r.status_code == 200
+    row = dbmod.query_one("SELECT start_datetime FROM shifts WHERE id=?", (sid,))
+    assert row["start_datetime"].endswith("T10:00:00")

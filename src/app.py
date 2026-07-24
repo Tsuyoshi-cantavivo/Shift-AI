@@ -137,7 +137,8 @@ def audit(action, target_type=None, target_id=None, shop_id=None, detail=None):
         insert_row("audit_logs", {
             "actor_role": role, "actor_id": actor_id, "actor_name": actor_name,
             "action": action, "target_type": target_type, "target_id": target_id,
-            "shop_id": shop_id, "detail": detail})
+            "shop_id": shop_id, "detail": detail,
+            "created_at": jst_now().strftime("%Y-%m-%d %H:%M:%S")})
     except Exception as e:
         print(f"[audit] WARN: failed to record {action}: {e}", flush=True)
 
@@ -2942,10 +2943,24 @@ def shop_shifts_put(sid):
     shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
     # 既存シフトを取得（staff_id のフォールバック兼、存在確認）
-    existing = query_one("SELECT staff_id, start_datetime, end_datetime FROM shifts WHERE id=? AND shop_id=?", (sid, shop_id))
+    existing = query_one("SELECT staff_id, start_datetime, end_datetime, status FROM shifts WHERE id=? AND shop_id=?", (sid, shop_id))
     if not existing:
         abort(404, description="シフトが見つかりません")
     staff_id = body.get("staff_id") or existing["staff_id"]
+    # 確定シフトのロック：確定済みシフトの時間・担当変更は直接編集できない。
+    # 変更はスタッフの「変更申請」を承認して反映する（時刻・担当が変わらない再保存や
+    # requested/modifying からの確定は許可）。UI もメモ以外を編集不可にしている。
+    if existing["status"] == "confirmed":
+        changed = (
+            normalize_iso(body.get("start_datetime")) != existing["start_datetime"]
+            or normalize_iso(body.get("end_datetime")) != existing["end_datetime"]
+            or int(staff_id) != int(existing["staff_id"])
+        )
+        if changed and not bool(body.get("allow_confirmed_edit")):
+            return jsonify({
+                "error": "確定シフトは直接変更できません。時間変更・取消はスタッフの変更申請を承認して反映してください。",
+                "locked": True,
+            }), 409
     auto_adjust = bool(body.get("auto_adjust"))
     force = bool(body.get("force"))
     # cap判定はforceに関わらず実施（force/auto_adjustで後で許可判定）

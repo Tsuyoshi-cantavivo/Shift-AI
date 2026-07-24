@@ -1240,8 +1240,10 @@ class TestShiftOverlapPrevention:
             "staff_id": e1, "start_datetime": f"{MON}T17:00:00", "end_datetime": f"{MON}T22:00:00"}, headers=h)
         sid2 = r2.get_json()["id"]
         # r2 を 12-20 に変更 → r1(9-13)と重複 → 拒否
+        # 確定シフトはロックされるため allow_confirmed_edit で重複判定まで通す
         r = client.put(f"/api/shop/shifts/{sid2}", json={
-            "staff_id": e1, "start_datetime": f"{MON}T12:00:00", "end_datetime": f"{MON}T20:00:00"}, headers=h)
+            "staff_id": e1, "start_datetime": f"{MON}T12:00:00", "end_datetime": f"{MON}T20:00:00",
+            "allow_confirmed_edit": True}, headers=h)
         assert r.status_code == 400
         assert r.get_json().get("overlap") is True
 
