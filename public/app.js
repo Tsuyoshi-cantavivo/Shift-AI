@@ -424,6 +424,7 @@ const NAV_DEFS = {
   admin: [
     { key: 'adminHome', icon: 'bi-house-door', label: 'ホーム', mobile: true },
     { key: 'adminShops', icon: 'bi-shop', label: '店舗', mobile: true },
+    { key: 'adminAudit', icon: 'bi-clipboard-data', label: '監査ログ', mobile: true },
   ],
 };
 
@@ -1185,9 +1186,14 @@ function openDayTimeline(date, allShifts, editable, onChange) {
       const contCls = continued ? ' tl-bar-continued' : '';
       const isDraft = isAiDraftShift(s);
       const draftCls = isDraft ? ' tl-bar-draft' : '';
+      const overCap = !!s.over_cap_flag;
+      const overCapCls = overCap ? ' tl-bar-overcap' : '';
+      const overCapMark = overCap ? '<span class="tl-bar-overcap-mark" aria-hidden="true">⚠️</span>' : '';
+      const noteTitle = s.note ? `\nメモ: ${s.note}` : '';
+      const overCapTitle = overCap ? '\n⚠必要人数超過の時間帯を含みます' : '';
       const dragAttrs = editable && isDraft ? ' data-draft-editable="true"' : '';
       const handles = editable && isDraft ? '<span class="tl-drag-handle tl-drag-handle-start" aria-hidden="true"></span><span class="tl-drag-handle tl-drag-handle-end" aria-hidden="true"></span>' : '';
-      return `<div class="tl-bar ${slotClass(s.start_datetime)}${contCls}${draftCls}" data-id="${s.id}"${dragAttrs} title="${continued ? '前日から継続: ' : ''}${hm(s.start_datetime)}-${hm(s.end_datetime)}${isDraft ? '（ドラフト・直接調整可）' : ''}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${handles}<span class="tl-bar-label">${lbl}</span></div>`;
+      return `<div class="tl-bar ${slotClass(s.start_datetime)}${contCls}${draftCls}${overCapCls}" data-id="${s.id}"${dragAttrs} title="${continued ? '前日から継続: ' : ''}${hm(s.start_datetime)}-${hm(s.end_datetime)}${isDraft ? '（ドラフト・直接調整可）' : ''}${overCapTitle}${noteTitle}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${handles}${overCapMark}<span class="tl-bar-label">${lbl}</span></div>`;
     }).join('');
     return `<div class="tl-row" data-staff-id="${sid}" data-staff-name="${esc(st.name)}"><div class="tl-name">${esc(st.name)}</div><div class="tl-track" data-staff-id="${sid}" title="${editable ? '空き部分をクリックで追加' : ''}">${bars}</div></div>`;
   }).join('');
@@ -1411,13 +1417,18 @@ function openDayTimeline(date, allShifts, editable, onChange) {
 function showEditModal(s) {
   if (!s) { toast('シフト情報が取得できません', 'error'); return; }
   const toLocal = (iso) => (iso || '').slice(0, 16);
+  const overCapBanner = s.over_cap_flag
+    ? `<div class="alert alert-warning py-2 mb-2 small"><i class="bi bi-exclamation-triangle-fill"></i> このシフトは必要人数を超過している時間帯を含みます。</div>`
+    : '';
   const w = openModal(`<i class="bi bi-pencil-square"></i> シフト編集${s.staff_name ? ' — ' + esc(s.staff_name) : ''}`,
-    `<label class="form-label" for="mStart">開始</label><input type="datetime-local"  id="mStart" class="form-control mb-2" value="${toLocal(s.start_datetime)}">
+    `${overCapBanner}<label class="form-label" for="mStart">開始</label><input type="datetime-local"  id="mStart" class="form-control mb-2" value="${toLocal(s.start_datetime)}">
      <label class="form-label" for="mEnd">終了</label><input type="datetime-local"  id="mEnd" class="form-control mb-3" value="${toLocal(s.end_datetime)}">
      <label class="form-label" for="mStatus">ステータス</label><select id="mStatus" class="form-select mb-3">
        <option value="confirmed" ${s.status === 'confirmed' ? 'selected' : ''}>確定</option>
        <option value="modifying" ${s.status === 'modifying' ? 'selected' : ''}>調整中</option>
        <option value="requested" ${s.status === 'requested' ? 'selected' : ''}>調整待ち</option></select>
+     <label class="form-label" for="mNote">店長メモ<span class="small text-secondary">（この画面のみ表示）</span></label>
+     <textarea id="mNote" class="form-control mb-3" rows="2" placeholder="例: 新人研修のため増員">${esc(s.note || '')}</textarea>
      <button id="mDelete" class="btn btn-outline-danger w-full"><i class="bi bi-trash"></i> 削除</button>`,
     async (w2, close) => {
       const payload = {
@@ -1431,6 +1442,11 @@ function showEditModal(s) {
       };
       try {
         const r = await api(`/shop/shifts/${s.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+        // 店長メモを保存（変更があった場合のみ）
+        const noteVal = w2.querySelector('#mNote').value;
+        if ((noteVal || '') !== (s.note || '')) {
+          try { await api(`/shop/shifts/${s.id}/note`, { method: 'PATCH', body: JSON.stringify({ note: noteVal }) }); } catch (_) { /* メモ保存失敗は主保存を妨げない */ }
+        }
         close();
         if (r.adjustments && r.adjustments.length) {
           toast(`保存しました（${r.adjustments.length}件自動調整）`, 'success');
@@ -1604,12 +1620,22 @@ SCREENS.dashboard = async function (el) {
       card(sectionTitle('bi-lightning', 'クイック操作') +
         `<button class="btn btn-ai w-full mb-2" id="qGen"><i class="bi bi-stars"></i> AIでシフト作成</button>
          <button class="btn btn-light w-full mb-2" id="qShifts"><i class="bi bi-calendar3"></i> シフト画面へ</button>
-         <button class="btn btn-light w-full" id="qCreq"><i class="bi bi-clipboard-check"></i> 変更申請を確認</button>`) +
+         <button class="btn btn-light w-full" id="qCreq"><i class="bi bi-clipboard-check"></i> 変更申請を確認 <span id="qCreqBadge"></span></button>`) +
       card(sectionTitle('bi-bell', '最近の通知') + `<div id="dashNotif"><div class="text-secondary small">読み込み中...</div></div>`);
 
     document.getElementById('qGen')?.addEventListener('click', () => navigateTo('aiGenerate'));
     document.getElementById('qShifts')?.addEventListener('click', () => navigateTo('shifts'));
     document.getElementById('qCreq')?.addEventListener('click', () => openChangeRequests());
+
+    // 変更申請の保留件数バッジ
+    try {
+      const cr = await api('/shop/change-requests');
+      if (isAlive(tok) && el.isConnected) {
+        const pending = (cr.change_requests || []).filter((x) => x.status === 'pending').length;
+        const badgeEl = document.getElementById('qCreqBadge');
+        if (badgeEl && pending > 0) badgeEl.innerHTML = badge(`${pending}件保留`, 'warning');
+      }
+    } catch {}
 
     // Notifications
     try {
@@ -1947,7 +1973,8 @@ SCREENS.shifts = function (el) {
     try {
       const r = await api('/shop/shifts/finalize', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end }) });
       setLoading(false);
-      toast(r.message || `${r.finalized}件を確定しました`, 'success');
+      const extra = r.over_cap ? `（必要人数超過 ${r.over_cap} 件。⚠️のシフトを確認してください）` : '';
+      toast((r.message || `${r.finalized}件を確定しました`) + extra, r.over_cap ? 'warning' : 'success');
       loadSummary();
       refreshShortage();
     } catch (e) { setLoading(false); toast(e.message, 'error'); }
@@ -3666,17 +3693,31 @@ SCREENS.adminShopDetail = async function (el) {
       if (!isAlive(tok) || !body.isConnected) return;  // 画面遷移済み
       const tbl = sum.staff.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>氏名</th><th>日</th><th class="t-num">確定</th><th class="t-num">給与</th></tr></thead><tbody>${sum.staff.map((s) => `<tr><td>${esc(s.name)}</td><td>${s.days}</td><td class="t-num num">${s.confirmed_hours}h</td><td class="t-num num">${yen(s.pay)}</td></tr>`).join('')}<tr style="font-weight:800;color:var(--indigo-l)"><td>合計</td><td></td><td class="t-num num">${sum.total_hours}h</td><td class="t-num num">${yen(sum.total_pay)}</td></tr></tbody></table></div>` : '<div class="small text-secondary">確定シフトなし</div>';
       const slist = (st.staffs || []).map((s) => `
-        <div class="list-row">
+        <div class="list-row" data-staff-row data-search="${esc((s.name || '') + ' ' + (s.staff_code || '') + ' ' + roleLabel(s.role))}">
           <div class="staff-cell">
             <span class="staff-name">${esc(s.name)}</span>
             <span class="staff-sub">${esc(s.staff_code)} ・ ${roleLabel(s.role)}${s.is_resigned ? ' ・ 退職' : ''}</span>
           </div>
           <div class="flex gap-1">
+            <button class="btn btn-sm btn-light" data-staff-edit='${esc(JSON.stringify(s))}' title="編集"><i class="bi bi-pencil"></i></button>
             <button class="btn btn-sm btn-light" data-role-edit="${s.id}" data-name="${esc(s.name)}" data-role="${s.role}" title="ロール変更"><i class="bi bi-shield-lock"></i></button>
             <button class="btn btn-sm btn-light" data-pw-reset="${s.id}" data-name="${esc(s.name)}" title="パスワードリセット"><i class="bi bi-key"></i></button>
           </div>
         </div>`).join('');
-      body.innerHTML = sectionTitle('bi-people', `スタッフ（${st.staffs.length}名）`) + slist + `<hr style="border-color:var(--line);margin:16px 0">` + sectionTitle('bi-bar-chart', `集計（${start}〜${end}）`) + tbl;
+      const searchBox = `<input type="search" id="staffSearch" class="form-control mb-2" placeholder="氏名・コード・ロールで絞り込み">`;
+      body.innerHTML = sectionTitle('bi-people', `スタッフ（${st.staffs.length}名）`) + searchBox + `<div id="staffListBox">${slist}</div>` + `<hr style="border-color:var(--line);margin:16px 0">` + sectionTitle('bi-bar-chart', `集計（${start}〜${end}）`) + tbl;
+      // スタッフ検索（フロント側フィルタ）
+      document.getElementById('staffSearch')?.addEventListener('input', (ev) => {
+        const q = ev.target.value.trim().toLowerCase();
+        body.querySelectorAll('[data-staff-row]').forEach((row) => {
+          row.style.display = (!q || (row.dataset.search || '').toLowerCase().includes(q)) ? '' : 'none';
+        });
+      });
+      // 汎用編集ボタン
+      body.querySelectorAll('[data-staff-edit]').forEach((b) => b?.addEventListener('click', () => {
+        let s2; try { s2 = JSON.parse(b.dataset.staffEdit); } catch { return; }
+        openAdminStaffEditModal(sid, s2, loadDetail);
+      }));
       // ロール変更ボタン
       body.querySelectorAll('[data-role-edit]').forEach((b) => b?.addEventListener('click', () => {
         openAdminRoleModal(sid, +b.dataset.roleEdit, b.dataset.name, b.dataset.role, loadDetail);
@@ -3691,6 +3732,106 @@ SCREENS.adminShopDetail = async function (el) {
     }
   }
 };
+
+const AUDIT_ACTION_LABELS = {
+  'shift.finalize': 'シフト確定',
+  'creq.approve': '変更申請 承認',
+  'creq.reject': '変更申請 却下',
+  'staff.role_change': 'ロール変更',
+  'staff.password_reset': 'パスワードリセット',
+  'staff.update': 'スタッフ編集',
+  'staff.create': 'スタッフ作成',
+  'shop.create': '店舗作成',
+  'shop.update': '店舗更新',
+};
+function auditActionLabel(a) { return AUDIT_ACTION_LABELS[a] || a || '—'; }
+
+SCREENS.adminAudit = async function (el) {
+  el.innerHTML = pageHead('監査ログ', 'bi-clipboard-data', '重要操作の履歴') +
+    card(sectionTitle('bi-funnel', 'フィルタ') +
+      `<div class="row mb-2">
+         <div class="col-6"><label class="form-label" for="auShop">店舗</label><select id="auShop" class="form-select"><option value="">すべて</option></select></div>
+         <div class="col-6"><label class="form-label" for="auAction">操作</label><select id="auAction" class="form-select">
+           <option value="">すべて</option>${Object.keys(AUDIT_ACTION_LABELS).map((k) => `<option value="${k}">${esc(AUDIT_ACTION_LABELS[k])}</option>`).join('')}
+         </select></div>
+       </div>
+       <button class="btn btn-primary btn-sm" id="auLoad"><i class="bi bi-search"></i> 表示</button>`) +
+    card(`<div id="auBody"><div class="text-secondary small">「表示」を押してください</div></div>`);
+  // 店舗フィルタの選択肢
+  try {
+    const d = await api('/admin/shops');
+    const sel = document.getElementById('auShop');
+    if (sel) sel.innerHTML = '<option value="">すべて</option>' + (d.shops || []).map((s) => `<option value="${s.id}">${esc(s.shop_name)}</option>`).join('');
+  } catch {}
+  async function load() {
+    const body = document.getElementById('auBody');
+    if (!body) return;
+    const tok = navToken();
+    body.innerHTML = '<div class="text-secondary small">読み込み中...</div>';
+    const shop = document.getElementById('auShop').value;
+    const action = document.getElementById('auAction').value;
+    const qs = new URLSearchParams();
+    if (shop) qs.set('shop', shop);
+    if (action) qs.set('action', action);
+    qs.set('limit', '200');
+    try {
+      const r = await api('/admin/audit-logs?' + qs.toString());
+      if (!isAlive(tok) || !body.isConnected) return;
+      const logs = r.logs || [];
+      if (!logs.length) { body.innerHTML = '<div class="small text-secondary">該当するログはありません</div>'; return; }
+      body.innerHTML = `<div class="table-wrap"><table class="data-table"><thead><tr><th>日時</th><th>操作者</th><th>操作</th><th>対象</th><th>詳細</th></tr></thead><tbody>${logs.map((l) => `
+        <tr>
+          <td class="small">${esc((l.created_at || '').replace('T', ' '))}</td>
+          <td class="small">${esc(l.actor_name || l.actor_role || '—')}</td>
+          <td>${badge(auditActionLabel(l.action), l.action && l.action.indexOf('reject') >= 0 ? 'warning' : 'info')}</td>
+          <td class="small">${esc(l.target_type || '')}${l.target_id != null ? ' #' + l.target_id : ''}</td>
+          <td class="small text-secondary">${esc(l.detail || '')}</td>
+        </tr>`).join('')}</tbody></table></div>`;
+    } catch (e) {
+      if (!isAlive(tok) || !body.isConnected) return;
+      body.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
+    }
+  }
+  document.getElementById('auLoad')?.addEventListener('click', load);
+  load();
+};
+
+function openAdminStaffEditModal(shopId, s, onDone) {
+  const roles = [
+    { v: 'manager', label: '店舗管理者（manager）' },
+    { v: 'employee', label: '社員（employee）' },
+    { v: 'part_time', label: 'アルバイト（part_time）' },
+    { v: 'student', label: '学生アルバイト（student）' },
+  ];
+  openModal(`<i class="bi bi-pencil"></i> スタッフ編集 — ${esc(s.name)}`,
+    `<label class="form-label" for="aeName">氏名</label>
+     <input id="aeName" class="form-control mb-2" value="${esc(s.name || '')}">
+     <label class="form-label" for="aeRole">ロール</label>
+     <select id="aeRole" class="form-select mb-2">${roles.map((o) => `<option value="${o.v}" ${o.v === s.role ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>
+     <label class="form-label" for="aeWage">時給</label>
+     <input id="aeWage" type="number" class="form-control mb-2" value="${s.hourly_wage != null ? s.hourly_wage : ''}">
+     <div class="flex items-center gap-2 mb-1"><input id="aeResigned" type="checkbox" ${s.is_resigned ? 'checked' : ''}><label for="aeResigned" class="form-label mb-0">退職として扱う</label></div>
+     <div class="small text-secondary mb-2"><i class="bi bi-info-circle"></i> 学生アルバイトは月80h上限が自動適用されます。ロール変更でセッションは無効化されません（軽微編集用）。</div>
+     <div class="form-error mt-1" id="aeErr"></div>`,
+    async (w, close) => {
+      const errBox = w.querySelector('#aeErr');
+      const showErr = (m) => { if (errBox) errBox.innerHTML = m ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(m)}` : ''; };
+      showErr('');
+      const payload = {
+        name: w.querySelector('#aeName').value.trim(),
+        role: w.querySelector('#aeRole').value,
+        hourly_wage: +w.querySelector('#aeWage').value || 0,
+        is_resigned: w.querySelector('#aeResigned').checked ? 1 : 0,
+      };
+      if (!payload.name) { showErr('氏名を入力してください'); return; }
+      try {
+        await api(`/admin/shops/${shopId}/staffs/${s.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+        close();
+        toast(`${payload.name} さんの情報を更新しました`, 'success');
+        onDone?.();
+      } catch (e) { showErr(e.message || '更新に失敗しました'); }
+    });
+}
 
 function openAdminRoleModal(shopId, staffId, staffName, currentRole, onDone) {
   const opts = [

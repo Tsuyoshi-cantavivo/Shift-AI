@@ -396,7 +396,7 @@ def _flag_over_cap_shifts(shop_id, start_iso, end_iso):
         return 0
     weekday_overrides = shift_engine.load_weekday_overrides(shop_id)
     rows = query_all(
-        "SELECT id, start_datetime, end_datetime, reason, over_cap_flag FROM shifts "
+        "SELECT id, start_datetime, end_datetime, over_cap_flag FROM shifts "
         "WHERE shop_id=? AND status='confirmed' AND start_datetime>=? AND start_datetime<=?",
         (shop_id, start_iso, end_iso))
     if not rows:
@@ -429,21 +429,18 @@ def _flag_over_cap_shifts(shop_id, start_iso, end_iso):
         req = _req_for(day).get(sl, 0)
         if req and req > 0 and cnt > req:
             over.add((day, sl))
+    # 注意: reason はスタッフ側 API も返すため書き換えない（超過情報は over_cap_flag のみで表現）。
+    # 店長 UI は over_cap_flag から警告表示を導出する。
     flagged = 0
     for r in rows:
         day, slots = shift_slots[r["id"]]
         is_over = any((day, sl) in over for sl in slots)
         new_flag = 1 if is_over else 0
-        new_reason = r["reason"]
         if is_over:
-            peak = max((coverage.get((day, sl), 0) for sl in slots), default=0)
-            tag = f"必要人数超過（配置{peak}名の時間帯を含む）"
-            if not (new_reason or "").endswith(tag):
-                new_reason = (new_reason + " / " if new_reason else "") + tag
             flagged += 1
-        if new_flag != (r.get("over_cap_flag") or 0) or new_reason != r["reason"]:
-            execute("UPDATE shifts SET over_cap_flag=?, reason=? WHERE id=? AND shop_id=?",
-                    (new_flag, new_reason, r["id"], shop_id))
+        if new_flag != (r.get("over_cap_flag") or 0):
+            execute("UPDATE shifts SET over_cap_flag=? WHERE id=? AND shop_id=?",
+                    (new_flag, r["id"], shop_id))
     return flagged
 
 

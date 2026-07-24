@@ -42,10 +42,10 @@ def test_finalize_flags_over_cap_shifts(client):
     flags = [row["over_cap_flag"] for row in dbmod.query_all(
         "SELECT over_cap_flag FROM shifts WHERE shop_id=? AND status='confirmed'", (shop_id,))]
     assert flags == [1, 1]
-    # 自動理由が付く
+    # reason はスタッフ側にも返るため超過テキストは書き込まない（over_cap_flag のみ）
     reasons = [row["reason"] for row in dbmod.query_all(
         "SELECT reason FROM shifts WHERE shop_id=? AND status='confirmed'", (shop_id,))]
-    assert all("必要人数超過" in (rs or "") for rs in reasons)
+    assert all("必要人数超過" not in (rs or "") for rs in reasons)
 
 
 def test_finalize_no_over_cap(client):
@@ -61,6 +61,30 @@ def test_finalize_no_over_cap(client):
     row = dbmod.query_one(
         "SELECT over_cap_flag FROM shifts WHERE shop_id=? AND status='confirmed'", (shop_id,))
     assert (row["over_cap_flag"] or 0) == 0
+
+
+def test_staff_api_does_not_expose_flag_or_note(client):
+    """スタッフ向け API は over_cap_flag / note を返さない（店長のみ）。"""
+    shop_id = insert_shop(settings=SETTINGS)
+    insert_pattern(shop_id, "通", "09:00", "18:00", 1)
+    a = insert_staff(shop_id, "E1", "社員1", "employee", 2000)
+    b = insert_staff(shop_id, "E2", "社員2", "employee", 2000)
+    _draft(shop_id, a, "09:00", "18:00")
+    _draft(shop_id, b, "09:00", "18:00")
+    shop_tok = make_session("shop", shop_id, shop_id)
+    client.post("/api/shop/shifts/finalize",
+                json={"start_date": DAY, "end_date": DAY}, headers=auth(shop_tok))
+    sid = dbmod.query_one("SELECT id FROM shifts WHERE shop_id=? LIMIT 1", (shop_id,))["id"]
+    client.patch(f"/api/shop/shifts/{sid}/note", json={"note": "内部メモ"}, headers=auth(shop_tok))
+    staff_tok = make_session("staff", a, shop_id)
+    r = client.get(f"/api/staff/shifts?start={DAY}&end={DAY}", headers=auth(staff_tok))
+    assert r.status_code == 200
+    shifts = r.get_json()["shifts"]
+    assert shifts, "スタッフに確定シフトが見えるべき"
+    for s in shifts:
+        assert "over_cap_flag" not in s
+        assert "note" not in s
+        assert "必要人数超過" not in (s.get("reason") or "")
 
 
 def test_export_includes_flag_and_note(client):
