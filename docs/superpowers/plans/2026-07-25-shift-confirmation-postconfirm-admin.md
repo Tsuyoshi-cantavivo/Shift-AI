@@ -130,7 +130,7 @@ Expected: FAIL（`over_cap` キーが無い / フラグが立たない）。
 
 - [ ] **Step 2: ヘルパーを実装**
 
-`src/app.py`、`_count_over_cap_slots`（末尾 `return over_count`）の直後に追加:
+`src/app.py`、`_count_over_cap_slots`（末尾 `return over_count`）の直後に追加。**スロットは `shift_engine._shift_slots(start_iso, end_iso, GRAN)` が返す「分単位int」のリスト**で、`req_map` も分単位intキー（`_check_slot_cap` と同一モデル）。スロット分は日をまたいで繰り返すため、カバレッジ・超過は必ず `(day, slot_min)` で管理する:
 
 ```python
 def _flag_over_cap_shifts(shop_id, start_iso, end_iso):
@@ -145,42 +145,42 @@ def _flag_over_cap_shifts(shop_id, start_iso, end_iso):
         "SELECT id, start_datetime, end_datetime, reason, over_cap_flag FROM shifts "
         "WHERE shop_id=? AND status='confirmed' AND start_datetime>=? AND start_datetime<=?",
         (shop_id, start_iso, end_iso))
-    # スロット別カバレッジを構築
-    coverage = {}
-    shift_slots = {}
-    for r in rows:
-        slots = _iter_slots(r["start_datetime"], r["end_datetime"])
-        shift_slots[r["id"]] = slots
-        for sl in slots:
-            coverage[sl] = coverage.get(sl, 0) + 1
-    # 各シフトの日/曜日ごとの要件を求め、超過スロット集合を作る
-    over_slots = set()
-    # スロット→必要人数 は日付ごとに算出（_day_requirements を日単位で）
-    day_req_cache = {}
+    if not rows:
+        return 0
+    shift_slots = {}            # shift_id -> (day, [slot_min,...])
+    coverage = {}               # (day, slot_min) -> count
     for r in rows:
         day = r["start_datetime"][:10]
-        if day not in day_req_cache:
+        slots = shift_engine._shift_slots(r["start_datetime"], r["end_datetime"], shift_engine.GRAN)
+        shift_slots[r["id"]] = (day, slots)
+        for sl in slots:
+            coverage[(day, sl)] = coverage.get((day, sl), 0) + 1
+    req_cache = {}
+    def _req_for(day):
+        if day not in req_cache:
             wd = (datetime.strptime(day, "%Y-%m-%d").weekday() + 1) % 7
             applied = []
-            for p in pats:
-                pp = dict(p)
-                ov = weekday_overrides.get((p.get("id"), wd))
+            for pat in pats:
+                ov = weekday_overrides.get((pat.get("id"), wd))
+                p = dict(pat)
                 if ov is not None:
-                    pp["required_staff"] = ov
-                applied.append(pp)
-            day_req_cache[day] = shift_engine._day_requirements(applied, shift_engine.GRAN, wd, weekday_overrides)
-        req_map = day_req_cache[day]
-        for sl in shift_slots[r["id"]]:
-            req = req_map.get(sl[11:16] if len(sl) > 11 else sl, 0)
-            if req and req > 0 and coverage.get(sl, 0) > req:
-                over_slots.add(sl)
+                    p["required_staff"] = ov
+                applied.append(p)
+            req_cache[day] = shift_engine._day_requirements(applied, shift_engine.GRAN, wd, weekday_overrides)
+        return req_cache[day]
+    over = set()                # (day, slot_min) が超過
+    for (day, sl), cnt in coverage.items():
+        req = _req_for(day).get(sl, 0)
+        if req and req > 0 and cnt > req:
+            over.add((day, sl))
     flagged = 0
     for r in rows:
-        is_over = any(sl in over_slots for sl in shift_slots[r["id"]])
+        day, slots = shift_slots[r["id"]]
+        is_over = any((day, sl) in over for sl in slots)
         new_flag = 1 if is_over else 0
         new_reason = r["reason"]
         if is_over:
-            peak = max((coverage.get(sl, 0) for sl in shift_slots[r["id"]]), default=0)
+            peak = max((coverage.get((day, sl), 0) for sl in slots), default=0)
             tag = f"必要人数超過（配置{peak}名の時間帯を含む）"
             if not (new_reason or "").endswith(tag):
                 new_reason = (new_reason + " / " if new_reason else "") + tag
@@ -191,7 +191,7 @@ def _flag_over_cap_shifts(shop_id, start_iso, end_iso):
     return flagged
 ```
 
-**注意:** `_iter_slots` と要件マップのキー形式（スロットのキーが `"HH:MM"` か ISO か）は `_count_over_cap_slots` / `_check_slot_cap` の既存実装に厳密に合わせること。既存の `_iter_slots(start_iso, end_iso)` の返り値形式を実装前に確認し、`req_map` の参照キーを一致させる（上のコードはスロットが ISO 文字列を返す想定でフォールバック）。実装者は `_count_over_cap_slots` 内の `req_map.get(...)` の呼び方をそのまま踏襲すること。
+**テストの規約（重要）:** 本リポジトリのテストは `client` フィクスチャ＋ `tests/helpers.py`（`insert_shop`/`insert_staff`/`insert_pattern`/`insert_request`/`make_session`/`auth`）を使い、`Authorization: Bearer` ヘッダで認証する（`shop_client`/`admin_client` のようなフィクスチャは存在しない）。各テストは `make_session("shop", staff_or_shop_id, shop_id)` などでトークンを作り、`client.post(url, json=..., headers=auth(token))` を呼ぶ。以降のタスクのテスト擬似コードもこの規約に読み替えること。
 
 - [ ] **Step 3: finalize にフラグ付与を組み込む**
 
