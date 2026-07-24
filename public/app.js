@@ -1420,6 +1420,27 @@ function showEditModal(s) {
   const overCapBanner = s.over_cap_flag
     ? `<div class="alert alert-warning py-2 mb-2 small"><i class="bi bi-exclamation-triangle-fill"></i> このシフトは必要人数を超過している時間帯を含みます。</div>`
     : '';
+  // 確定シフトはロック：時間・取消は「スタッフの変更申請を承認」で反映する方針。
+  // ここではメモのみ編集可能にし、時間は読み取り専用で表示する。
+  if (s.status === 'confirmed') {
+    const wl = openModal(`<i class="bi bi-lock"></i> 確定シフト${s.staff_name ? ' — ' + esc(s.staff_name) : ''}`,
+      `${overCapBanner}
+       <div class="small text-secondary mb-2">${esc(hm(s.start_datetime))} 〜 ${esc(hm(s.end_datetime))}（確定）</div>
+       <div class="alert alert-info py-2 mb-3 small"><i class="bi bi-info-circle"></i> 確定シフトの時間変更・取消は、スタッフからの<strong>変更申請を承認</strong>して反映します（直接編集はできません）。</div>
+       <label class="form-label" for="mNote">店長メモ<span class="small text-secondary">（この画面のみ表示）</span></label>
+       <textarea id="mNote" class="form-control mb-1" rows="2" placeholder="例: 新人研修のため増員">${esc(s.note || '')}</textarea>`,
+      async (w2, close) => {
+        const noteVal = w2.querySelector('#mNote').value;
+        try {
+          await api(`/shop/shifts/${s.id}/note`, { method: 'PATCH', body: JSON.stringify({ note: noteVal }) });
+          close();
+          toast('メモを保存しました', 'success');
+          navigateTo('shifts');
+        } catch (e) { toast(e.message, 'error'); }
+      });
+    if (wl) { const btn = wl.querySelector('[data-save]'); if (btn) btn.textContent = 'メモを保存'; }
+    return wl;
+  }
   const w = openModal(`<i class="bi bi-pencil-square"></i> シフト編集${s.staff_name ? ' — ' + esc(s.staff_name) : ''}`,
     `${overCapBanner}<label class="form-label" for="mStart">開始</label><input type="datetime-local"  id="mStart" class="form-control mb-2" value="${toLocal(s.start_datetime)}">
      <label class="form-label" for="mEnd">終了</label><input type="datetime-local"  id="mEnd" class="form-control mb-3" value="${toLocal(s.end_datetime)}">
