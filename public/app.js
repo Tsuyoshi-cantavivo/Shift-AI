@@ -122,16 +122,6 @@ function roleClass(role) {
   }
 }
 
-/** ロールの日本語表示名。バッジに出して色だけに依存しないようにする。 */
-function roleLabel(role) {
-  switch (role) {
-    case 'manager':   return '店長';
-    case 'employee':  return '社員';
-    case 'part_time': return 'パート';
-    case 'student':   return '学生';
-    default:          return '';
-  }
-}
 function yen(n) { return '¥' + (n || 0).toLocaleString(); }
 function buzz(ms = 8) { try { navigator.vibrate?.(ms); } catch (e) {} }
 
