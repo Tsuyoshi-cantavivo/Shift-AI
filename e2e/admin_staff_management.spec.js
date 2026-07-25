@@ -126,10 +126,11 @@ test.describe('管理者によるスタッフ管理', () => {
     await page.waitForSelector('#admRoleSel');
     await page.selectOption('#admRoleSel', 'part_time');
     await page.click('button[data-save]');
-    await Promise.race([
-      page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 8000 }),
-      page.waitForSelector('.toast', { timeout: 8000 }),
-    ]);
+    // 直前の「スタッフ追加」操作のトーストがまだ画面に残っている場合があるため、
+    // ここでは .toast を待機条件に含めない（残存トーストで早期に解決してしまい、
+    // 一覧の再描画を待たずにアサーションへ進んでしまうのを防ぐ）。
+    // close() は API 応答後に同期的に呼ばれるため、modal-overlay の detached を待てば十分。
+    await page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 8000 });
     // スタッフ一覧が再描画されて「アルバイト」になっていることを確認
     await page.waitForSelector('.list-row:has-text("ロール変更テスト")');
     const row1 = await page.locator('.list-row', { hasText: 'ロール変更テスト' }).textContent();
@@ -140,10 +141,8 @@ test.describe('管理者によるスタッフ管理', () => {
     await page.waitForSelector('#admRoleSel');
     await page.selectOption('#admRoleSel', 'manager');
     await page.click('button[data-save]');
-    await Promise.race([
-      page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 8000 }),
-      page.waitForSelector('.toast', { timeout: 8000 }),
-    ]);
+    // 同上：直前のロール変更のトーストが残っている場合があるため .toast は待たない
+    await page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 8000 });
     await page.waitForSelector('.list-row:has-text("ロール変更テスト")');
     const row2 = await page.locator('.list-row', { hasText: 'ロール変更テスト' }).textContent();
     expect(row2).toContain('店舗管理者');

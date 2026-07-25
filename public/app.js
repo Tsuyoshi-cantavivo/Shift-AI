@@ -194,7 +194,7 @@ function toast(msg, type = 'info') {
   const wrap = document.getElementById('toastWrap');
   if (!wrap) return;
   const el = document.createElement('div');
-  el.className = `toast ${type}`;
+  el.className = `toast show ${type}`;
   const icon = type === 'success' ? 'bi-check-circle-fill' : type === 'error' ? 'bi-x-circle-fill' : 'bi-info-circle-fill';
   el.innerHTML = `<i class="bi ${icon}"></i> ${esc(msg)}`;
   wrap.appendChild(el);
@@ -2833,7 +2833,7 @@ SCREENS.analytics = async function (el) {
     // AI advice
     let advice = '分析中...';
     try { const rev = await api('/shop/ai/review', { method: 'POST', body: JSON.stringify({ start, end }) }); advice = rev.advice; } catch {}
-    document.getElementById('anaRight').innerHTML += card(sectionTitle('bi-stars', 'AI改善提案', badge('AI', 'ai')) + `<div style="font-size:.88rem;line-height:1.7;white-space:pre-wrap">${esc(advice)}</div>`);
+    document.getElementById('anaRight').insertAdjacentHTML('beforeend', card(sectionTitle('bi-stars', 'AI改善提案', badge('AI', 'ai')) + `<div style="font-size:.88rem;line-height:1.7;white-space:pre-wrap">${esc(advice)}</div>`));
   } catch (e) { el.innerHTML += card(`<div class="text-danger">${esc(e.message)}</div>`); }
 };
 
