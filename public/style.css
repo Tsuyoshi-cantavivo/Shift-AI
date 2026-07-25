@@ -1043,8 +1043,8 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .wish-cell.empty { background: transparent; border: none; }
 .wish-cell.disabled { opacity: .35; cursor: not-allowed; }
 .wish-cell .wd { font-size: .66rem; font-weight: 700; }
-.wish-cell .wmark { font-size: .56rem; font-weight: 700; padding: 2px 3px; border-radius: 5px; text-align: center; color: #fff; margin-top: auto; }
-.wmark.any{background:var(--info);} .wmark.morning{background:var(--warning);} .wmark.evening{background:var(--info);} .wmark.rest{background:var(--ink-3);} .wmark.time{background:var(--success);}
+.wish-cell .wmark { font-size: .56rem; font-weight: 700; padding: 2px 3px; border-radius: 5px; text-align: center; color: var(--paper); margin-top: auto; }
+.wmark.any{background:var(--info);} .wmark.morning{background:var(--warning); color: color-mix(in srgb, var(--warning) 25%, black);} .wmark.evening{background:var(--info);} .wmark.rest{background:var(--ink-2);} .wmark.time{background:var(--success);}
 
 /* ---------- 27. Preview grid ---------- */
 .preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
