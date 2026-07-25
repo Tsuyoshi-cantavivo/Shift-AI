@@ -280,59 +280,42 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
 
 /* ---------- 5. Login ---------- */
 .login-wrap {
-  min-height: 100vh; display: flex; align-items: center; justify-content: center;
-  padding: 20px; position: relative; overflow: hidden;
-  background:
-    radial-gradient(circle at 80% 0%, rgba(99,102,241,.18), transparent 50%),
-    radial-gradient(circle at 10% 100%, rgba(16,185,129,.1), transparent 45%),
-    var(--navy);
+  min-height: 100dvh;
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px 16px;
+  background: var(--paper);
+  position: relative; overflow: hidden;
 }
+/* 背景に配置帯の1時間グリッドを敷く。製品の署名を最初の画面で一度だけ見せる */
 .login-bg-noise {
-  position: absolute; inset: 0; opacity: .4; pointer-events: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='.9' /%3E%3C/filter%3E%3Crect width='100' height='100' filter='url(%23n)' opacity='.03'/%3E%3C/svg%3E");
+  position: absolute; inset: 0; opacity: .55; pointer-events: none;
+  background-image: linear-gradient(90deg, var(--grid-1h) 1px, transparent 1px);
+  background-size: 4.5455% 100%;
 }
-.login-glow {
-  position: absolute; width: 500px; height: 500px; border-radius: 50%;
-  background: radial-gradient(circle, rgba(99,102,241,.25), transparent 70%);
-  top: -150px; right: -150px; filter: blur(40px); pointer-events: none;
-}
+.login-glow { display: none; }
 .login-card {
-  max-width: 400px; width: 100%; border-radius: var(--radius-xl);
-  border: 1px solid var(--line-2); background: var(--card);
-  box-shadow: var(--sh-lg); overflow: hidden; position: relative; z-index: 1;
+  position: relative; width: 100%; max-width: 380px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--sh-card);
+  overflow: hidden;
 }
-.login-hero { padding: 32px 24px 24px; text-align: center; border-bottom: 1px solid var(--line); }
-.brand-logo {
-  width: 56px; height: 56px; border-radius: 16px; margin: 0 auto 14px;
-  background: var(--grad-indigo); display: flex; align-items: center; justify-content: center;
-  font-size: 1.6rem; color: #fff; box-shadow: var(--sh-indigo);
+/* カード上端のロール色の帯 */
+.login-card::before {
+  content: ''; display: block; height: 5px;
+  background: linear-gradient(to right,
+    var(--role-manager) 0 24%,
+    var(--role-employee) 24% 55%,
+    var(--role-part-time) 55% 82%,
+    var(--role-student) 82% 100%);
 }
-.login-hero h3 { font-weight: 800; letter-spacing: -.02em; }
-
-/* ---- 単一ログインフォーム（縦並び・コンパクト） ---- */
-.login-form { padding: 20px 24px 24px; }
-.login-form .form-field { margin-bottom: 14px; }
-.login-form .form-field:last-of-type { margin-bottom: 6px; }
-.login-form .form-label { font-size: .72rem; margin-bottom: 3px; }
-.login-form .input-group .input-group-text {
-  min-height: 38px; padding: 0 10px; font-size: .82rem;
-}
-.login-form .form-control {
-  min-height: 38px; font-size: .85rem; padding: 6px 10px;
-}
-.login-form .form-control::placeholder { font-size: .78rem; }
-.login-hint {
-  display: flex; align-items: center; gap: 5px;
-  font-size: .72rem; margin: 4px 0 14px;
-  color: var(--t-muted);
-}
-.login-hint i { font-size: .78rem; }
-.login-form .btn-lg { min-height: 42px; font-size: .9rem; margin-top: 4px; }
-
-.divider { display: flex; align-items: center; color: var(--t-muted); }
-.divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--line); }
-.divider span { padding: 0 12px; font-size: .75rem; }
-.form-text { color: var(--t-muted); font-size: .78rem; }
+.login-hero { padding: 24px 26px 6px; text-align: left; }
+.login-hero h3 { font-size: 1.05rem; font-weight: 700; color: var(--ink); margin-top: 10px; }
+.login-hero p { color: var(--ink-3); font-size: .78rem; }
+.brand-logo { font-size: 1.3rem; color: var(--ink); }
+.login-form { padding: 14px 26px 26px; }
+.form-field { margin-bottom: 13px; }
 
 /* ---------- 6. Components: Buttons ---------- */
 .btn {
