@@ -819,7 +819,13 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 /* ---------- 20. Timeline (Gantt) ---------- */
 .tl-wrap { padding: 2px 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .tl-axis-row { display: flex; align-items: flex-end; margin-bottom: 4px; min-width: 480px; }
-.tl-name { width: 52px; flex: 0 0 52px; font-size: .68rem; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 4px; }
+/* .tl-name は名前＋ロールバッジの2要素を横並びにする。名前側だけ省略記号で切り詰め、
+   バッジは常に全文字を表示する（バッジが省略記号に巻き込まれるとロールが読めなくなるため）。 */
+.tl-name {
+  width: 58px; flex: 0 0 58px; font-size: .68rem; color: var(--ink-2);
+  display: flex; align-items: center; min-width: 0; padding-left: 4px;
+}
+.tl-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; }
 .tl-axis { flex: 1 1 auto; display: flex; min-width: 0; height: 10px; }
 .tl-hour { flex: 1 1 0; font-size: .5rem; font-family: var(--font-num); color: var(--ink-3); text-align: left; border-left: 1px solid var(--rule); padding-left: 1px; }
 .tl-hour-next { color: var(--daybreak); font-weight: 700; }
@@ -849,7 +855,7 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 /* スマホ向け: タイムライン圧縮・横スクロールで対応 */
 @media (max-width: 575px) {
   .tl-axis-row, .tl-row { min-width: 420px; }
-  .tl-name { width: 44px; flex: 0 0 44px; font-size: .6rem; }
+  .tl-name { width: 50px; flex: 0 0 50px; font-size: .6rem; }
   .tl-hour { font-size: .42rem; }
 }
 .tl-bar {
@@ -870,10 +876,19 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 .tl-bar-overcap-mark { position: relative; z-index: 1; font-size: .6rem; margin-right: 2px; pointer-events: none; }
 
 /* ロール色。面と文字をセットで当てる（文字色を忘れると読めなくなる） */
-.chip.role-manager,   .dot.role-manager,   .tl-bar.role-manager   { background: var(--role-manager);   color: var(--role-manager-ink); }
-.chip.role-employee,  .dot.role-employee,  .tl-bar.role-employee  { background: var(--role-employee);  color: var(--role-employee-ink); }
-.chip.role-part-time, .dot.role-part-time, .tl-bar.role-part-time { background: var(--role-part-time); color: var(--role-part-time-ink); }
-.chip.role-student,   .dot.role-student,   .tl-bar.role-student   { background: var(--role-student);   color: var(--role-student-ink); }
+.chip.role-manager,   .dot.role-manager,   .tl-bar.role-manager,   .tl-role-badge.role-manager   { background: var(--role-manager);   color: var(--role-manager-ink); }
+.chip.role-employee,  .dot.role-employee,  .tl-bar.role-employee,  .tl-role-badge.role-employee  { background: var(--role-employee);  color: var(--role-employee-ink); }
+.chip.role-part-time, .dot.role-part-time, .tl-bar.role-part-time, .tl-role-badge.role-part-time { background: var(--role-part-time); color: var(--role-part-time-ink); }
+.chip.role-student,   .dot.role-student,   .tl-bar.role-student,   .tl-role-badge.role-student   { background: var(--role-student);   color: var(--role-student-ink); }
+
+/* 配置帯の名前横に出すロールバッジ。狭いスペースでもロールが判別できるように
+   （印刷はロール色が淡いため、モノクロ印刷では文字だけが頼り）。
+   色は上の .role-* ルールから継承（.tl-role-badge.role-* として同居）。 */
+.tl-role-badge {
+  display: inline-block; flex-shrink: 0; margin-left: 4px; padding: 0 3px;
+  border-radius: var(--radius-xs);
+  font-size: .52rem; font-weight: 700; vertical-align: 1px;
+}
 
 /* 状態は色ではなく質感で表す（色はロールが担っているため） */
 .tl-bar.tl-st-confirmed { /* ベタ塗り。追加の装飾なし */ }
@@ -1081,6 +1096,21 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 @media print {
   @page { size: A4 landscape; margin: 10mm; }
 
+  /* ダーク→印刷時、上の「テーマ切替時のトランジション」が background-color の変化を
+     アニメーションさせてしまい、印刷レンダリングが遷移途中（暗い地のまま）を
+     捉えてしまうことがある。印刷では全要素のトランジション/アニメーションを止め、
+     ライトのトークン値を即時に反映させる。 */
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+
+  /* 印刷は常に紙の地にする。ダークテーマから印刷しても暗い背景・暗い罫線が出ないよう、
+     @media print の内側だけライトのトークン値で固定する（値は設計書のライト側）。 */
+  html, html[data-theme="dark"] {
+    --paper: #FBFAF6; --surface: #FFFFFF; --zebra: #F5F3EC;
+    --ink: #243240; --ink-2: #5A6472; --ink-3: #8A8272;
+    --rule: #E4E1D6; --grid-1h: #EEEBE1; --grid-4h: #DCD6C4;
+    --daybreak: #B9AF98; --alert: #B14A35;
+  }
+
   /* 画面アプリ全体を隠す */
   #appView, #loginView, .app-header, .bottom-nav, .side-nav, .side-overlay,
   #notifBtn, #logoutBtn, #menuToggle, #themeToggleBtn, .no-print, .toast-wrap { display: none !important; }
@@ -1124,7 +1154,7 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
   }
   .print-page .tl-row { margin-bottom: 8px; }
   .print-page .tl-track {
-    height: 32px; background: #F1F1F1 !important;
+    height: 32px; background: #F5F3EC !important;
     border: 1px solid #999; border-radius: 4px;
   }
   .print-page .tl-bar {
@@ -1134,10 +1164,19 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
     /* 印刷で背景色が消えるのを防止 */
     -webkit-print-color-adjust: exact; print-color-adjust: exact;
   }
-  .print-page .tl-bar.morning { background: #F59E0B !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  .print-page .tl-bar.noon    { background: #10B981 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  .print-page .tl-bar.evening { background: #6366F1 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  .print-page .tl-gap-bar { background: #EF4444 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; animation: none; top: 3px; height: 26px; font-size: 10px; }
+  /* ロール色（生の16進数。ダークテーマから印刷しても暗くならないよう固定値）。
+     淡い色でもモノクロ印刷ではロールバッジの文字で判別できる（Step3参照）。 */
+  .print-page .tl-bar.role-manager   { background: #B9CBE2 !important; color: #22364F !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .print-page .tl-bar.role-employee  { background: #C9DFE0 !important; color: #1D3D42 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .print-page .tl-bar.role-part-time { background: #F3DFA4 !important; color: #4A3A12 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .print-page .tl-bar.role-student   { background: #F2DADD !important; color: #4A2A2E !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  /* ロールバッジも同じ理由で生の16進数固定（.tl-role-badge の地色は var(--role-*) 依存のため
+     Step2のトークン固定だけではダーク側の値が残ってしまう） */
+  .print-page .tl-role-badge.role-manager   { background: #B9CBE2 !important; color: #22364F !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .print-page .tl-role-badge.role-employee  { background: #C9DFE0 !important; color: #1D3D42 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .print-page .tl-role-badge.role-part-time { background: #F3DFA4 !important; color: #4A3A12 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .print-page .tl-role-badge.role-student   { background: #F2DADD !important; color: #4A2A2E !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .print-page .tl-gap-bar { background: #B14A35 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; animation: none; top: 3px; height: 26px; font-size: 10px; }
   .print-page .tl-gap-row { border-top: 1px dashed #999; padding-top: 6px; margin-top: 6px; }
   .print-page .tl-gap-name { color: #C92A2A !important; font-size: 11px !important; font-weight: 700; }
 
@@ -1146,6 +1185,13 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
     font-size: 10px; color: #444;
   }
   .print-page .tl-legend i { width: 10px; height: 10px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  /* 凡例の色見本も生の16進数で固定（ダークテーマから印刷すると凡例だけ暗い色に
+     なり、実際のバー色と一致しなくなるのを防ぐ） */
+  .print-page .tl-legend i.lg-role-manager   { background: #B9CBE2 !important; }
+  .print-page .tl-legend i.lg-role-employee  { background: #C9DFE0 !important; }
+  .print-page .tl-legend i.lg-role-part-time { background: #F3DFA4 !important; }
+  .print-page .tl-legend i.lg-role-student   { background: #F2DADD !important; }
+  .print-page .tl-legend i.lg-alert          { background: rgba(199,90,71,.18) !important; border-color: #B14A35 !important; }
 
   .print-empty { padding: 24px; text-align: center; color: #888; font-size: 13px; border: 1px dashed #BBB; border-radius: 6px; }
 

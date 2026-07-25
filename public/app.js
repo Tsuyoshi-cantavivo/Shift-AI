@@ -138,6 +138,18 @@ function roleClass(role) {
   }
 }
 
+/** 配置帯のバッジ・凡例で使う短いロール名。狭いスペースに収めるため。
+ *  ヘッダー等で使う正式名称は roleLabel() 側（店舗管理者/社員/アルバイト/学生アルバイト）。 */
+function roleBadgeLabel(role) {
+  switch (role) {
+    case 'manager':   return '店長';
+    case 'employee':  return '社員';
+    case 'part_time': return 'パート';
+    case 'student':   return '学生';
+    default:          return '';
+  }
+}
+
 /** シフトの状態を質感クラスに変換する。色はロールが担うため、状態は模様で表す。
  *  confirmed=ベタ塗り / modifying=斜線 / requested=淡く破線枠 */
 function statusClass(status) {
@@ -846,7 +858,7 @@ function buildStaticTimelineHtml(list, anchorDate) {
   const order = []; const staffMap = {};
   list.forEach((s) => {
     if (!staffMap[s.staff_id]) {
-      staffMap[s.staff_id] = { name: s.staff_name || ('#' + s.staff_id), shifts: [] };
+      staffMap[s.staff_id] = { name: s.staff_name || ('#' + s.staff_id), role: s.staff_role, shifts: [] };
       order.push(s.staff_id);
     }
     staffMap[s.staff_id].shifts.push(s);
@@ -907,7 +919,7 @@ function buildStaticTimelineHtml(list, anchorDate) {
       const draftCls = (s.status === 'requested' && (s.reason || '').startsWith('AIドラフト')) ? ' tl-bar-draft' : '';
       return `<div class="tl-bar ${roleClass(s.staff_role)} ${statusClass(s.status)}${contCls}${draftCls}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
     }).join('');
-    return `<div class="tl-row"><div class="tl-name">${esc(st.name)}</div><div class="tl-track" style="${trackVars}">${bars}</div></div>`;
+    return `<div class="tl-row"><div class="tl-name"><span class="tl-name-text">${esc(st.name)}</span><span class="tl-role-badge ${roleClass(st.role)}">${roleBadgeLabel(st.role)}</span></div><div class="tl-track" style="${trackVars}">${bars}</div></div>`;
   }).join('');
 
   // 時間帯別不足バー（印刷用）— anchorDate (day) を基準に計算
