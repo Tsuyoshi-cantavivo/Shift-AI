@@ -9,6 +9,7 @@
 """
 import json
 from collections import defaultdict
+from datetime import date, timedelta
 
 import pytest
 
@@ -27,6 +28,9 @@ from helpers import (
 MON, TUE, WED, THU, FRI = "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"
 WEEKDAYS = [MON, TUE, WED, THU, FRI]
 DEFAULT_SETTINGS = {"min_daily_hours": 4, "max_consecutive_days": 6, "default_hourly_wage": 1100}
+# 締切は実行時刻からの相対日付にする（ウォールクロックが特定の日付を跨いでも
+# 「締切内」テストが壊れないように）。
+FUTURE_DEADLINE = (date.today() + timedelta(days=365)).isoformat()
 
 
 # ============================================================
@@ -1266,7 +1270,7 @@ class TestShiftOverlapPrevention:
         # スタッフが募集期間内で希望提出（17-22確定済みの日に13-18希望を出す → 重複でスキップ）
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) VALUES (?,?,?,?,1)",
-            (shop_id, MON, MON, "2026-07-25"))
+            (shop_id, MON, MON, FUTURE_DEADLINE))
         staff_token = make_session("staff", e1, shop_id)
         r = client.post("/api/staff/requests", json={
             "shifts": [{"start_datetime": f"{MON}T13:00:00", "end_datetime": f"{MON}T18:00:00"}],
@@ -1288,7 +1292,7 @@ class TestShiftOverlapPrevention:
             "staff_id": e1, "start_datetime": f"{MON}T17:00:00", "end_datetime": f"{MON}T22:00:00"}, headers=auth(shop_token))
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) VALUES (?,?,?,?,1)",
-            (shop_id, MON, MON, "2026-07-25"))
+            (shop_id, MON, MON, FUTURE_DEADLINE))
         staff_token = make_session("staff", e1, shop_id)
         # 9-13（17-22とは重ならない）→ OK
         r = client.post("/api/staff/requests", json={
@@ -1962,7 +1966,7 @@ class TestDashboardAndPeriods:
         # 募集期間を作成
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) VALUES (?,?,?,?,1)",
-            (shop_id, "2026-08-01", "2026-08-15", "2026-07-25"))
+            (shop_id, "2026-08-01", "2026-08-15", FUTURE_DEADLINE))
         token = make_session("staff", staff_id, shop_id)
         r = client.get("/api/staff/periods", headers=auth(token))
         assert r.status_code == 200
@@ -1977,7 +1981,7 @@ class TestDashboardAndPeriods:
         # 8/1-8/15 の期間を作成
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) VALUES (?,?,?,?,1)",
-            (shop_id, "2026-08-01", "2026-08-15", "2026-07-25"))
+            (shop_id, "2026-08-01", "2026-08-15", FUTURE_DEADLINE))
         token = make_session("staff", staff_id, shop_id)
         # 9月の希望を提出 → 拒否
         r = client.post("/api/staff/requests", json={
@@ -1992,7 +1996,7 @@ class TestDashboardAndPeriods:
         staff_id = insert_staff(shop_id, "P1", "バイト")
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) VALUES (?,?,?,?,1)",
-            (shop_id, "2026-08-01", "2026-08-15", "2026-07-25"))
+            (shop_id, "2026-08-01", "2026-08-15", FUTURE_DEADLINE))
         token = make_session("staff", staff_id, shop_id)
         r = client.post("/api/staff/requests", json={
             "shifts": [{"start_datetime": "2026-08-05T09:00:00", "end_datetime": "2026-08-05T14:00:00"}],
@@ -2010,7 +2014,7 @@ class TestDashboardAndPeriods:
         staff_id = insert_staff(shop_id, "P1", "バイト")
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) VALUES (?,?,?,?,1)",
-            (shop_id, "2026-08-01", "2026-08-15", "2026-07-25"))
+            (shop_id, "2026-08-01", "2026-08-15", FUTURE_DEADLINE))
         token = make_session("staff", staff_id, shop_id)
         r = client.post("/api/staff/requests", json={
             "shifts": [{"start_datetime": "2026-08-05T09:00", "end_datetime": "2026-08-05T14:00"}],

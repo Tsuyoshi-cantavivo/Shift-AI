@@ -220,7 +220,7 @@ class TestStaffApis:
         staff_id = insert_staff(shop_id, "P1", "x")
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) VALUES (?,?,?,?,1)",
-            (shop_id, "2026-08-01", "2026-08-15", "2026-07-25"))
+            (shop_id, "2026-08-01", "2026-08-15", "2099-12-31"))
         tok = make_session("staff", staff_id, shop_id)
         r = client.get("/api/staff/periods", headers=auth(tok))
         assert r.status_code == 200

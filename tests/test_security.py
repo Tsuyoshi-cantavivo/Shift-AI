@@ -170,7 +170,7 @@ class TestIDOR:
         shop_a, shop_b, sa, sb = self._setup_two_shops()
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) VALUES (?,?,?,?,1)",
-            (shop_b, "2026-08-01", "2026-08-31", "2026-07-25"))
+            (shop_b, "2026-08-01", "2026-08-31", "2099-12-31"))
         tok_sa = make_session("staff", sa, shop_a)
         r = client.get("/api/staff/periods", headers=auth(tok_sa))
         assert r.status_code == 200

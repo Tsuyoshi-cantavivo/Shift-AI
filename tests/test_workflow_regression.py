@@ -6,6 +6,7 @@ AI自動生成」のフローで、シフトが重複し、希望が消え、必
 原因究明と再発防止のテスト。
 """
 import json
+from datetime import date, timedelta
 
 import pytest
 
@@ -20,6 +21,9 @@ MON, TUE, WED, THU, FRI = "2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06"
 DEFAULT_SETTINGS = {"min_daily_hours": 4, "max_consecutive_days": 6,
                     "default_hourly_wage": 1100, "night_premium_rate": 1.25,
                     "transport_per_day": 300, "business_hours": "9:00-22:00"}
+# 締切は実行時刻からの相対日付にする（ウォールクロックが特定の日付を跨いでも
+# 「締切内」テストが壊れないように）。
+FUTURE_DEADLINE = (date.today() + timedelta(days=365)).isoformat()
 
 
 def _count_staff_in_hour(rows, day, hour):
@@ -96,7 +100,7 @@ class TestWorkflow_AIHope_AutoGen_AutoConfirm_ReAutoGen:
         # 募集期間を設定
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) "
-            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, "2026-07-25"))
+            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, FUTURE_DEADLINE))
 
         # ---- Step 1: AI で「17時まで水曜以外」を解析 ----
         wishes = _ai_parse_17_unless_wed()
@@ -237,7 +241,7 @@ class TestWorkflow_AIHope_AutoGen_AutoConfirm_ReAutoGen:
 
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) "
-            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, "2026-07-25"))
+            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, FUTURE_DEADLINE))
 
         # Step 1: 希望提出
         wishes = _ai_parse_17_unless_wed()  # 4件: 月火木金の 9-17
@@ -348,7 +352,7 @@ class TestWorkflow_EmployeeFixedAsCandidate:
         MON1 = "2026-08-03"
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) "
-            "VALUES (?,?,?,?,1)", (shop_id, MON1, MON1, "2026-07-25"))
+            "VALUES (?,?,?,?,1)", (shop_id, MON1, MON1, FUTURE_DEADLINE))
 
         # 田中 9-17 希望（wish_history にも書く）
         staff_tok = make_session("staff", pt, shop_id)
@@ -426,7 +430,7 @@ class TestWorkflow_EmployeeFixedAsCandidate:
         insert_fixed(emp, 1, "09:00", "18:00")  # 社員固定（候補）
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) "
-            "VALUES (?,?,?,?,1)", (shop_id, MON, MON, "2026-07-25"))
+            "VALUES (?,?,?,?,1)", (shop_id, MON, MON, FUTURE_DEADLINE))
         # バイトの wish を wish_history に直接 INSERT
         dbmod.execute(
             "INSERT INTO wish_history (shop_id, staff_id, start_datetime, end_datetime, note) "
@@ -480,7 +484,7 @@ class TestWorkflow_WishHistoryPreservation:
         staff_id = insert_staff(shop_id, "P1", "バイト")
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) "
-            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, "2026-07-25"))
+            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, FUTURE_DEADLINE))
         tok = make_session("staff", staff_id, shop_id)
         r = client.post("/api/staff/requests", json={"shifts": [
             {"start_datetime": f"{MON}T09:00:00", "end_datetime": f"{MON}T17:00:00"},
@@ -502,7 +506,7 @@ class TestWorkflow_WishHistoryPreservation:
         pt = insert_staff(shop_id, "P1", "バイト", "part_time", 1100, 0, 160)
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) "
-            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, "2026-07-25"))
+            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, FUTURE_DEADLINE))
 
         # 希望提出（wish_history に保存される）
         staff_tok = make_session("staff", pt, shop_id)
@@ -535,7 +539,7 @@ class TestWorkflow_WishHistoryPreservation:
         pt = insert_staff(shop_id, "P1", "バイト", "part_time", 1100, 0, 160)
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) "
-            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, "2026-07-25"))
+            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, FUTURE_DEADLINE))
 
         staff_tok = make_session("staff", pt, shop_id)
         client.post("/api/staff/requests", json={"shifts": [
@@ -576,7 +580,7 @@ class TestWorkflow_WishHistoryPreservation:
         insert_fixed(pt, 2, "17:00", "22:00")  # 火曜
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) "
-            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, "2026-07-25"))
+            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, FUTURE_DEADLINE))
 
         staff_tok = make_session("staff", pt, shop_id)
         # 火曜 9-17 希望（17-22 固定と merge される想定）
@@ -622,7 +626,7 @@ class TestWorkflow_WishHistoryPreservation:
         staff_id = insert_staff(shop_id, "P1", "バイト")
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) "
-            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, "2026-07-25"))
+            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, FUTURE_DEADLINE))
         tok = make_session("staff", staff_id, shop_id)
         client.post("/api/staff/requests", json={"shifts": [
             {"start_datetime": f"{MON}T09:00:00", "end_datetime": f"{MON}T17:00:00"},
@@ -644,7 +648,7 @@ class TestWorkflow_WishHistoryPreservation:
         s2 = insert_staff(shop_id, "P2", "バイト2")
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) "
-            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, "2026-07-25"))
+            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, FUTURE_DEADLINE))
         tok1 = make_session("staff", s1, shop_id)
         tok2 = make_session("staff", s2, shop_id)
         client.post("/api/staff/requests", json={"shifts": [
@@ -668,7 +672,7 @@ class TestWorkflow_WishHistoryPreservation:
         staff_id = insert_staff(shop_id, "P1", "バイト")
         dbmod.execute(
             "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) "
-            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, "2026-07-25"))
+            "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, FUTURE_DEADLINE))
         tok = make_session("staff", staff_id, shop_id)
         client.post("/api/staff/requests", json={"shifts": [
             {"start_datetime": f"{MON}T09:00:00", "end_datetime": f"{MON}T17:00:00"},

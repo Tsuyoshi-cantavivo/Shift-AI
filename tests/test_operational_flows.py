@@ -23,6 +23,9 @@ MON, TUE, WED, THU, FRI, SAT, SUN = (
     "2026-08-01", "2026-08-02",
 )
 WEEK = [MON, TUE, WED, THU, FRI]
+# 締切は実行時刻からの相対日付にする（ウォールクロックが特定の日付を跨いでも
+# 「締切内」テストが壊れないように）。
+FUTURE_DEADLINE = (date.today() + timedelta(days=365)).isoformat()
 SETTINGS = {"min_daily_hours": 4, "max_consecutive_days": 6,
             "default_hourly_wage": 1100, "night_premium_rate": 1.25,
             "transport_per_day": 300, "business_hours": "9:00-22:00"}
@@ -138,7 +141,7 @@ def _setup_standard_shop():
         insert_fixed(pt3, w, "17:00", "22:00")
     dbmod.execute(
         "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) "
-        "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, "2026-07-25"))
+        "VALUES (?,?,?,?,1)", (shop_id, MON, FRI, FUTURE_DEADLINE))
     return {"shop_id": shop_id, "emp1": emp1, "emp2": emp2,
             "pt1": pt1, "pt2": pt2, "pt3": pt3}
 

@@ -11,6 +11,7 @@ Google/Microsoft/Amazon レベルの品質保証を目的とした、以下を�
 import json
 import time
 import threading
+from datetime import date, timedelta
 import pytest
 
 import db as dbmod
@@ -23,6 +24,9 @@ from helpers import (
 
 MON = "2026-08-03"
 TUE = "2026-08-04"
+# 締切は実行時刻からの相対日付にする（ウォールクロックが特定の日付を跨いでも
+# 「締切内」テストが壊れないように）。
+FUTURE_DEADLINE = (date.today() + timedelta(days=365)).isoformat()
 
 
 # ============================================================
@@ -387,7 +391,7 @@ class TestAcceptanceBusinessFlow:
 
         # 1. 募集期間作成
         r = client.post("/api/shop/periods", json={
-            "start_date": MON, "end_date": TUE, "deadline": "2026-07-25",
+            "start_date": MON, "end_date": TUE, "deadline": FUTURE_DEADLINE,
         }, headers=auth(shop_tok))
         assert r.status_code == 200
 
