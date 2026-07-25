@@ -2127,7 +2127,7 @@ async function loadStaffList() {
     list.innerHTML = data.staffs.map((s) => `
       <div class="list-row">
         <div class="flex items-center gap-2">
-          <span class="dot ${s.role === 'employee' || s.role === 'manager' ? 'evening' : s.role === 'student' ? 'morning' : 'noon'}"></span>
+          <span class="dot ${roleClass(s.role)}"></span>
           <div>
             <strong>${esc(s.name)}</strong> <span class="text-secondary">${esc(s.staff_code)}</span>${s.is_resigned ? badge('退職', 'warning') : ''}
             <div class="small text-secondary">${roleLabel(s.role)} ・ 時給${s.hourly_wage}円 ・ 月${s.min_hours_per_month}-${s.max_hours_per_month}h</div>
@@ -2639,7 +2639,7 @@ function renderStaffReqCard({ staff, list }) {
   return `<div class="req-staff-card" data-staff-detail="${staff.id}">
     <div class="req-card-header">
       <div class="req-card-name">
-        <span class="dot ${staff.role === 'manager' || staff.role === 'employee' ? 'evening' : staff.role === 'student' ? 'morning' : 'noon'}"></span>
+        <span class="dot ${roleClass(staff.role)}"></span>
         <strong>${esc(staff.name)}</strong>
         <span class="text-secondary small">${esc(staff.staff_code || '')}</span>
         ${roleBadge}
