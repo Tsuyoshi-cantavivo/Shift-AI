@@ -120,8 +120,7 @@ html[data-theme="dark"] {
 
 html { -webkit-text-size-adjust: 100%; }
 html, body {
-  background: var(--navy);
-  background-image: var(--app-bg);
+  background: var(--paper);
   color: var(--t-primary);
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   font-size: 15px;
