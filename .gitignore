@@ -29,6 +29,9 @@ Thumbs.db
 # エディタ
 .vscode/
 .idea/
+
+# スクリーンショット（デバッグ・試験用）
+screenshots/
 test-*.png
 
 # Node.js / Playwright
@@ -38,3 +41,6 @@ node_modules/
 /blob-report/
 /playwright/.cache/
 shift_e2e.db
+
+# Superpowers ブレスト用の一時ファイル
+.superpowers/
