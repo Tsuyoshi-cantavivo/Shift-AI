@@ -335,7 +335,13 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
 .form-text { color: var(--t-muted); font-size: .78rem; }
 
 /* ---------- 6. Components: Buttons ---------- */
-.btn { border-radius: var(--radius); font-weight: 600; transition: var(--dur) var(--ease); border: 1px solid transparent; }
+.btn {
+  font-family: var(--font-ui);
+  font-weight: 500;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
 .btn:active { transform: scale(.97); }
 .btn-lg { min-height: 50px; font-size: .95rem; }
 .btn-sm { min-height: 34px; font-size: .82rem; padding: 4px 12px; }
@@ -343,42 +349,107 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
 #autoGen { min-height: 44px; font-size: .88rem; padding: 8px 10px; white-space: nowrap; }
 
 .btn-primary {
-  background: var(--grad-indigo); border: none; color: #fff;
-  box-shadow: var(--sh-indigo);
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
 }
-.btn-primary:hover { background: var(--grad-indigo); color: #fff; filter: brightness(1.1); box-shadow: 0 8px 24px rgba(99,102,241,.4); }
+.btn-primary:hover, .btn-primary:focus {
+  background: color-mix(in srgb, var(--ink) 88%, var(--paper));
+  color: var(--paper);
+  border-color: var(--ink);
+}
 
+/* AIアクション用。新トークンにAI専用色は無いため --success 系を割り当てる
+   （Task2の .text-ai → --success と同じ判断。暫定。懸念に記載） */
 .btn-ai {
-  background: var(--grad-ai); border: none; color: #fff;
-  box-shadow: 0 6px 20px rgba(16,185,129,.3);
+  background: var(--success);
+  color: var(--paper);
+  border-color: var(--success);
 }
-.btn-ai:hover { color: #fff; filter: brightness(1.08); box-shadow: 0 8px 26px rgba(16,185,129,.4); }
-
-.btn-light, .btn-outline-secondary {
-  background: var(--card); border: 1px solid var(--line-2); color: var(--t-primary);
+.btn-ai:hover, .btn-ai:focus {
+  background: color-mix(in srgb, var(--success) 88%, var(--paper));
+  color: var(--paper);
+  border-color: var(--success);
 }
-.btn-light:hover, .btn-outline-secondary:hover { background: var(--card-2); color: var(--t-primary); border-color: var(--line-3); }
 
-.btn-success { background: var(--success); border: none; color: #fff; }
-.btn-danger { background: var(--danger); border: none; color: #fff; }
-.btn-outline-danger { color: var(--danger); border: 1px solid rgba(239,68,68,.4); background: transparent; }
-.btn-outline-danger:hover { background: rgba(239,68,68,.15); color: #fff; }
+.btn-light, .btn-secondary {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--rule);
+}
+.btn-light:hover, .btn-secondary:hover {
+  background: var(--zebra);
+  color: var(--ink);
+  border-color: var(--rule);
+}
+/* 実際に使われているのは .btn-outline-secondary（.btn-secondary ではない）。
+   brief の対応表に無いため、.btn-light と同じ扱いで揃える（未整理のまま残すと
+   Bootstrap既定色に戻ってしまうため） */
+.btn-outline-secondary {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--rule);
+}
+.btn-outline-secondary:hover {
+  background: var(--zebra);
+  color: var(--ink);
+  border-color: var(--rule);
+}
+
+.btn-success { background: var(--success); border: none; color: var(--paper); }
+.btn-danger {
+  background: var(--alert);
+  color: var(--paper);
+  border-color: var(--alert);
+}
+.btn-outline-danger {
+  color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  background: transparent;
+}
+.btn-outline-danger:hover {
+  background: color-mix(in srgb, var(--danger) 15%, var(--surface));
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.btn:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+/* .icon-btn 本体はセクション4（Task2担当）で既に新トークンに追従済み。
+   ここで再定義すると border-radius や :hover の背景（--surface→--zebra）を
+   カスケードで上書きしてしまい、Task2でレビュー済みの意図（zebraはナビに
+   使わない）を壊す。focus-visible のみ未定義だったため追加する */
+.icon-btn:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 
 /* ---------- 7. Components: Inputs ---------- */
 .form-control, .form-select {
-  background: var(--card); border: 1px solid var(--line-2); color: var(--t-primary);
-  border-radius: var(--radius); min-height: 44px; padding: 8px 14px;
+  font-family: var(--font-ui);
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  min-height: 44px; padding: 8px 14px;
   font-size: .9rem; transition: var(--dur) var(--ease);
 }
-.form-control::placeholder { color: var(--t-dim); }
+.form-control::placeholder { color: var(--ink-3); opacity: .8; }
 .form-control:focus, .form-select:focus {
-  background: var(--card); color: var(--t-primary);
-  border-color: var(--indigo); box-shadow: 0 0 0 3px rgba(99,102,241,.15);
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--ink-2);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ink) 12%, transparent);
 }
-.form-select option { color: #111; background: #fff; }
-.form-label { color: var(--t-secondary); font-size: .8rem; font-weight: 600; margin-bottom: 4px; }
+/* 時刻・数値の入力は等幅にする。読み違いを防ぐため */
+input[type="time"], input[type="number"], input[type="date"], .form-control.num {
+  font-family: var(--font-num);
+}
+.form-select option { color: var(--ink); background: var(--surface); }
+.form-label { color: var(--ink-2); font-size: .78rem; font-weight: 500; margin-bottom: 4px; }
 .input-group-text {
-  background: var(--card-2); border: 1px solid var(--line-2); color: var(--t-muted);
+  background: var(--zebra);
+  color: var(--ink-3);
+  border: 1px solid var(--rule);
   border-radius: var(--radius);
 }
 
@@ -386,35 +457,40 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
 .pw-rules { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 6px; }
 .pw-rule {
   display: inline-flex; align-items: center; gap: 4px;
-  font-size: .72rem; color: var(--t-muted);
+  font-size: .72rem; color: var(--ink-3);
   transition: var(--dur) var(--ease);
 }
 .pw-rule i { font-size: .8rem; }
 .pw-rule.ok { color: var(--success); }
 .pw-rule.ng { color: var(--danger); }
 /* 入力欄をエラー状態にする */
-.form-control.is-invalid { border-color: var(--danger); box-shadow: 0 0 0 3px rgba(239,68,68,.15); }
+.form-control.is-invalid { border-color: var(--danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 15%, transparent); }
 /* モーダル内インラインエラー */
 .form-error {
-  background: rgba(239,68,68,.10); color: var(--danger);
-  border: 1px solid rgba(239,68,68,.35); border-radius: var(--radius);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface)); color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); border-radius: var(--radius);
   padding: 8px 12px; margin-top: 10px; font-size: .82rem;
   display: flex; align-items: center; gap: 6px;
 }
 .form-error:empty { display: none; }
 
 /* ---------- 8. Components: Cards ---------- */
+.card, .app-card {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--sh-card);
+}
+.card-body { color: var(--ink); }
+/* card-base は現状未使用（app.js で参照なし）。旧トークン参照だけ残さないよう
+   .card/.app-card と同じ値に揃える */
 .card-base {
-  background: var(--card); border: 1px solid var(--line);
-  border-radius: var(--radius-lg); box-shadow: var(--sh-sm);
-  background-image: var(--grad-card);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--sh-card);
 }
-.app-card {
-  background: var(--card); border: 1px solid var(--line);
-  border-radius: var(--radius-lg); box-shadow: var(--sh-sm);
-  margin-bottom: 16px; background-image: var(--grad-card);
-  transition: var(--dur) var(--ease);
-}
+.app-card { margin-bottom: 16px; transition: var(--dur) var(--ease); }
 .app-card .card-body { padding: 20px; }
 .card-title { font-weight: 700; font-size: 1rem; }
 
@@ -422,63 +498,91 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
   display: flex; align-items: center; gap: 8px;
   font-weight: 700; font-size: 1rem; margin-bottom: 14px;
 }
-.section-title i { color: var(--indigo-l); }
+.section-title i { color: var(--info); }
 
 /* ---------- 9. Badges & Pills ---------- */
+.badge {
+  font-family: var(--font-ui);
+  font-weight: 700;
+  font-size: .68rem;
+  border-radius: var(--radius-xs);
+  padding: .2em .5em;
+}
+.badge.bg-success { background: color-mix(in srgb, var(--success) 22%, var(--surface)) !important; color: var(--success) !important; }
+.badge.bg-warning { background: color-mix(in srgb, var(--warning) 22%, var(--surface)) !important; color: var(--warning) !important; }
+.badge.bg-danger  { background: color-mix(in srgb, var(--alert) 18%, var(--surface)) !important; color: var(--alert) !important; }
+.badge.bg-info    { background: color-mix(in srgb, var(--info) 22%, var(--surface)) !important; color: var(--info) !important; }
+
 .badge-soft { font-weight: 600; border-radius: 6px; padding: 2px 8px; font-size: .72rem; display: inline-block; }
-.badge-soft.success { background: rgba(34,197,94,.15); color: var(--success); }
-.badge-soft.warning { background: rgba(245,158,11,.15); color: var(--warning); }
-.badge-soft.info    { background: rgba(99,102,241,.15); color: var(--indigo-l); }
-.badge-soft.muted   { background: var(--card-2); color: var(--t-muted); border: 1px solid var(--line); }
-.badge-soft.danger  { background: rgba(239,68,68,.15); color: var(--danger); }
-.badge-soft.ai      { background: rgba(16,185,129,.15); color: var(--ai-green-l); }
+.badge-soft.success { background: color-mix(in srgb, var(--success) 22%, var(--surface)); color: var(--success); }
+.badge-soft.warning { background: color-mix(in srgb, var(--warning) 22%, var(--surface)); color: var(--warning); }
+.badge-soft.info    { background: color-mix(in srgb, var(--info) 22%, var(--surface)); color: var(--info); }
+.badge-soft.muted   { background: var(--paper); color: var(--ink-3); border: 1px solid var(--rule); }
+.badge-soft.danger  { background: color-mix(in srgb, var(--danger) 18%, var(--surface)); color: var(--danger); }
+/* .ai 用の専用色は新トークンに無いため --success を割り当て（.badge-soft.success と同じ見た目になる。暫定・懸念に記載） */
+.badge-soft.ai      { background: color-mix(in srgb, var(--success) 22%, var(--surface)); color: var(--success); }
 
 .stat-pill {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 6px 12px; border-radius: 20px;
-  background: var(--card-2); border: 1px solid var(--line);
+  background: var(--paper); border: 1px solid var(--rule);
   font-size: .82rem; font-weight: 600;
 }
 .badge-dot {
   position: absolute; top: 6px; right: 6px;
   width: 8px; height: 8px; border-radius: 50%; background: var(--danger);
-  border: 2px solid var(--navy);
+  border: 2px solid var(--paper);
 }
 .side-item-badge { background: var(--danger); }
 
 /* ---------- 10. Tables ---------- */
+table { color: var(--ink); border-color: var(--rule); }
+thead th {
+  color: var(--ink-2);
+  font-weight: 700;
+  font-size: .78rem;
+  border-bottom: 1px solid var(--rule);
+}
+/* 横に長い表はゼブラで行を分ける。数値セルは等幅 */
+tbody tr:nth-child(odd) { background: var(--zebra); }
+td.num, th.num, td .num { font-family: var(--font-num); }
+
 .data-table { width: 100%; border-collapse: collapse; font-size: .86rem; }
 .data-table th {
   text-align: left; padding: 10px 12px; font-size: .72rem; font-weight: 700;
-  text-transform: uppercase; letter-spacing: .05em; color: var(--t-muted);
-  border-bottom: 1px solid var(--line-2); white-space: nowrap;
+  text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2);
+  border-bottom: 1px solid var(--rule); white-space: nowrap;
 }
-.data-table td { padding: 12px; border-bottom: 1px solid var(--line); color: var(--t-primary); }
+.data-table td { padding: 12px; border-bottom: 1px solid var(--rule); color: var(--ink); }
 .data-table tr:last-child td { border-bottom: none; }
-.data-table tr:hover td { background: rgba(99,102,241,.04); }
+.data-table tr:hover td { background: color-mix(in srgb, var(--ink) 4%, var(--surface)); }
 .t-num { text-align: right; font-variant-numeric: tabular-nums; }
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: var(--radius); }
 
 /* ---------- 11. List rows ---------- */
+/* .list-row は横に長い表の行ではなく、1件=1枚の丸角チップを縦に積むリスト
+   （flex + border-radius + margin-bottomで個々に区切られている）。ゼブラ
+   （横に長い表専用）は使わず、カード地(--surface)の上で沈んで見える --paper を
+   採用した。判断根拠は報告に記載 */
 .list-row {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 14px 16px; background: var(--card-2); border: 1px solid var(--line);
+  padding: 14px 16px; background: var(--paper); border: 1px solid var(--rule);
   border-radius: var(--radius); margin-bottom: 8px;
   transition: var(--dur) var(--ease); min-width: 0;
 }
-.list-row:hover { border-color: var(--line-2); }
+.list-row:hover { border-color: var(--rule); }
 .list-row > div:first-child { flex: 1 1 auto; min-width: 0; }
 .list-row .small { font-size: .75rem; }
 
 /* ---------- 12. Tabs ---------- */
-.tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--rule); overflow-x: auto; }
 .tab {
   padding: 10px 16px; border: none; background: none; cursor: pointer;
-  color: var(--t-secondary); font-size: .88rem; font-weight: 600; white-space: nowrap;
+  color: var(--ink-2); font-size: .88rem; font-weight: 600; white-space: nowrap;
   border-bottom: 2px solid transparent; transition: var(--dur) var(--ease);
 }
-.tab:hover { color: var(--t-primary); }
-.tab.active { color: var(--indigo-l); border-bottom-color: var(--indigo); }
+.tab:hover { color: var(--ink); }
+.tab.active { color: var(--ink); border-bottom-color: var(--ink); }
 
 /* ---------- 13. Modal ---------- */
 .modal-overlay {
@@ -487,64 +591,86 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
   animation: fadeIn var(--dur) var(--ease);
 }
 .modal-box {
-  background: var(--card); border: 1px solid var(--line-2); border-radius: var(--radius-xl);
+  background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius-lg);
   max-width: 520px; width: 100%; max-height: 90vh; overflow-y: auto;
-  box-shadow: var(--sh-lg); animation: slideUp var(--dur-slow) var(--ease);
+  box-shadow: var(--sh-modal); animation: slideUp var(--dur-slow) var(--ease);
 }
 .modal-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px 0; }
 .modal-title { font-weight: 700; font-size: 1.05rem; }
 .modal-body { padding: 16px 20px; }
 .modal-footer { padding: 12px 20px 20px; display: flex; gap: 8px; justify-content: flex-end; }
+.modal-header, .modal-footer { border-color: var(--rule); }
 .modal-close {
-  width: 32px; height: 32px; border-radius: 8px; border: none; background: var(--card-2);
-  color: var(--t-muted); cursor: pointer; font-size: 1.1rem;
+  width: 32px; height: 32px; border-radius: 8px; border: none; background: var(--paper);
+  color: var(--ink-3); cursor: pointer; font-size: 1.1rem;
   display: flex; align-items: center; justify-content: center;
 }
-.modal-close:hover { background: var(--card-3); color: #fff; }
+.modal-close:hover { background: var(--rule); color: var(--ink); }
+
+/* Bootstrap純正モーダル（.modal-content/.modal-backdrop）は現状app.jsで未使用だが、
+   Interfaces記載どおりbriefの指定を追加しておく */
+.modal-content {
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--sh-modal);
+}
+.modal-backdrop.show { opacity: .45; }
 
 /* ---------- 14. Toast ---------- */
 .toast-wrap { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); z-index: 3000; display: flex; flex-direction: column; gap: 8px; }
 @media (min-width: 992px) { .toast-wrap { bottom: 32px; right: 32px; left: auto; transform: none; } }
+/* 実際にJSが生成するのは .toast-item ではなく .toast（app.js:142）。
+   brief の .toast-item の意図（インク地に白文字の帳票スタンプ調）をそのまま実クラスに適用する */
 .toast {
-  background: var(--card-2); border: 1px solid var(--line-2); border-radius: var(--radius);
-  padding: 12px 18px; box-shadow: var(--sh-lg); color: var(--t-primary);
-  font-size: .88rem; font-weight: 500; display: flex; align-items: center; gap: 10px;
+  background: var(--ink); border: none; border-radius: var(--radius);
+  padding: 12px 18px; box-shadow: var(--sh-card); color: var(--paper);
+  font-size: .82rem; font-weight: 500; display: flex; align-items: center; gap: 10px;
   animation: slideUp var(--dur) var(--ease); max-width: 360px;
 }
 .toast.success { border-left: 3px solid var(--success); }
 .toast.error { border-left: 3px solid var(--danger); }
-.toast.info { border-left: 3px solid var(--indigo); }
+.toast.info { border-left: 3px solid var(--info); }
 .toast.warning { border-left: 3px solid var(--warning); }
+
+.toast-item {
+  background: var(--ink);
+  color: var(--paper);
+  border-radius: var(--radius);
+  box-shadow: var(--sh-card);
+  font-size: .82rem;
+}
 
 /* ---------- 15. Loading ---------- */
 .loading-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,.55); backdrop-filter: blur(4px);
   display: flex; align-items: center; justify-content: center; z-index: 2500;
 }
-.loading-overlay .spinner-border { color: var(--indigo-l); width: 2.5rem; height: 2.5rem; }
+.loading-overlay .spinner-border { color: var(--info); width: 2.5rem; height: 2.5rem; }
 
 .skeleton {
-  background: linear-gradient(90deg, var(--card) 25%, var(--card-2) 50%, var(--card) 75%);
+  background: linear-gradient(90deg, var(--surface) 25%, var(--rule) 50%, var(--surface) 75%);
   background-size: 200% 100%; animation: shimmer 1.5s infinite;
   border-radius: var(--radius-sm);
 }
 @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
-/* AI thinking animation */
+/* AI thinking animation（新トークンにAI専用色は無いため --success を割り当て。Task2の .text-ai と同じ判断） */
 .ai-thinking {
-  display: flex; align-items: center; gap: 6px; color: var(--ai-green-l);
+  display: flex; align-items: center; gap: 6px; color: var(--success);
   font-size: .85rem; font-weight: 600;
 }
-.ai-thinking .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ai-green); animation: bounce 1.2s infinite; }
+.ai-thinking .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); animation: bounce 1.2s infinite; }
 .ai-thinking .dot:nth-child(2) { animation-delay: .2s; }
 .ai-thinking .dot:nth-child(3) { animation-delay: .4s; }
 @keyframes bounce { 0%, 60%, 100% { transform: scale(.7); opacity: .5; } 30% { transform: scale(1.2); opacity: 1; } }
 
 .progress-bar {
-  height: 6px; background: var(--card-2); border-radius: 3px; overflow: hidden;
+  height: 6px; background: var(--paper); border-radius: 3px; overflow: hidden;
 }
 .progress-bar-fill {
-  height: 100%; background: var(--grad-ai); border-radius: 3px;
+  height: 100%; background: var(--success); border-radius: 3px;
   transition: width var(--dur-slow) var(--ease);
 }
 
