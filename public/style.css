@@ -658,10 +658,11 @@ td.num, th.num, td .num { font-family: var(--font-num); }
 }
 
 /* ---------- 16. KPI Cards ----------
-   .kpi-card 単体（募集期間バナー・次回シフト等）はここまでの見た目のまま維持する。
-   .kpi-grid 配下（ダッシュボード・分析画面の集計セット）だけを、下の追記ブロックで
-   「罫線区切りの帯」に変える。配置表が主役・数字は従にするため、大きなカードにしない。 */
-.kpi-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin-bottom: 18px; border-top: 1px solid var(--rule); }
+   .kpi-grid / .kpi-card は人件費分析（#anaKpi）・AI生成プレビュー等でも共有されているクラスで、
+   それらの画面は数値そのものが主役のため元のカード表示のままにする。
+   「配置表が主役・数字は従」はダッシュボードだけの設計意図なので、帯化は
+   `#kpiGrid`（app.js:1658 のダッシュボードKPI）だけに id でスコープする。 */
+.kpi-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
 @media (min-width: 768px) { .kpi-grid { grid-template-columns: repeat(4, 1fr); } }
 .kpi-card {
   background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius-lg);
@@ -689,21 +690,23 @@ td.num, th.num, td .num { font-family: var(--font-num); }
 .kpi-value { font-family: 'Space Grotesk','Inter',monospace; font-size: 1.7rem; font-weight: 700; line-height: 1.1; margin: 2px 0; font-variant-numeric: tabular-nums; }
 .kpi-sub { font-size: .7rem; color: var(--ink-3); }
 
-/* .kpi-grid 配下のセルだけ、大きなカードをやめて罫線区切りの帯にする
-  （.kpi-grid .kpi-card は .kpi-card 単体より詳細度が高いため、ここだけに効く） */
-.kpi-grid .kpi-card {
+/* #kpiGrid（ダッシュボードのKPIだけ）を罫線区切りの帯にする。
+   人件費分析の #anaKpi・AI生成プレビューの .kpi-grid は対象外（元のカードのまま）。
+   id セレクタは .kpi-grid / .kpi-card のクラスより詳細度が高いため、ここだけに効く。 */
+#kpiGrid { border-top: 1px solid var(--rule); gap: 0; }
+#kpiGrid .kpi-card {
   background: transparent; border: none; border-radius: 0; box-shadow: none;
   padding: 10px 14px; overflow: visible;
   border-right: 1px solid var(--rule);
 }
-.kpi-grid .kpi-card:last-child { border-right: none; }
-.kpi-grid .kpi-card:hover { transform: none; box-shadow: none; }
-.kpi-grid .kpi-card::after { content: none; } /* 大きなカード用の光彩装飾は帯には不要 */
-.kpi-grid .kpi-card .kpi-icon {
+#kpiGrid .kpi-card:last-child { border-right: none; }
+#kpiGrid .kpi-card:hover { transform: none; box-shadow: none; }
+#kpiGrid .kpi-card::after { content: none; } /* 大きなカード用の光彩装飾は帯には不要 */
+#kpiGrid .kpi-card .kpi-icon {
   width: auto; height: auto; background: none; border-radius: 0;
   display: inline-flex; font-size: .8rem; margin-bottom: 4px;
 }
-.kpi-grid .kpi-value { font-family: var(--font-num); font-size: 1.15rem; }
+#kpiGrid .kpi-value { font-family: var(--font-num); font-size: 1.15rem; }
 
 /* ---------- 17. Dashboard grid ---------- */
 .dash-grid { display: grid; gap: 16px; grid-template-columns: 1fr; }
