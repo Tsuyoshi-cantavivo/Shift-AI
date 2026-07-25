@@ -1,95 +1,117 @@
 /* ============================================================
    ShiftAI Design System
-   Modern AI SaaS — Deep Navy × Indigo
-   Inspired by Linear / Notion / Stripe / Vercel
+   配置表 — 現場の帳票の系譜
+   小売バックヤードの紙のシフト表・複写伝票・タイムカードに出自を持つ。
+   ライトが正、ダークはその変換として導く。
+   設計書: docs/superpowers/specs/2026-07-25-design-refresh-design.md
    ============================================================ */
 
-/* ---------- 1. Design Tokens ---------- */
+/* ---------- 1. Design Tokens（ライト＝正） ---------- */
 :root {
-  /* Palette */
-  --navy:        #0F172A;
-  --surface:     #111827;
-  --card:        #1F2937;
-  --card-2:      #283548;
-  --card-3:      #334155;
-  --indigo:      #6366F1;
-  --indigo-l:    #818CF8;
-  --indigo-d:    #4F46E5;
-  --ai-green:    #10B981;
-  --ai-green-l:  #34D399;
-  --success:     #22C55E;
-  --warning:     #F59E0B;
-  --danger:      #EF4444;
-  --info:        #3B82F6;
+  /* 地と面 */
+  --paper:       #FBFAF6;   /* アプリ背景。蛍光灯下の紙 */
+  --surface:     #FFFFFF;   /* カード・パネル */
+  --zebra:       #F5F3EC;   /* 横に長い表の交互行 */
 
-  /* Text */
-  --t-primary:   #F1F5F9;
-  --t-secondary: #94A3B8;
-  --t-muted:     #64748B;
-  --t-dim:       #475569;
+  /* 文字 */
+  --ink:         #243240;   /* 主文字・プライマリボタン地 */
+  --ink-2:       #5A6472;   /* 副次文字 */
+  --ink-3:       #8A8272;   /* 補助文字・軸の目盛り */
 
-  /* Borders */
-  --line:        rgba(148,163,184,.10);
-  --line-2:      rgba(148,163,184,.18);
-  --line-3:      rgba(148,163,184,.28);
+  /* 線 */
+  --rule:        #E4E1D6;   /* 区切り罫・入力枠 */
+  --grid-1h:     #EEEBE1;   /* 配置帯の1時間グリッド */
+  --grid-4h:     #DCD6C4;   /* 配置帯の4時間グリッド */
+  --daybreak:    #B9AF98;   /* 24:00 の日付境界 */
 
-  /* Layout */
+  /* 要対応 */
+  --alert:       #B14A35;
+  --alert-fill:  rgba(199,90,71,.18);
+
+  /* ロール色（面 / 面上の文字）。色温度で常勤・非常勤を分ける */
+  --role-manager:        #B9CBE2;  /* 薄縹・常勤 */
+  --role-manager-ink:    #22364F;
+  --role-employee:       #C9DFE0;  /* 浅葱・常勤 */
+  --role-employee-ink:   #1D3D42;
+  --role-part-time:      #F3DFA4;  /* 山吹・非常勤 */
+  --role-part-time-ink:  #4A3A12;
+  --role-student:        #F2DADD;  /* 桜・非常勤 */
+  --role-student-ink:    #4A2A2E;
+
+  /* 意味色（要対応以外。和色の系統に合わせて彩度を落とす） */
+  --success:     #4A7C59;
+  --warning:     #B8862B;
+  --danger:      #B14A35;
+  --info:        #4A6785;
+
+  /* 書体 */
+  --font-ui:     'Zen Kaku Gothic New', system-ui, -apple-system, sans-serif;
+  --font-num:    'BIZ UDGothic', ui-monospace, SFMono-Regular, monospace;
+
+  /* レイアウト */
   --header-h:    56px;
   --side-w:      248px;
   --bottom-h:    64px;
-  --radius-sm:   8px;
-  --radius:      12px;
-  --radius-lg:   16px;
-  --radius-xl:   20px;
 
-  /* Shadow */
-  --sh-sm: 0 1px 3px rgba(0,0,0,.3);
-  --sh:    0 4px 14px rgba(0,0,0,.3);
-  --sh-lg: 0 14px 40px rgba(0,0,0,.4);
-  --sh-indigo: 0 6px 20px rgba(99,102,241,.3);
+  /* 形 */
+  --radius-xs:   3px;   /* ロールバッジなど小さなラベル */
+  --radius-sm:   6px;   /* 配置帯のバー */
+  --radius:      8px;   /* ボタン・入力 */
+  --radius-lg:   10px;  /* カード */
 
-  /* Motion */
-  --ease: cubic-bezier(.4,0,.2,1);
-  --dur: 200ms;
-  --dur-slow: 350ms;
+  /* 影。帳票の質感を壊すため最小限にとどめる */
+  --sh-card:     0 1px 2px rgba(36,50,64,.04), 0 8px 24px rgba(36,50,64,.05);
+  --sh-modal:    0 12px 40px rgba(36,50,64,.14);
 
-  /* Gradients */
-  --grad-indigo: linear-gradient(135deg, #6366F1, #4F46E5);
-  --grad-ai: linear-gradient(135deg, #6366F1, #10B981);
-  --grad-card: linear-gradient(180deg, rgba(255,255,255,.02), transparent);
+  /* モーション */
+  --ease:        cubic-bezier(.4,0,.2,1);
+  --dur:         200ms;
+  --dur-slow:    350ms;
 
-  /* Header backdrop (theme-aware) */
-  --header-bg: rgba(15,23,42,.8);
-  --app-bg: radial-gradient(circle at 20% 0%, rgba(99,102,241,.10), transparent 55%),
-            radial-gradient(circle at 80% 100%, rgba(16,185,129,.06), transparent 55%);
+  /* ヘッダー背景 */
+  --header-bg:   rgba(251,250,246,.85);
 }
 
-/* ---------- 1b. Light Theme ---------- */
-html[data-theme="light"] {
-  --navy:        #F1F5F9;
-  --surface:     #FFFFFF;
-  --card:        #FFFFFF;
-  --card-2:      #F8FAFC;
-  --card-3:      #E2E8F0;
+/* ---------- 1b. Dark Theme（ライトからの派生） ----------
+   ロール色は色相を保ったまま面を暗くし、文字を明るくする。
+   罫線・グリッドはライトでのコントラスト比を実測し同じ比率になる値を逆算した
+   （罫線 1.25:1 / 1hグリッド 1.15:1 / 4hグリッド 1.40:1 / 日付境界 2.10:1）。
+   ------------------------------------------------------- */
+html[data-theme="dark"] {
+  --paper:       #262624;
+  --surface:     #30302E;
+  --zebra:       #2B2A27;
 
-  --t-primary:   #0F172A;
-  --t-secondary: #475569;
-  --t-muted:     #64748B;
-  --t-dim:       #94A3B8;
+  --ink:         #F5F4EF;
+  --ink-2:       #B7B4AC;
+  --ink-3:       #8A867E;
 
-  --line:        rgba(15,23,42,.08);
-  --line-2:      rgba(15,23,42,.14);
-  --line-3:      rgba(15,23,42,.24);
+  --rule:        #373633;
+  --grid-1h:     #31302D;
+  --grid-4h:     #3E3D3A;
+  --daybreak:    #585754;
 
-  --sh-sm: 0 1px 3px rgba(15,23,42,.06);
-  --sh:    0 4px 14px rgba(15,23,42,.08);
-  --sh-lg: 0 14px 40px rgba(15,23,42,.10);
+  --alert:       #D97757;
+  --alert-fill:  rgba(217,119,87,.20);
 
-  --grad-card: linear-gradient(180deg, rgba(15,23,42,.015), transparent);
+  --role-manager:        #3B4A5B;
+  --role-manager-ink:    #C6D6E8;
+  --role-employee:       #2F4A4D;
+  --role-employee-ink:   #BFDCDE;
+  --role-part-time:      #514526;
+  --role-part-time-ink:  #EDD89E;
+  --role-student:        #4E373B;
+  --role-student-ink:    #F0D5D9;
 
-  --header-bg: rgba(255,255,255,.82);
-  --app-bg: radial-gradient(circle at 20% 0%, rgba(99,102,241,.08), transparent 55%),
-            radial-gradient(circle at 80% 100%, rgba(16,185,129,.05), transparent 55%);
+  --success:     #7FB08D;
+  --warning:     #D9B45E;
+  --danger:      #D97757;
+  --info:        #8AA8C8;
+
+  --sh-card:     0 1px 2px rgba(0,0,0,.30), 0 8px 24px rgba(0,0,0,.36);
+  --sh-modal:    0 12px 40px rgba(0,0,0,.50);
+
+  --header-bg:   rgba(38,38,36,.85);
 }
 
 /* ---------- 2. Reset & Base ---------- */
