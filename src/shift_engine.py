@@ -351,12 +351,16 @@ def auto_generate(shop_id, settings, start_date, end_date):
         roles = day_placed_roles.get(day, set())
         return bool(roles - {"student"})
 
-    def can_place(staff_id, day, start_iso, end_iso, check_cap=True):
+    def can_place(staff_id, day, start_iso, end_iso, check_cap=True, skip_min_daily=False):
         """配置可否。理由コードを返す。
 
         労働条件（1日最低勤務時間）は **アルバイトのみ** に適用する。
         社員はフルタイム柔軟稼動が前提のため、最低時間では縛らない
         （短い穴埋め・夜を含む長時間シフトの両方を許容）。
+        ※ skip_min_daily=True の場合、min_daily チェックを行わない。
+          スタッフが明示的に時間指定した希望（timed wish）は本人の意思なので、
+          min_daily 未満でも尊重して配置する（min_daily は本来エンジンの裁量的な
+          穴埋めが短すぎないための下限。本人希望には適用しない）。
         ※ 1日複数シフト(中抜け)禁止・上限人数・月間上限は全スタッフ共通で厳守。
         【日またぎ対応】翌日にまたがる場合、翌日の staff_busy もチェックする。
         【学生ルール】学生のみ構成シフトを避けるため、学生を配置する場合は
@@ -376,7 +380,7 @@ def auto_generate(shop_id, settings, start_date, end_date):
         is_pt = staff_role.get(staff_id) == "part_time"
         is_student = staff_role.get(staff_id) == "student"
         is_emp = staff_role.get(staff_id) in ("employee", "manager")
-        if (is_pt or is_student) and work < min_daily:
+        if (is_pt or is_student) and work < min_daily and not skip_min_daily:
             return False, "min_daily"
         # 1シフト上限チェック（労基法遵守）
         role_max = max_employee_daily if is_emp else max_daily
@@ -548,7 +552,9 @@ def auto_generate(shop_id, settings, start_date, end_date):
 
     for req in sorted(timed, key=lambda a: minutes_by_staff.get(a["staff_id"], 0)):
         day = req["start_datetime"][:10]
-        ok, why = can_place(req["staff_id"], day, req["start_datetime"], req["end_datetime"])
+        # 明示的な時間指定希望は本人の意思なので min_daily 未満でも尊重する。
+        ok, why = can_place(req["staff_id"], day, req["start_datetime"], req["end_datetime"],
+                            skip_min_daily=True)
         if ok:
             place(req["staff_id"], day, req["start_datetime"], req["end_datetime"], "希望シフト")
         else:

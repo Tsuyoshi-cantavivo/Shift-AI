@@ -2474,29 +2474,21 @@ def shop_shifts_auto():
         "WHERE shop_id=? AND status='confirmed' AND start_datetime>=? AND start_datetime<=? "
         "AND reason IN ({})".format(",".join(["?"] * len(MANUAL_REASONS))),
         (shop_id, start_d + "T00:00:00", end_d + "T23:59:59", *MANUAL_REASONS))
-    # ★【ドラフトモード時のスタッフ希望保護】
-    # 従来は confirmed/modifying/requested を全て削除していたが、
-    # これだと「希望表管理」のカードが消えてしまう（ユーザー体験悪い）。
-    # ドラフト保存時は:
-    #   - confirmed (手動配置以外), modifying を削除
-    #   - AIドラフト系の requested を削除（前回生成をクリア）
-    #   - ★スタッフ希望（requested, reason NOT LIKE 'AIドラフト%'）は保持
-    # 即確定時は従来通り全削除（シフトを完全に置き換える）。
-    # ★【希望表管理画面は wish_history を見る設計（Bug E 修正）】
-    # 従来は「AI生成で shifts.requested が消えると希望表管理からも消える」
-    # 問題があったが、希望表管理は wish_history（永久履歴）ベースに変更済み。
-    # そのためここでは従来通り「期間内の requested を削除」してOK。
-    # （ shifts.requested は「調整待ちアクション」の扱い。wish_history とは別。）
-    if draft:
-        execute(
-            "DELETE FROM shifts WHERE shop_id=? AND "
-            "(status IN ('confirmed','modifying') "
-            " OR (status='requested' AND (reason LIKE 'AIドラフト%' OR reason LIKE 'AI生成%'))) "
-            "AND start_datetime>=? AND start_datetime<=?",
-            (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
-    else:
-        execute("DELETE FROM shifts WHERE shop_id=? AND status IN ('confirmed','modifying','requested') AND start_datetime>=? AND start_datetime<=?",
-                (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
+    # ★【生成前クリア】ドラフト・即確定いずれも、期間内の confirmed(手動除く)/
+    # modifying/requested を全削除してから配置し直す。
+    #
+    # 【重要】スタッフ希望の元 requested 行も削除する。
+    # 希望表管理は wish_history（永久履歴）を参照する設計のため、shifts.requested を
+    # 消しても希望表からは消えない。エンジンは既に wish_history を入力として消費済み
+    # （auto_generate は本削除より前に実行）。
+    # 旧実装は draft 時にスタッフ希望 requested を保持していたため、エンジンが同じ希望を
+    # 'AIドラフト: 希望シフト' として再配置すると同一時間が2件になり、タイムラインで
+    # 過剰配置に見えるバグがあった（元希望 + ドラフトの二重）。ここで統一して全削除する。
+    # 手動配置の confirmed は manual_confirmed に退避済みで、後段で再INSERTする。
+    execute(
+        "DELETE FROM shifts WHERE shop_id=? AND status IN ('confirmed','modifying','requested') "
+        "AND start_datetime>=? AND start_datetime<=?",
+        (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
     # draft モード: confirmed を requested + reason='AIドラフト' で保存（確定通知しない）
     # 即確定モード: confirmed をそのまま保存（従来通り）
     insert_status = "requested" if draft else "confirmed"

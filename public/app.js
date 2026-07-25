@@ -625,14 +625,15 @@ function _computeHourlyGaps(shifts, dayStr, opts) {
     }
   });
   // confirmed シフトで各時間帯の配置人数をカウント（overnight は +24）
-  // 【includeRequested】スタッフ希望(requested, AIドラフト以外)もカバーに含める
+  // 【includeRequested】未確定の requested（スタッフ希望・AIドラフト提案の両方）も
+  // カバーに含める。ドラフト提案はその日の配置案なので、確定前でも「不足」表示から
+  // 除外する（旧: AIドラフトを除外していたため、AIが埋めた枠が確定するまで
+  // 「不足1名」と誤表示されていた）。
   const hourPlaced = {};
   (shifts || []).forEach((s) => {
     const isConfirmed = (s.status === 'confirmed' || s.status === 'modifying');
-    const reason = s.reason || '';
-    const isUserRequest = includeRequested && s.status === 'requested'
-      && !reason.startsWith('AIドラフト') && !reason.startsWith('AI生成');
-    if (!isConfirmed && !isUserRequest) return;
+    const isRequestedCoverage = includeRequested && s.status === 'requested';
+    if (!isConfirmed && !isRequestedCoverage) return;
     const sMin = _extMinFromIso(s.start_datetime, dayStr);
     const eMin = _extMinFromIso(s.end_datetime, dayStr);
     if (isNaN(sMin) || isNaN(eMin)) return;

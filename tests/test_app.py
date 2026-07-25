@@ -685,14 +685,22 @@ class TestShiftEngine:
         # バイトは最低時間(8h)未満なので配置されない
         assert len(pt_placed) == 0
 
-    def test_E_short_request_not_placed(self):
-        """最低時間未満の希望は配置されない（検証E）。"""
+    def test_E_short_timed_wish_is_honored(self):
+        """明示的な時間指定希望は min_daily 未満でも尊重して配置する（検証E・改訂）。
+
+        旧仕様は「最低時間未満の希望は配置しない」だったが、本人が明示的に
+        指定した時間は本人の意思であり、破棄して社員で上乗せ配置すると過剰配置に
+        なる。min_daily はエンジンの裁量的な穴埋めが短すぎないための下限であり、
+        本人希望には適用しない。
+        """
         shop_id = insert_shop(settings={"min_daily_hours": 4})
         insert_pattern(shop_id, "通", "09:00", "18:00", 3)
         pt = insert_staff(shop_id, "P1", "バイト", "part_time", 1100, 0, 160)
-        insert_request(shop_id, pt, MON, "09:00", "11:00")  # 2h = 最低時間未満
+        insert_request(shop_id, pt, MON, "09:00", "11:00")  # 2h = 最低時間未満でも尊重
         res = shift_engine.auto_generate(shop_id, {"min_daily_hours": 4}, MON, MON)
-        assert not any(s["staff_id"] == pt and s["start"][:10] == MON for s in res["confirmed"])
+        assert any(
+            s["staff_id"] == pt and s["start"].endswith("T09:00:00") and s["end"].endswith("T11:00:00")
+            for s in res["confirmed"]), f"希望が配置されていない: {res['confirmed']} / {res['pending']}"
 
     # ---- 検証F: 休憩時間 ----
     def test_F_break_time_rule_all_shifts(self):
