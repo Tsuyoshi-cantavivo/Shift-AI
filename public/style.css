@@ -878,13 +878,13 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 
 /* 不足バー（赤）: タイムライン詳細・印刷ビューで共通 */
 .tl-gap-row { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--rule); }
-.tl-gap-name { color: var(--danger) !important; font-size: .68rem !important; }
+.tl-gap-name { color: var(--alert) !important; font-size: .68rem !important; }
 .tl-gap-bar {
   position: absolute; top: 4px; height: 20px; border-radius: 4px;
-  background: var(--danger); color: #fff;
+  background: var(--alert); color: #fff;
   font-size: .56rem; font-weight: 700; display: flex; align-items: center;
   justify-content: center; padding: 0 2px; overflow: hidden; white-space: nowrap;
-  box-shadow: 0 1px 4px rgba(239,68,68,.4);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--alert) 40%, transparent);
   -webkit-print-color-adjust: exact; print-color-adjust: exact;
   cursor: pointer;
   animation: shortagePulse 2s ease-in-out infinite;
@@ -944,7 +944,7 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .chat-bubble-user { align-self: flex-end; background: var(--ink); color: var(--paper); border-bottom-right-radius: 4px; }
 .chat-bubble-ai { align-self: flex-start; display: flex; gap: 10px; align-items: flex-start; background: var(--paper); border: 1px solid var(--rule); border-bottom-left-radius: 4px; }
 .chat-bubble-warn { align-self: flex-start; display: flex; gap: 10px; align-items: flex-start; background: rgba(245,158,11,.10); border: 1px solid rgba(245,158,11,.45); border-bottom-left-radius: 4px; }
-.chat-bubble-warn .chat-ai-avatar { background: linear-gradient(135deg, #F59E0B, #D97706); }
+.chat-bubble-warn .chat-ai-avatar { background: linear-gradient(135deg, var(--warning), color-mix(in srgb, var(--warning) 70%, black)); }
 .chat-ai-avatar { width: 32px; height: 32px; border-radius: 9px; flex: 0 0 32px; display: flex; align-items: center; justify-content: center; background: var(--success); color: #fff; font-size: .9rem; }
 .chat-ai-text { padding: 12px 4px; flex: 1; min-width: 0; }
 .chat-input-row { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--rule); }
@@ -971,7 +971,7 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .gen-steps { display: flex; flex-direction: column; gap: 12px; }
 .gen-step { display: flex; gap: 12px; align-items: flex-start; opacity: 0; animation: fadeIn var(--dur-slow) var(--ease) forwards; }
 .gen-step-icon { width: 28px; height: 28px; border-radius: 8px; flex: 0 0 28px; display: flex; align-items: center; justify-content: center; font-size: .8rem; background: var(--paper); color: var(--ink-3); }
-.gen-step.active .gen-step-icon { background: var(--success); color: #fff; }
+.gen-step.active .gen-step-icon { background: var(--info); color: #fff; }
 .gen-step.done .gen-step-icon { background: var(--success); color: #fff; }
 .gen-step-text { padding-top: 4px; }
 .gen-step-title { font-weight: 600; font-size: .88rem; }
