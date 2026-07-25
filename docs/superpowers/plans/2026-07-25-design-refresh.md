@@ -369,7 +369,7 @@ git commit -m "feat(design): デザイントークンを配置表の配色に差
 |---|---|
 | `var(--navy)` | `var(--paper)` |
 | `var(--surface)` （旧＝濃色面） | `var(--surface)` （新＝白面。意味が変わるので用途を見て `--paper` か `--surface` を選ぶ） |
-| `var(--card)` / `var(--card-2)` / `var(--card-3)` | `var(--surface)` / `var(--zebra)` / `var(--rule)` |
+| `var(--card)` / `var(--card-2)` / `var(--card-3)` | `var(--surface)` / `var(--paper)` / `var(--rule)` |
 | `var(--t-primary)` | `var(--ink)` |
 | `var(--t-secondary)` | `var(--ink-2)` |
 | `var(--t-muted)` / `var(--t-dim)` | `var(--ink-3)` |
@@ -378,6 +378,8 @@ git commit -m "feat(design): デザイントークンを配置表の配色に差
 | `var(--sh)` / `var(--sh-lg)` | `var(--sh-card)` |
 | `var(--radius-xl)` | `var(--radius-lg)` |
 | `var(--app-bg)` | 削除（グラデーションの地は使わない。`--paper` の単色にする） |
+
+> **`--zebra` は行が横に長い表の交互行にのみ使う。** 設計書の原則「ゼブラを使うのは行が横に長い表（配置帯、スタッフ一覧、希望表、監査ログ）に限る。カード・フォーム・ナビには使わない」に従うこと。上の対応表は機械的な変換の目安であり、この原則に優先しない。ボタン・入力・ナビ・カードでわずかに濃い地が必要な場合は `--paper` を使う。
 
 `body` の `font-family` を `var(--font-ui)` にする。数値を等幅にするクラスがあれば `var(--font-num)` に向ける（現行の `.num` クラスがそれに当たる）。
 
@@ -431,7 +433,7 @@ git commit -m "feat(design): ベース・タイポグラフィ・レイアウト
   border-color: var(--rule);
 }
 .btn-light:hover, .btn-secondary:hover {
-  background: var(--zebra);
+  background: var(--paper);
   color: var(--ink);
   border-color: var(--rule);
 }
@@ -478,7 +480,7 @@ input[type="time"], input[type="number"], input[type="date"], .form-control.num 
   font-family: var(--font-num);
 }
 .input-group-text {
-  background: var(--zebra);
+  background: var(--paper);
   color: var(--ink-3);
   border: 1px solid var(--rule);
   border-radius: var(--radius);
@@ -1011,11 +1013,20 @@ function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-/** 不透明度を落とした色を作る。Chart.js の塗りに使う。 */
+/** 不透明度を落とした色を作る。Chart.js の塗りに使う。
+ *  Chart.js は canvas に描画するため CSS 関数（color-mix 等）を解釈できない。
+ *  トークンの hex を読んで rgba() の文字列に変換する。 */
 function cssVarAlpha(name, alpha) {
-  return `color-mix(in srgb, ${cssVar(name)} ${Math.round(alpha * 100)}%, transparent)`;
+  const hex = cssVar(name).replace('#', '');
+  if (hex.length !== 6) return cssVar(name);   // 想定外の形式ならそのまま返す
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
 }
 ```
+
+**注意:** `color-mix()` を Chart.js に渡してはいけない。CSS 上では有効だが canvas の `fillStyle` は解釈できず、色が既定値（黒）に落ちる。CSS 側で `color-mix()` を使うのは問題ないが、JS から Chart.js に渡す色は必ず `rgba()` か `#rrggbb` の形式にすること。
 
 - [ ] **Step 2: 今日の人員チャート（1622行付近）を差し替える**
 
@@ -1146,7 +1157,7 @@ function gapSummaryText(merged) {
 - [ ] **Step 4: e2e を実行する**
 
 Run: `npx playwright test`
-Expected: 全 PASS。落ちたテストがあれば、セレクタを壊していないか確認する（DOM 構造を変えたのが原因なら、クラス名を元に戻して CSS 側で対応する）。
+Expected: **6 failed / 49 passed**。この6件は刷新の着手前から失敗している既存不具合（`draft_preserves_requests` 2件・`requests_cards` 3件・`timeline_visual:114` 1件）で、今回の変更とは無関係。**7件以上に増えていたら、それが今回の変更による回帰。**その場合はセレクタを壊していないか確認する（DOM 構造を変えたのが原因なら、クラス名を元に戻して CSS 側で対応する）。
 
 - [ ] **Step 5: コミット**
 
@@ -1245,7 +1256,7 @@ Run: `./.venv/bin/python -m pytest tests/ -v`
 Expected: 全 PASS。`tests/test_design_tokens.py` を含む。
 
 Run: `npx playwright test`
-Expected: 全 PASS。
+Expected: **6 failed / 49 passed**（刷新着手前と同じ）。内訳は `draft_preserves_requests` 2件・`requests_cards` 3件・`timeline_visual:114`（印刷画面のドラフト表示）1件。`fast_navigation:45` は flaky でリトライで通る。**これらは刷新とは無関係の既存不具合であり、この計画では直さない。**7件以上に増えていたら回帰なので原因を特定すること。
 
 - [ ] **Step 2: 旧配色が1つも残っていないことを確認する**
 
