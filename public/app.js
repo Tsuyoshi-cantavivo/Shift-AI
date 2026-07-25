@@ -109,6 +109,22 @@ function hm(iso) {
   return `${m[1].padStart(2, '0')}:${m[2]}`;
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+/** CSS変数の現在値を読む。テーマ切替後は値が変わるので、描画のたびに呼ぶこと。 */
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+/** 不透明度を落とした色を作る。Chart.js の塗りに使う。
+ *  Chart.js は canvas に描画するため CSS 関数（color-mix 等）を解釈できない。
+ *  トークンの hex を読んで rgba() の文字列に変換する。 */
+function cssVarAlpha(name, alpha) {
+  const hex = cssVar(name).replace('#', '');
+  if (hex.length !== 6) return cssVar(name);   // 想定外の形式ならそのまま返す
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
 /** スタッフのロールから配置帯・チップの色クラスを決める。
  *  色は staffs.role を表す。寒色＝常勤（店長・社員）、暖色＝非常勤（パート・学生）。
  *  未知の値や欠損は社員扱いにフォールバックする（色が消えるより誤色のほうが害が小さい）。 */
@@ -337,6 +353,9 @@ function applyTheme(t) {
 applyTheme(currentTheme()); // アイコンとmetaを現在テーマに同期
 document.getElementById('themeToggleBtn')?.addEventListener('click', () => {
   applyTheme(currentTheme() === 'light' ? 'dark' : 'light');
+  // チャートは生成時の色を保持するため、テーマが変わったら現在画面を描き直す。
+  // navigateTo() は先頭でチャート破棄（destroy）を行うため、ここでの再破棄は不要。
+  if (typeof navigateTo === 'function' && currentScreen) navigateTo(currentScreen);
 });
 document.getElementById('menuToggle')?.addEventListener('click', () => {
   document.getElementById('sideNav')?.classList.toggle('open');
@@ -1649,8 +1668,8 @@ SCREENS.dashboard = async function (el) {
     const todayCanvas = document.getElementById('todayChart');
     if (todayCanvas) chartInstances.today = new Chart(todayCanvas, {
       type: 'bar',
-      data: { labels: hours.length ? hours : ['データなし'], datasets: [{ label: '人数', data: counts.length ? counts : [0], backgroundColor: 'rgba(99,102,241,.6)', borderRadius: 6 }] },
-      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { color: '#64748B' }, grid: { color: 'rgba(148,163,184,.1)' } }, x: { ticks: { color: '#64748B' }, grid: { display: false } } } }
+      data: { labels: hours.length ? hours : ['データなし'], datasets: [{ label: '人数', data: counts.length ? counts : [0], backgroundColor: cssVarAlpha('--role-employee', .9), borderRadius: 6 }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { color: cssVar('--ink-3') }, grid: { color: cssVar('--rule') } }, x: { ticks: { color: cssVar('--ink-3') }, grid: { display: false } } } }
     });
 
     // Cost chart
@@ -1658,8 +1677,8 @@ SCREENS.dashboard = async function (el) {
     const costCanvas = document.getElementById('costChart');
     if (costCanvas) chartInstances.cost = new Chart(costCanvas, {
       type: 'line',
-      data: { labels: costData.map((c) => c.date.slice(5)), datasets: [{ label: '人件費(円)', data: costData.map((c) => c.cost), borderColor: '#6366F1', backgroundColor: 'rgba(99,102,241,.1)', fill: true, tension: .3, pointRadius: 0 }] },
-      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { ticks: { color: '#64748B', callback: (v) => '¥' + (v / 1000) + 'K' }, grid: { color: 'rgba(148,163,184,.1)' } }, x: { ticks: { color: '#64748B', maxTicksLimit: 8 }, grid: { display: false } } } }
+      data: { labels: costData.map((c) => c.date.slice(5)), datasets: [{ label: '人件費(円)', data: costData.map((c) => c.cost), borderColor: cssVar('--info'), backgroundColor: cssVarAlpha('--info', .12), fill: true, tension: .3, pointRadius: 0 }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { ticks: { color: cssVar('--ink-3'), callback: (v) => '¥' + (v / 1000) + 'K' }, grid: { color: cssVar('--rule') } }, x: { ticks: { color: cssVar('--ink-3'), maxTicksLimit: 8 }, grid: { display: false } } } }
     });
 
     // Right: AI suggestion + notifications + quick actions
@@ -2744,18 +2763,18 @@ SCREENS.analytics = async function (el) {
     const costData = d.daily_cost_series || [];
     chartInstances.anaCost = new Chart(document.getElementById('anaCost'), {
       type: 'bar',
-      data: { labels: costData.map((c) => c.date.slice(5)), datasets: [{ label: '人件費', data: costData.map((c) => c.cost), backgroundColor: 'rgba(99,102,241,.6)', borderRadius: 4 }] },
-      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { ticks: { color: '#64748B', callback: (v) => '¥' + (v / 1000) + 'K' }, grid: { color: 'rgba(148,163,184,.1)' } }, x: { ticks: { color: '#64748B', maxTicksLimit: 10 }, grid: { display: false } } } }
+      data: { labels: costData.map((c) => c.date.slice(5)), datasets: [{ label: '人件費', data: costData.map((c) => c.cost), backgroundColor: cssVarAlpha('--info', .75), borderRadius: 4 }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { ticks: { color: cssVar('--ink-3'), callback: (v) => '¥' + (v / 1000) + 'K' }, grid: { color: cssVar('--rule') } }, x: { ticks: { color: cssVar('--ink-3'), maxTicksLimit: 10 }, grid: { display: false } } } }
     });
 
-    // Staff distribution
+    // Staff distribution（配置帯と同じロール色で色分け）
     const staffData = (sum.staff || []).slice().sort((a, b) => b.projected_hours - a.projected_hours).slice(0, 8);
     document.getElementById('anaRight').innerHTML = card(sectionTitle('bi-bar-chart', 'スタッフ別労働時間') +
       `<div class="chart-box"><canvas id="anaStaff"></canvas></div>`);
     chartInstances.anaStaff = new Chart(document.getElementById('anaStaff'), {
       type: 'bar',
-      data: { labels: staffData.map((s) => s.name), datasets: [{ label: '時間', data: staffData.map((s) => s.projected_hours), backgroundColor: staffData.map((s) => s.role === 'employee' ? 'rgba(16,185,129,.6)' : 'rgba(99,102,241,.6)'), borderRadius: 4 }] },
-      options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { ticks: { color: '#64748B' }, grid: { display: false } }, x: { ticks: { color: '#64748B' }, grid: { color: 'rgba(148,163,184,.1)' } } } }
+      data: { labels: staffData.map((s) => s.name), datasets: [{ label: '時間', data: staffData.map((s) => s.projected_hours), backgroundColor: staffData.map((s) => cssVarAlpha('--' + roleClass(s.role), .75)), borderRadius: 4 }] },
+      options: { indexAxis: 'y', responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { ticks: { color: cssVar('--ink-3') }, grid: { display: false } }, x: { ticks: { color: cssVar('--ink-3') }, grid: { color: cssVar('--rule') } } } }
     });
 
     // AI advice
