@@ -38,11 +38,21 @@
   --role-student:        #F2DADD;  /* 桜・非常勤 */
   --role-student-ink:    #4A2A2E;
 
-  /* 意味色（要対応以外。和色の系統に合わせて彩度を落とす） */
+  /* 意味色（面・文字の両方に使う。和色の系統に合わせて彩度を落とす）。
+     --warning は #B8862B だと紙の上で 3.10:1 しか出ず、白抜き文字も 3.24:1 で
+     AA を割っていたため #8F6718 に沈めた（白抜き 5.10:1 / 紙の上 4.88:1）。 */
   --success:     #4A7C59;
-  --warning:     #B8862B;
+  --warning:     #8F6718;
   --danger:      #B14A35;
   --info:        #4A6785;
+
+  /* 意味色の「面上の文字」。ロール色の --role-*-ink と同じ考え方で、
+     地（--surface / 薄い色地）から離す方向に --ink を 30% 混ぜた確定値。
+     ライトでは沈み、ダークでは浮くので、同じ配合で両テーマとも AA を満たす。 */
+  --success-ink: #3F6652;
+  --warning-ink: #6F5724;
+  --danger-ink:  #874338;
+  --info-ink:    #3F5770;
 
   /* 書体 */
   --font-ui:     'Zen Kaku Gothic New', system-ui, -apple-system, sans-serif;
@@ -108,6 +118,11 @@ html[data-theme="dark"] {
   --danger:      #D97757;
   --info:        #8AA8C8;
 
+  --success-ink: #A2C4AA;
+  --warning-ink: #E1C78A;
+  --danger-ink:  #E19C85;
+  --info-ink:    #AABFD4;
+
   --sh-card:     0 1px 2px rgba(0,0,0,.30), 0 8px 24px rgba(0,0,0,.36);
   --sh-modal:    0 12px 40px rgba(0,0,0,.50);
 
@@ -142,6 +157,10 @@ body { min-height: 100vh; }
 a { color: var(--info); text-decoration: none; }
 a:hover { color: var(--ink); }
 
+/* Bootstrap の hr は border-color を currentColor に頼り opacity:.25 を掛けるため、
+   --rule を当てても設計した罫色にならない（ほぼ消える）。区切り罫は --rule で描く。 */
+hr { border: 0; border-top: 1px solid var(--rule); opacity: 1; }
+
 input, textarea, select { -webkit-user-select: text; user-select: text; }
 
 /* ---------- 3. Typography ---------- */
@@ -151,6 +170,11 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
 .text-success { color: var(--success) !important; }
 .text-warning { color: var(--warning) !important; }
 .text-danger { color: var(--danger) !important; }
+/* app.js が使う .text-info / .text-primary を上書きしないと Bootstrap 既定の
+   #0DCAF0 / #0D6EFD がそのまま出る。紙の上で 1.88:1 しか無いうえ、
+   刷新で全廃したはずの AI SaaS 系の色がここだけ残ることになる。 */
+.text-info { color: var(--info) !important; }
+.text-primary { color: var(--info) !important; }
 .text-indigo { color: var(--info) !important; }
 .text-ai { color: var(--success) !important; }
 .small, .text-sm { font-size: .82rem; }
@@ -216,7 +240,9 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
 }
 .side-item:hover { background: var(--paper); color: var(--ink); }
 .side-item.active { color: var(--ink); box-shadow: inset 2px 0 0 var(--ink); }
-.side-item.active .side-item-icon { background: var(--ink); color: #fff; }
+/* 意味色・--ink の上の抜き文字は #fff ではなく --paper。--paper はライトで明・
+   ダークで暗と反転するので、両テーマで地から離れる（#fff はダークで地と同化する）。 */
+.side-item.active .side-item-icon { background: var(--ink); color: var(--paper); }
 .side-item-icon {
   width: 30px; height: 30px; border-radius: 8px; flex: 0 0 30px;
   display: flex; align-items: center; justify-content: center;
@@ -225,7 +251,7 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
 }
 .side-item-badge {
   margin-left: auto; font-size: .68rem; font-weight: 700;
-  background: var(--alert); color: #fff; padding: 2px 7px; border-radius: 10px;
+  background: var(--alert); color: var(--paper); padding: 2px 7px; border-radius: 10px;
 }
 .side-footer {
   margin-top: auto; padding: 12px 8px 4px;
@@ -491,19 +517,24 @@ input[type="time"], input[type="number"], input[type="date"], .form-control.num 
   border-radius: var(--radius-xs);
   padding: .2em .5em;
 }
-.badge.bg-success { background: color-mix(in srgb, var(--success) 22%, var(--surface)) !important; color: var(--success) !important; }
-.badge.bg-warning { background: color-mix(in srgb, var(--warning) 22%, var(--surface)) !important; color: var(--warning) !important; }
-.badge.bg-danger  { background: color-mix(in srgb, var(--alert) 18%, var(--surface)) !important; color: var(--alert) !important; }
-.badge.bg-info    { background: color-mix(in srgb, var(--info) 22%, var(--surface)) !important; color: var(--info) !important; }
+/* 意味色の薄い地に意味色の文字を載せる形。地の配合を 22%/18% から 14% に薄め、
+   文字を --*-ink（意味色に --ink を 30%）にしたことで、8組すべて両テーマで AA を満たす。
+   旧値では地が濃すぎ、例えば .badge-soft.warning がライトで 2.57:1 しか無かった。 */
+.badge.bg-success { background: color-mix(in srgb, var(--success) 14%, var(--surface)) !important; color: var(--success-ink) !important; }
+.badge.bg-warning { background: color-mix(in srgb, var(--warning) 14%, var(--surface)) !important; color: var(--warning-ink) !important; }
+.badge.bg-danger  { background: color-mix(in srgb, var(--danger) 14%, var(--surface)) !important; color: var(--danger-ink) !important; }
+.badge.bg-info    { background: color-mix(in srgb, var(--info) 14%, var(--surface)) !important; color: var(--info-ink) !important; }
 
 .badge-soft { font-weight: 600; border-radius: 6px; padding: 2px 8px; font-size: .72rem; display: inline-block; }
-.badge-soft.success { background: color-mix(in srgb, var(--success) 22%, var(--surface)); color: var(--success); }
-.badge-soft.warning { background: color-mix(in srgb, var(--warning) 22%, var(--surface)); color: var(--warning); }
-.badge-soft.info    { background: color-mix(in srgb, var(--info) 22%, var(--surface)); color: var(--info); }
-.badge-soft.muted   { background: var(--paper); color: var(--ink-3); border: 1px solid var(--rule); }
-.badge-soft.danger  { background: color-mix(in srgb, var(--danger) 18%, var(--surface)); color: var(--danger); }
+.badge-soft.success { background: color-mix(in srgb, var(--success) 14%, var(--surface)); color: var(--success-ink); }
+.badge-soft.warning { background: color-mix(in srgb, var(--warning) 14%, var(--surface)); color: var(--warning-ink); }
+.badge-soft.info    { background: color-mix(in srgb, var(--info) 14%, var(--surface)); color: var(--info-ink); }
+/* --ink-3 は「補助文字・軸の目盛り」用で紙の上 3.64:1。ラベルとして読ませるバッジには
+   足りないため --ink-2（5.74:1 / 7.32:1）を使う */
+.badge-soft.muted   { background: var(--paper); color: var(--ink-2); border: 1px solid var(--rule); }
+.badge-soft.danger  { background: color-mix(in srgb, var(--danger) 14%, var(--surface)); color: var(--danger-ink); }
 /* .ai 用の専用色は新トークンに無いため --success を割り当て（.badge-soft.success と同じ見た目になる。暫定・懸念に記載） */
-.badge-soft.ai      { background: color-mix(in srgb, var(--success) 22%, var(--surface)); color: var(--success); }
+.badge-soft.ai      { background: color-mix(in srgb, var(--success) 14%, var(--surface)); color: var(--success-ink); }
 
 .stat-pill {
   display: inline-flex; align-items: center; gap: 6px;
@@ -748,12 +779,12 @@ td.num, th.num, td .num { font-family: var(--font-num); }
 .cal-chips { display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
 .chip {
   font-size: .56rem; font-weight: 600; padding: 1px 3px; border-radius: 4px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--paper);
 }
 .chip.count   { background: var(--rule); color: var(--ink); text-align: center; }
 .chip.chip-pending { opacity: .72; border: 1.5px dashed rgba(255,255,255,.65); background: transparent !important; color: var(--ink-2); font-style: italic; }
 html[data-theme="light"] .chip.chip-pending { border-color: color-mix(in srgb, var(--ink) 45%, transparent); color: var(--ink-2); }
-.cal-pending-badge { display: inline-block; margin-left: 4px; min-width: 14px; height: 14px; padding: 0 4px; border-radius: 7px; background: var(--warning); color: #fff; font-size: 9px; font-weight: 800; line-height: 14px; text-align: center; vertical-align: middle; }
+.cal-pending-badge { display: inline-block; margin-left: 4px; min-width: 14px; height: 14px; padding: 0 4px; border-radius: 7px; background: var(--warning); color: var(--paper); font-size: 9px; font-weight: 800; line-height: 14px; text-align: center; vertical-align: middle; }
 
 .cal-hint { font-size: .68rem; color: var(--ink-3); text-align: center; margin-bottom: 8px; }
 
@@ -767,14 +798,8 @@ html[data-theme="light"] .chip.chip-pending { border-color: color-mix(in srgb, v
 .shift-line .time { font-weight: 700; font-size: .9rem; }
 .shift-line .who { font-size: .78rem; color: var(--ink-3); }
 
-/* AIドラフト状態のバー（タイムライン/印刷）— 確定と視覚的に区別 */
-.tl-bar.tl-bar-draft {
-  opacity: 0.75;
-  border: 2px dashed rgba(255, 255, 255, 0.7);
-}
-[data-theme="light"] .tl-bar.tl-bar-draft {
-  border-color: rgba(0, 0, 0, 0.4);
-}
+/* AIドラフトの見た目は「状態の質感」ブロック（20章末尾）にまとめてある。
+   .tl-bar-draft は必ず .tl-st-requested と同居するため、ここに書くと後勝ちで死ぬ。 */
 .tl-bar-draft[data-draft-editable="true"] {
   cursor: grab;
   touch-action: pan-y;
@@ -819,15 +844,36 @@ html[data-theme="light"] .chip.chip-pending { border-color: color-mix(in srgb, v
 /* ---------- 20. Timeline (Gantt) ---------- */
 .tl-wrap { padding: 2px 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .tl-axis-row { display: flex; align-items: flex-end; margin-bottom: 4px; min-width: 480px; }
-/* .tl-name は名前＋ロールバッジの2要素を横並びにする。名前側だけ省略記号で切り詰め、
-   バッジは常に全文字を表示する（バッジが省略記号に巻き込まれるとロールが読めなくなるため）。 */
+/* .tl-name は名前＋ロールバッジの2要素を持つ。
+   横並びにすると 58px をバッジ（店長21.6px / パート29.4px）と分け合う形になり、
+   名前に残るのは 21〜28px＝実測1文字。名簿として用をなさないため縦に積む。
+   スタッフ一覧の .staff-cell（名前メイン・役割サブ）と同じ構えで、行の高さ（32px）に
+   10.2px＋7.8px の2行が収まるので、配置帯の幅を1pxも削らずにロール名を併記できる。 */
 .tl-name {
   width: 58px; flex: 0 0 58px; font-size: .68rem; color: var(--ink-2);
-  display: flex; align-items: center; min-width: 0; padding-left: 4px;
+  display: flex; flex-direction: column; align-items: flex-start; justify-content: center;
+  gap: 1px; line-height: 1.15; min-width: 0; padding-left: 4px; overflow: hidden;
 }
-.tl-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; }
-.tl-axis { flex: 1 1 auto; display: flex; min-width: 0; height: 10px; }
+.tl-name-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 100%; }
+.tl-axis { flex: 1 1 auto; display: flex; min-width: 0; height: 10px; position: relative; }
 .tl-hour { flex: 1 1 0; font-size: .5rem; font-family: var(--font-num); color: var(--ink-3); text-align: left; border-left: 1px solid var(--rule); padding-left: 1px; }
+/* 目盛りは minH..maxH の N+1 個を出しているが、トラックのグリッドとバーの位置は
+   N 分割（--tl-hours = maxH - minH）で計算される。N+1 個を等分すると k 番目の目盛りが
+   k/(N+1) に立ち、それが指す時刻の k/N とずれる（営業9-22時で右端 約7% ＝ 実測 9.5px
+   ≒ 1時間分）。刷新前からある算術だが、トラックが単色だったため見えていなかった。
+
+   最後の1個（閉店時刻）を絶対配置でフローから抜くと、残り N 個がぴったり等分され、
+   全目盛りが k/N に載る（実測ずれ 0.00px）。閉店時刻の目盛りは、抜いた側の
+   border-right が軸の右端に立つことで保たれる。
+   ※ flex:0 0 0 で潰す案は不可: min-width の既定 auto で文字幅が残るうえ、
+     min-width:0 まで足してもラベルが右へはみ出して横スクロールバーが出る。
+     direction:rtl で左へ逃がす案も不可: bidi で "(翌)02" が "02(翌)" に並び替わる。 */
+.tl-hour:last-child {
+  position: absolute; right: 0; top: 0; bottom: 0;
+  border-left: none; border-right: 1px solid var(--rule);
+  padding-left: 0; padding-right: 2px;
+  text-align: right; white-space: nowrap;
+}
 .tl-hour-next { color: var(--daybreak); font-weight: 700; }
 .tl-row { display: flex; align-items: center; min-width: 480px; }
 /* 横に長いので行をゼブラで分ける。横罫は引かない（縦線と交差して格子になる） */
@@ -884,13 +930,14 @@ html[data-theme="light"] .chip.chip-pending { border-color: color-mix(in srgb, v
 .chip.role-part-time, .dot.role-part-time, .tl-bar.role-part-time, .tl-role-badge.role-part-time { background: var(--role-part-time); color: var(--role-part-time-ink); }
 .chip.role-student,   .dot.role-student,   .tl-bar.role-student,   .tl-role-badge.role-student   { background: var(--role-student);   color: var(--role-student-ink); }
 
-/* 配置帯の名前横に出すロールバッジ。狭いスペースでもロールが判別できるように
+/* 配置帯の名前の下に出すロールバッジ。狭いスペースでもロールが判別できるように
    （印刷はロール色が淡いため、モノクロ印刷では文字だけが頼り）。
    色は上の .role-* ルールから継承（.tl-role-badge.role-* として同居）。 */
 .tl-role-badge {
-  display: inline-block; flex-shrink: 0; margin-left: 4px; padding: 0 3px;
+  display: inline-block; flex-shrink: 0; padding: 0 3px;
   border-radius: var(--radius-xs);
-  font-size: .52rem; font-weight: 700; vertical-align: 1px;
+  font-size: .52rem; font-weight: 700; line-height: 1.35;
+  max-width: 100%; overflow: hidden; white-space: nowrap;
 }
 
 /* 状態は色ではなく質感で表す（色はロールが担っているため） */
@@ -906,6 +953,21 @@ html[data-theme="light"] .chip.chip-pending { border-color: color-mix(in srgb, v
 html[data-theme="dark"] .tl-bar.tl-st-modifying {
   background-image: repeating-linear-gradient(45deg,
     rgba(255,255,255,.22) 0 4px, transparent 4px 8px);
+}
+
+/* AIドラフト（第4の質感）。
+   AIドラフトは shifts.status='requested' で保存されるため .tl-st-requested が必ず同居する。
+   同じ詳細度(0,2,0)では後勝ちになるので、状態ブロックの後ろに、かつ両クラスを併記した
+   詳細度(0,3,0)で書く。ここを動かすときは .tl-st-requested との前後関係を必ず確認すること。
+
+   表現の意図: 申請中＝「人が出した控えめな打診」なので淡く沈める。
+   AIドラフト＝「機械が置いた仮の配置で、店長がこれから読んで判断する対象」なので、
+   ・地は読める濃さまで戻す（opacity .55 → .8）
+   ・枠は 1px→2px の太い破線にして「仮」であることを残す
+   太さの差はモノクロ印刷でも残り、opacity の差だけに頼らない。 */
+.tl-bar.tl-bar-draft.tl-st-requested {
+  opacity: .8;
+  border: 2px dashed color-mix(in srgb, var(--ink) 70%, transparent);
 }
 
 .tl-legend { display: flex; gap: 10px; font-size: .66rem; color: var(--ink-2); margin-top: 6px; flex-wrap: wrap; }
@@ -927,7 +989,7 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .tl-gap-name { color: var(--alert) !important; font-size: .68rem !important; }
 .tl-gap-bar {
   position: absolute; top: 4px; height: 20px; border-radius: 4px;
-  background: var(--alert); color: #fff;
+  background: var(--alert); color: var(--paper);
   font-size: .56rem; font-weight: 700; display: flex; align-items: center;
   justify-content: center; padding: 0 2px; overflow: hidden; white-space: nowrap;
   box-shadow: 0 1px 4px color-mix(in srgb, var(--alert) 40%, transparent);
@@ -941,7 +1003,7 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 /* ---------- 21. Shortage ---------- */
 .shortage-chip {
   display: inline-flex; align-items: center; gap: 5px;
-  background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger-ink);
   border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-radius: 8px;
   padding: 5px 10px; font-size: .74rem; font-weight: 700; margin: 0 5px 5px 0;
 }
@@ -991,8 +1053,9 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .chat-bubble-user { align-self: flex-end; background: var(--ink); color: var(--paper); border-bottom-right-radius: 4px; }
 .chat-bubble-ai { align-self: flex-start; display: flex; gap: 10px; align-items: flex-start; background: var(--paper); border: 1px solid var(--rule); border-bottom-left-radius: 4px; }
 .chat-bubble-warn { align-self: flex-start; display: flex; gap: 10px; align-items: flex-start; background: color-mix(in srgb, var(--warning) 10%, transparent); border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent); border-bottom-left-radius: 4px; }
-.chat-bubble-warn .chat-ai-avatar { background: linear-gradient(135deg, var(--warning), color-mix(in srgb, var(--warning) 70%, black)); }
-.chat-ai-avatar { width: 32px; height: 32px; border-radius: 9px; flex: 0 0 32px; display: flex; align-items: center; justify-content: center; background: var(--success); color: #fff; font-size: .9rem; }
+/* グラデーションは刷新で全廃した表現。暗端 (#987E42) が --paper と 3.90:1 で AA を割るためベタ塗りに戻す */
+.chat-bubble-warn .chat-ai-avatar { background: var(--warning); }
+.chat-ai-avatar { width: 32px; height: 32px; border-radius: 9px; flex: 0 0 32px; display: flex; align-items: center; justify-content: center; background: var(--success); color: var(--paper); font-size: .9rem; }
 .chat-ai-text { padding: 12px 4px; flex: 1; min-width: 0; }
 .chat-input-row { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--rule); }
 .chat-input { flex: 1; resize: none; min-height: 44px; max-height: 120px; border-radius: var(--radius) !important; }
@@ -1018,8 +1081,8 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .gen-steps { display: flex; flex-direction: column; gap: 12px; }
 .gen-step { display: flex; gap: 12px; align-items: flex-start; opacity: 0; animation: fadeIn var(--dur-slow) var(--ease) forwards; }
 .gen-step-icon { width: 28px; height: 28px; border-radius: 8px; flex: 0 0 28px; display: flex; align-items: center; justify-content: center; font-size: .8rem; background: var(--paper); color: var(--ink-3); }
-.gen-step.active .gen-step-icon { background: var(--info); color: #fff; }
-.gen-step.done .gen-step-icon { background: var(--success); color: #fff; }
+.gen-step.active .gen-step-icon { background: var(--info); color: var(--paper); }
+.gen-step.done .gen-step-icon { background: var(--success); color: var(--paper); }
 .gen-step-text { padding-top: 4px; }
 .gen-step-title { font-weight: 600; font-size: .88rem; }
 .gen-step-desc { font-size: .76rem; color: var(--ink-3); margin-top: 2px; }
@@ -1031,10 +1094,10 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
   border-radius: var(--radius); animation: slideUp var(--dur) var(--ease);
 }
 .explanation-item .ei-icon { width: 28px; height: 28px; border-radius: 8px; flex: 0 0 28px; display: flex; align-items: center; justify-content: center; font-size: .85rem; }
-.ei-icon.success { background: color-mix(in srgb, var(--success) 15%, var(--surface)); color: var(--success); }
-.ei-icon.info    { background: color-mix(in srgb, var(--info) 15%, var(--surface)); color: var(--info); }
-.ei-icon.warning { background: color-mix(in srgb, var(--warning) 15%, var(--surface)); color: var(--warning); }
-.ei-icon.ai      { background: color-mix(in srgb, var(--success) 15%, var(--surface)); color: var(--success); }
+.ei-icon.success { background: color-mix(in srgb, var(--success) 14%, var(--surface)); color: var(--success-ink); }
+.ei-icon.info    { background: color-mix(in srgb, var(--info) 14%, var(--surface)); color: var(--info-ink); }
+.ei-icon.warning { background: color-mix(in srgb, var(--warning) 14%, var(--surface)); color: var(--warning-ink); }
+.ei-icon.ai      { background: color-mix(in srgb, var(--success) 14%, var(--surface)); color: var(--success-ink); }
 .ei-text { font-size: .86rem; line-height: 1.5; }
 
 /* ---------- 26. Wish calendar (staff) ---------- */
@@ -1044,7 +1107,9 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .wish-cell.disabled { opacity: .35; cursor: not-allowed; }
 .wish-cell .wd { font-size: .66rem; font-weight: 700; }
 .wish-cell .wmark { font-size: .56rem; font-weight: 700; padding: 2px 3px; border-radius: 5px; text-align: center; color: var(--paper); margin-top: auto; }
-.wmark.any{background:var(--info);} .wmark.morning{background:var(--warning); color: color-mix(in srgb, var(--warning) 25%, black);} .wmark.evening{background:var(--info);} .wmark.rest{background:var(--ink-2);} .wmark.time{background:var(--success);}
+/* --warning を #8F6718 に沈めたことで morning も --paper で 4.88:1 出るようになり、
+   morning だけ文字色を特例にする必要が無くなった（5種とも --paper に統一）。 */
+.wmark.any{background:var(--info);} .wmark.morning{background:var(--warning);} .wmark.evening{background:var(--info);} .wmark.rest{background:var(--ink-2);} .wmark.time{background:var(--success);}
 
 /* ---------- 27. Preview grid ---------- */
 .preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
@@ -1168,14 +1233,29 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
     font-size: 9px; color: #444; font-weight: 700;
     border-left: 1px solid #BBB; padding-left: 2px;
   }
+  /* 上の .print-page .tl-hour と .tl-hour:last-child は詳細度が同じ(0,2,0)で、
+     後に書かれた印刷側が border-left / padding-left を取り戻してしまう。
+     フローから抜いた最終セルの体裁を保つため詳細度(0,3,0)で打ち消す。 */
+  .print-page .tl-hour:last-child {
+    border-left: none; border-right: 1px solid #BBB;
+    padding-left: 0; padding-right: 2px;
+  }
   .print-page .tl-row { margin-bottom: 8px; }
+  /* 地色は background-color で指定する。ショートハンドの background を使うと
+     .tl-track の background-image（1h/4hグリッド）まで none に落ちて、
+     配置帯のシグネチャである1時間グリッドが紙から丸ごと消える。
+     print-color-adjust:exact が無いとブラウザの「背景グラフィック」設定で同様に落ちる。 */
   .print-page .tl-track {
-    height: 32px; background: #F5F3EC !important;
+    height: 32px; background-color: #F5F3EC !important;
     border: 1px solid #999; border-radius: 4px;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+    /* 紙は透過光ではなく反射光なので、画面と同じ淡さでは線が読めない。
+       グリッドは既存トークンの一段濃い値（1h←--grid-4h相当 / 4h←--daybreak相当）にする。 */
+    --grid-1h: #DCD6C4; --grid-4h: #B9AF98;
   }
   .print-page .tl-bar {
     top: 3px; height: 26px; border-radius: 4px;
-    color: #fff !important; font-size: 10px; font-weight: 700;
+    font-size: 10px; font-weight: 700;
     box-shadow: none; border: 1px solid rgba(0,0,0,.25);
     /* 印刷で背景色が消えるのを防止 */
     -webkit-print-color-adjust: exact; print-color-adjust: exact;
@@ -1207,7 +1287,8 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
   .print-page .tl-legend i.lg-role-employee  { background: #C9DFE0 !important; }
   .print-page .tl-legend i.lg-role-part-time { background: #F3DFA4 !important; }
   .print-page .tl-legend i.lg-role-student   { background: #F2DADD !important; }
-  .print-page .tl-legend i.lg-alert          { background: rgba(199,90,71,.18) !important; border-color: #B14A35 !important; }
+  /* --alert (#B14A35 = rgb(177,74,53)) と同じ色相で揃える。画面側 :root の --alert-fill と同値。 */
+  .print-page .tl-legend i.lg-alert          { background: rgba(177,74,53,.18) !important; border-color: #B14A35 !important; }
 
   .print-empty { padding: 24px; text-align: center; color: #888; font-size: 13px; border: 1px dashed #BBB; border-radius: 6px; }
 

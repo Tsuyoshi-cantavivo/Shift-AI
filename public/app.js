@@ -1200,7 +1200,8 @@ function openDayTimeline(date, allShifts, editable, onChange) {
   const list = (allShifts || []).filter((s) => s.start_datetime.slice(0, 10) === date)
     .sort((a, b) => a.start_datetime.localeCompare(b.start_datetime));
   const order = []; const staffMap = {};
-  list.forEach((s) => { if (!staffMap[s.staff_id]) { staffMap[s.staff_id] = { name: s.staff_name || ('#' + s.staff_id), shifts: [] }; order.push(s.staff_id); } staffMap[s.staff_id].shifts.push(s); });
+  // role も保持する。設計書 §3「色だけに依存しない」に従い、名前の下にロールバッジを併記するため。
+  list.forEach((s) => { if (!staffMap[s.staff_id]) { staffMap[s.staff_id] = { name: s.staff_name || ('#' + s.staff_id), role: s.staff_role, shifts: [] }; order.push(s.staff_id); } staffMap[s.staff_id].shifts.push(s); });
   // 時間軸は「営業時間」をベースにし、シフトが営業時間外にはみ出す場合のみ拡張。
   // これにより「シフトが無い時間帯が消える」「日によって軸が変わる」を防ぐ。
   // 【日またぎ】anchor=date で拡張分計算。翌日へ延びるシフトは +1440 分で計算。
@@ -1271,7 +1272,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
       const handles = editable && isDraft ? '<span class="tl-drag-handle tl-drag-handle-start" aria-hidden="true"></span><span class="tl-drag-handle tl-drag-handle-end" aria-hidden="true"></span>' : '';
       return `<div class="tl-bar ${roleClass(s.staff_role)} ${statusClass(s.status)}${contCls}${draftCls}${overCapCls}" data-id="${s.id}"${dragAttrs} title="${continued ? '前日から継続: ' : ''}${hm(s.start_datetime)}-${hm(s.end_datetime)}${isDraft ? '（ドラフト・直接調整可）' : ''}${overCapTitle}${noteTitle}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${handles}${overCapMark}<span class="tl-bar-label">${lbl}</span></div>`;
     }).join('');
-    return `<div class="tl-row" data-staff-id="${sid}" data-staff-name="${esc(st.name)}"><div class="tl-name"><span class="tl-name-text">${esc(st.name)}</span></div><div class="tl-track" data-staff-id="${sid}" style="${trackVars}" title="${editable ? '空き部分をクリックで追加' : ''}">${bars}</div></div>`;
+    return `<div class="tl-row" data-staff-id="${sid}" data-staff-name="${esc(st.name)}"><div class="tl-name"><span class="tl-name-text">${esc(st.name)}</span><span class="tl-role-badge ${roleClass(st.role)}">${roleBadgeLabel(st.role)}</span></div><div class="tl-track" data-staff-id="${sid}" style="${trackVars}" title="${editable ? '空き部分をクリックで追加' : ''}">${bars}</div></div>`;
   }).join('');
 
   // 時間帯別不足バー（赤で視覚化）
@@ -2016,7 +2017,7 @@ SCREENS.shifts = function (el) {
       if (!d.staff.length) { box.innerHTML = '<div class="text-muted small">確定シフトがありません</div>'; return; }
       box.innerHTML = `<div class="table-wrap"><table class="data-table"><thead><tr><th>氏名</th><th>日</th><th class="t-num">確定</th><th class="t-num">見込</th><th class="t-num">深夜</th><th class="t-num">給与</th></tr></thead>
         <tbody>${d.staff.map((s) => `<tr><td><div class="staff-cell"><span class="staff-name">${esc(s.name)}</span><span class="staff-sub">${roleLabel(s.role)}</span></div></td><td>${s.days}</td><td class="t-num num">${s.confirmed_hours}h</td><td class="t-num num">${s.projected_hours}h</td><td class="t-num num">${s.night_hours}h</td><td class="t-num num">${yen(s.pay)}</td></tr>`).join('')}
-        <tr style="font-weight:800;color:var(--indigo-l)"><td>合計</td><td></td><td class="t-num num">${d.total_hours}h</td><td class="t-num num">${d.total_projected_hours}h</td><td></td><td class="t-num num">${yen(d.total_pay)}</td></tr>
+        <tr style="font-weight:800;color:var(--ink)"><td>合計</td><td></td><td class="t-num num">${d.total_hours}h</td><td class="t-num num">${d.total_projected_hours}h</td><td></td><td class="t-num num">${yen(d.total_pay)}</td></tr>
         </tbody></table></div>`;
     } catch (e) {
       if (!isAlive(tok) || !box.isConnected) return;
@@ -2955,7 +2956,7 @@ async function loadShiftHours(body) {
       <div class="section-title mb-2"><i class="bi bi-calendar3"></i> 曜日別設定</div>
       ${SHIFT_HOUR_DAYS.map((d) => renderShiftHourRow(d.label, 'day_' + d.key, merged.days[d.key], false)).join('')}
     </div>
-    <hr style="border-color:var(--line);margin:16px 0">
+    <hr style="border-color:var(--rule);margin:16px 0">
     <div class="section-title mb-2"><i class="bi bi-calendar-x"></i> 祝日・特別休業日</div>
     <p class="small text-secondary mb-2">上記「祝日」設定を適用する日付を登録します。<strong>日本の祝日</strong>は自動取り込み可能です（特別休業日は手動で追加してください）。</p>
     <div class="flex gap-2 mb-2 flex-wrap">
@@ -3240,7 +3241,7 @@ function renderShopTab(body) {
     body.innerHTML = card(sectionTitle('bi-shop', '店舗情報') +
       `<label class="form-label" for="setShopName">店舗名</label><input id="setShopName" class="form-control mb-2" value="${esc(d.shop_name)}">
        <label class="form-label" for="setShopCode">店舗コード</label><input id="setShopCode" class="form-control mb-3" value="${esc(d.shop_code)}" disabled>
-       <hr style="border-color:var(--line);margin:16px 0">
+       <hr style="border-color:var(--rule);margin:16px 0">
        ${sectionTitle('bi-gear', '運用設定')}
        <div class="row">
          <div class="col-6"><label class="form-label" for="setWage">デフォルト時給(円)</label><input id="setWage" type="number" class="form-control" value="${s.default_hourly_wage ?? 1000}"></div>
@@ -3475,7 +3476,7 @@ SCREENS.request = async function (el) {
       <div class="small text-muted mt-2">日付をタップして希望を選択。募集期間内の日付のみ選択できます。</div>
       <button class="btn btn-primary btn-lg w-full mt-3" id="submitWish" ${wishPeriod ? '' : 'disabled'}><i class="bi bi-send"></i> 希望を提出</button>
       <div id="wishResult" class="mt-2"></div>
-      <hr style="border-color:var(--line);margin:16px 0">
+      <hr style="border-color:var(--rule);margin:16px 0">
       ${sectionTitle('bi-clock-history', '提出済みの希望（調整待ち）')}<div id="myReqs"></div>`);
   function drawWish() {
     document.getElementById('wTitle').textContent = `${wishMonth.y}年 ${wishMonth.m + 1}月`;
@@ -3722,7 +3723,7 @@ SCREENS.adminShops = async function (el) {
       `<p class="small text-secondary mb-3">店舗情報と、ログイン用の店舗責任者アカウントを同時に作成します。店舗責任者は作成直後から <strong>店舗コード + ユーザーID + パスワード</strong> でログインできます。</p>
        <div class="row"><div class="col-6"><label class="form-label" for="shCode">店舗コード <span class="text-danger">*</span></label><input id="shCode" class="form-control mb-2" placeholder="例: SHOP001"></div><div class="col-6"><label class="form-label" for="shName">店舗名 <span class="text-danger">*</span></label><input id="shName" class="form-control mb-2" placeholder="例: 渋谷店"></div></div>
        <label class="form-label" for="shPw">店舗パスワード <span class="text-danger">*</span></label><input id="shPw" type="password" class="form-control mb-2" placeholder="8文字以上・英数字" autocomplete="new-password">
-       <hr style="border-color:var(--line);margin:14px 0">
+       <hr style="border-color:var(--rule);margin:14px 0">
        <div class="section-title"><i class="bi bi-person-badge"></i> 店舗責任者アカウント</div>
        <div class="row mt-2"><div class="col-6"><label class="form-label" for="shMgrCode">ユーザーID <span class="text-danger">*</span></label><input id="shMgrCode" class="form-control mb-2" placeholder="例: manager" autocomplete="username"></div><div class="col-6"><label class="form-label" for="shMgrName">氏名 <span class="text-danger">*</span></label><input id="shMgrName" class="form-control mb-2" placeholder="例: 山田太郎"></div></div>
        <label class="form-label" for="shMgrPw">パスワード <span class="text-danger">*</span></label><input id="shMgrPw" type="password" class="form-control" placeholder="8文字以上・英数字" autocomplete="new-password">
@@ -3814,7 +3815,7 @@ SCREENS.adminShopDetail = async function (el) {
     try {
       const [sum, st] = await Promise.all([api(`/admin/shops/summary/${sid}?start=${start}&end=${end}`), api(`/admin/shops/staffs/${sid}`)]);
       if (!isAlive(tok) || !body.isConnected) return;  // 画面遷移済み
-      const tbl = sum.staff.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>氏名</th><th>日</th><th class="t-num">確定</th><th class="t-num">給与</th></tr></thead><tbody>${sum.staff.map((s) => `<tr><td>${esc(s.name)}</td><td>${s.days}</td><td class="t-num num">${s.confirmed_hours}h</td><td class="t-num num">${yen(s.pay)}</td></tr>`).join('')}<tr style="font-weight:800;color:var(--indigo-l)"><td>合計</td><td></td><td class="t-num num">${sum.total_hours}h</td><td class="t-num num">${yen(sum.total_pay)}</td></tr></tbody></table></div>` : '<div class="small text-secondary">確定シフトなし</div>';
+      const tbl = sum.staff.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>氏名</th><th>日</th><th class="t-num">確定</th><th class="t-num">給与</th></tr></thead><tbody>${sum.staff.map((s) => `<tr><td>${esc(s.name)}</td><td>${s.days}</td><td class="t-num num">${s.confirmed_hours}h</td><td class="t-num num">${yen(s.pay)}</td></tr>`).join('')}<tr style="font-weight:800;color:var(--ink)"><td>合計</td><td></td><td class="t-num num">${sum.total_hours}h</td><td class="t-num num">${yen(sum.total_pay)}</td></tr></tbody></table></div>` : '<div class="small text-secondary">確定シフトなし</div>';
       const slist = (st.staffs || []).map((s) => `
         <div class="list-row" data-staff-row data-search="${esc((s.name || '') + ' ' + (s.staff_code || '') + ' ' + roleLabel(s.role))}">
           <div class="staff-cell">
@@ -3828,7 +3829,7 @@ SCREENS.adminShopDetail = async function (el) {
           </div>
         </div>`).join('');
       const searchBox = `<input type="search" id="staffSearch" class="form-control mb-2" placeholder="氏名・コード・ロールで絞り込み">`;
-      body.innerHTML = sectionTitle('bi-people', `スタッフ（${st.staffs.length}名）`) + searchBox + `<div id="staffListBox">${slist}</div>` + `<hr style="border-color:var(--line);margin:16px 0">` + sectionTitle('bi-bar-chart', `集計（${start}〜${end}）`) + tbl;
+      body.innerHTML = sectionTitle('bi-people', `スタッフ（${st.staffs.length}名）`) + searchBox + `<div id="staffListBox">${slist}</div>` + `<hr style="border-color:var(--rule);margin:16px 0">` + sectionTitle('bi-bar-chart', `集計（${start}〜${end}）`) + tbl;
       // スタッフ検索（フロント側フィルタ）
       document.getElementById('staffSearch')?.addEventListener('input', (ev) => {
         const q = ev.target.value.trim().toLowerCase();
