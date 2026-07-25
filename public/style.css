@@ -795,13 +795,32 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 /* ---------- 20. Timeline (Gantt) ---------- */
 .tl-wrap { padding: 2px 0; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .tl-axis-row { display: flex; align-items: flex-end; margin-bottom: 4px; min-width: 480px; }
-.tl-name { width: 52px; flex: 0 0 52px; font-size: .68rem; font-weight: 700; color: var(--t-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-name { width: 52px; flex: 0 0 52px; font-size: .68rem; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 4px; }
 .tl-axis { flex: 1 1 auto; display: flex; min-width: 0; height: 10px; }
-.tl-hour { flex: 1 1 0; font-size: .5rem; color: var(--t-dim); text-align: left; border-left: 1px solid var(--line); padding-left: 1px; }
-.tl-hour-next { color: var(--indigo); font-weight: 700; }
-.tl-row { display: flex; align-items: center; margin-bottom: 6px; min-width: 480px; }
-.tl-track { flex: 1 1 auto; position: relative; height: 28px; background: var(--card-2); border-radius: 8px; min-width: 0; cursor: pointer; }
-.tl-track:hover { background: var(--card-3); }
+.tl-hour { flex: 1 1 0; font-size: .5rem; font-family: var(--font-num); color: var(--ink-3); text-align: left; border-left: 1px solid var(--rule); padding-left: 1px; }
+.tl-hour-next { color: var(--daybreak); font-weight: 700; }
+.tl-row { display: flex; align-items: center; min-width: 480px; }
+/* 横に長いので行をゼブラで分ける。横罫は引かない（縦線と交差して格子になる） */
+.tl-row:nth-of-type(odd) { background: var(--zebra); }
+.tl-track {
+  flex: 1 1 auto; position: relative; height: 32px; min-width: 0; cursor: pointer;
+  /* 1時間ごとの細線と4時間ごとの濃線。--tl-hours は JS がインラインで与える */
+  background-image:
+    linear-gradient(90deg, var(--grid-1h) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-4h) 1px, transparent 1px);
+  background-size:
+    calc(100% / var(--tl-hours, 22)) 100%,
+    calc(400% / var(--tl-hours, 22)) 100%;
+}
+.tl-track:hover { background-color: color-mix(in srgb, var(--ink) 4%, transparent); }
+/* 24:00 の日付境界。深夜をまたぐシフトがどこで日付を越えるかを示す */
+.tl-track::after {
+  content: '';
+  position: absolute; top: 0; bottom: 0;
+  left: var(--tl-daybreak, -1px);
+  width: 1px; background: var(--daybreak);
+  display: var(--tl-daybreak-display, none);
+}
 
 /* スマホ向け: タイムライン圧縮・横スクロールで対応 */
 @media (max-width: 575px) {
@@ -810,15 +829,18 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
   .tl-hour { font-size: .42rem; }
 }
 .tl-bar {
-  position: absolute; top: 3px; height: 22px; border-radius: 6px; color: #fff;
-  font-size: .56rem; font-weight: 700; display: flex; align-items: center; padding: 0 4px;
-  overflow: hidden; white-space: nowrap; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,.3);
-  transition: var(--dur) var(--ease);
+  position: absolute; top: 4px; bottom: 4px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-num);
+  font-size: .58rem; font-weight: 700;
+  display: flex; align-items: center; padding: 0 5px;
+  overflow: hidden; white-space: nowrap; cursor: pointer;
+  transition: transform var(--dur) var(--ease);
 }
-.tl-bar:active { transform: scale(.97); }
-.tl-bar.selected { outline: 2px solid #fff; outline-offset: 1px; box-shadow: 0 0 0 3px var(--indigo); z-index: 3; }
+.tl-bar:active { transform: scale(.98); }
+.tl-bar.selected { outline: 2px solid var(--ink); outline-offset: 1px; z-index: 3; }
 /* 前日から継続シフト: 左端に縦線を入れて「左に続いている」ことを視覚化 */
-.tl-bar.tl-bar-continued { box-shadow: inset 4px 0 0 rgba(255,255,255,.7); }
+.tl-bar.tl-bar-continued { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--ink) 45%, transparent); }
 /* 必要人数超過シフト: 赤枠＋⚠️で警告表示（確定はブロックしないが可視化） */
 .tl-bar.tl-bar-overcap { outline: 2px solid #EF4444; outline-offset: -2px; }
 .tl-bar-overcap-mark { position: relative; z-index: 1; font-size: .6rem; margin-right: 2px; pointer-events: none; }
@@ -829,7 +851,7 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 .chip.role-part-time, .dot.role-part-time, .tl-bar.role-part-time { background: var(--role-part-time); color: var(--role-part-time-ink); }
 .chip.role-student,   .dot.role-student,   .tl-bar.role-student   { background: var(--role-student);   color: var(--role-student-ink); }
 
-.tl-legend { display: flex; gap: 10px; font-size: .66rem; color: var(--t-muted); margin-top: 6px; flex-wrap: wrap; }
+.tl-legend { display: flex; gap: 10px; font-size: .66rem; color: var(--ink-2); margin-top: 6px; flex-wrap: wrap; }
 .tl-legend span { display: inline-flex; align-items: center; gap: 4px; }
 .tl-legend i { display: inline-block; width: 11px; height: 11px; border-radius: var(--radius-xs); vertical-align: -1px; margin-right: 4px; }
 .tl-legend i.lg-role-manager   { background: var(--role-manager); }
@@ -839,7 +861,7 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 .tl-legend i.lg-alert          { background: var(--alert-fill); border: 1px solid var(--alert); }
 
 /* 不足バー（赤）: タイムライン詳細・印刷ビューで共通 */
-.tl-gap-row { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--line-2); }
+.tl-gap-row { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--rule); }
 .tl-gap-name { color: var(--danger) !important; font-size: .68rem !important; }
 .tl-gap-bar {
   position: absolute; top: 4px; height: 20px; border-radius: 4px;

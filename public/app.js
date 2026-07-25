@@ -839,6 +839,13 @@ function buildPrintTimelineHtml(list, anchorDate) {
     hours.push(`<div class="tl-hour${isNextDay ? ' tl-hour-next' : ''}">${isNextDay ? '(翌)' : ''}${lbl}</div>`);
   }
 
+  // 配置帯のグリッド用: 表示時間数と、24:00 の位置（範囲外なら線を出さない）
+  const tlHours = Math.max(1, maxH - minH);
+  const dayBreakPct = ((24 * 60 - rangeMin) / rangeLen) * 100;
+  const showDayBreak = dayBreakPct > 0 && dayBreakPct < 100;
+  const trackVars = `--tl-hours:${tlHours};`
+    + (showDayBreak ? `--tl-daybreak:${dayBreakPct.toFixed(2)}%;--tl-daybreak-display:block;` : '');
+
   const rows = order.map((sid) => {
     const st = staffMap[sid];
     const bars = st.shifts.map((s) => {
@@ -866,7 +873,7 @@ function buildPrintTimelineHtml(list, anchorDate) {
       const draftCls = (s.status === 'requested' && (s.reason || '').startsWith('AIドラフト')) ? ' tl-bar-draft' : '';
       return `<div class="tl-bar ${roleClass(s.staff_role)}${contCls}${draftCls}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
     }).join('');
-    return `<div class="tl-row"><div class="tl-name">${esc(st.name)}</div><div class="tl-track">${bars}</div></div>`;
+    return `<div class="tl-row"><div class="tl-name">${esc(st.name)}</div><div class="tl-track" style="${trackVars}">${bars}</div></div>`;
   }).join('');
 
   // 時間帯別不足バー（印刷用）— anchorDate (day) を基準に計算
@@ -883,7 +890,7 @@ function buildPrintTimelineHtml(list, anchorDate) {
       const eLbl = g.end >= 24 ? `(翌)${_extHourLabel(g.end)}` : `${_extHourLabel(g.end)}時`;
       return `<div class="tl-gap-bar" title="${sLbl}〜${eLbl} あと${g.gap}名" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">↓${g.gap}名不足</div>`;
     }).join('');
-    gapRowHtml = `<div class="tl-row tl-gap-row"><div class="tl-name tl-gap-name">不足</div><div class="tl-track">${gapBars}</div></div>`;
+    gapRowHtml = `<div class="tl-row tl-gap-row"><div class="tl-name tl-gap-name">不足</div><div class="tl-track" style="${trackVars}">${gapBars}</div></div>`;
   }
 
   // シフト0件でも営業時間の空き状況が分かるよう、時間軸だけ表示して「シフトなし」を添える
@@ -1172,6 +1179,12 @@ function openDayTimeline(date, allShifts, editable, onChange) {
     const isNextDay = h >= 24;
     hours.push(`<div class="tl-hour${isNextDay ? ' tl-hour-next' : ''}">${isNextDay ? '(翌)' : ''}${lbl}</div>`);
   }
+  // 配置帯のグリッド用: 表示時間数と、24:00 の位置（範囲外なら線を出さない）
+  const tlHours = Math.max(1, maxH - minH);
+  const dayBreakPct = ((24 * 60 - rangeMin) / rangeLen) * 100;
+  const showDayBreak = dayBreakPct > 0 && dayBreakPct < 100;
+  const trackVars = `--tl-hours:${tlHours};`
+    + (showDayBreak ? `--tl-daybreak:${dayBreakPct.toFixed(2)}%;--tl-daybreak-display:block;` : '');
   const rows = order.map((sid) => {
     const st = staffMap[sid];
     const bars = st.shifts.map((s) => {
@@ -1211,7 +1224,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
       const handles = editable && isDraft ? '<span class="tl-drag-handle tl-drag-handle-start" aria-hidden="true"></span><span class="tl-drag-handle tl-drag-handle-end" aria-hidden="true"></span>' : '';
       return `<div class="tl-bar ${roleClass(s.staff_role)}${contCls}${draftCls}${overCapCls}" data-id="${s.id}"${dragAttrs} title="${continued ? '前日から継続: ' : ''}${hm(s.start_datetime)}-${hm(s.end_datetime)}${isDraft ? '（ドラフト・直接調整可）' : ''}${overCapTitle}${noteTitle}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${handles}${overCapMark}<span class="tl-bar-label">${lbl}</span></div>`;
     }).join('');
-    return `<div class="tl-row" data-staff-id="${sid}" data-staff-name="${esc(st.name)}"><div class="tl-name">${esc(st.name)}</div><div class="tl-track" data-staff-id="${sid}" title="${editable ? '空き部分をクリックで追加' : ''}">${bars}</div></div>`;
+    return `<div class="tl-row" data-staff-id="${sid}" data-staff-name="${esc(st.name)}"><div class="tl-name">${esc(st.name)}</div><div class="tl-track" data-staff-id="${sid}" style="${trackVars}" title="${editable ? '空き部分をクリックで追加' : ''}">${bars}</div></div>`;
   }).join('');
 
   // 時間帯別不足バー（赤で視覚化）
@@ -1228,7 +1241,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
       const eLbl = g.end >= 24 ? `(翌)${_extHourLabel(g.end)}` : `${_extHourLabel(g.end)}時`;
       return `<div class="tl-gap-bar" data-start="${g.start}" data-end="${g.end}" data-gap="${g.gap}" title="${editable ? 'クリックして配置' : ''} ${sLbl}〜${eLbl}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">↓${g.gap}名不足</div>`;
     }).join('');
-    gapRow = `<div class="tl-row tl-gap-row"><div class="tl-name tl-gap-name">不足</div><div class="tl-track">${gapBars}</div></div>`;
+    gapRow = `<div class="tl-row tl-gap-row"><div class="tl-name tl-gap-name">不足</div><div class="tl-track" style="${trackVars}">${gapBars}</div></div>`;
   }
 
   // 【日またぎ/空日対応】シフトが無い日でも営業時間の空タイムライン＋不足バーを表示。
