@@ -372,7 +372,7 @@ function applyTheme(t) {
   const icon = document.querySelector('#themeToggleBtn i');
   if (icon) icon.className = (t === 'light') ? 'bi bi-sun-fill' : 'bi bi-moon-stars-fill';
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', t === 'light' ? '#F1F5F9' : '#0F172A');
+  if (meta) meta.setAttribute('content', t === 'light' ? '#FBFAF6' : '#262624');
 }
 applyTheme(currentTheme()); // アイコンとmetaを現在テーマに同期
 document.getElementById('themeToggleBtn')?.addEventListener('click', () => {

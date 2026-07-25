@@ -26,7 +26,7 @@
 
   /* 要対応 */
   --alert:       #B14A35;
-  --alert-fill:  rgba(199,90,71,.18);
+  --alert-fill:  rgba(177,74,53,.18);
 
   /* ロール色（面 / 面上の文字）。色温度で常勤・非常勤を分ける */
   --role-manager:        #B9CBE2;  /* 薄縹・常勤 */
@@ -131,7 +131,7 @@ html, body {
 }
 body { min-height: 100vh; }
 
-::selection { background: rgba(99,102,241,.3); }
+::selection { background: color-mix(in srgb, var(--ink) 25%, transparent); }
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -676,18 +676,18 @@ td.num, th.num, td .num { font-family: var(--font-num); }
 }
 .kpi-indigo::after { background: radial-gradient(circle, color-mix(in srgb, var(--info) 15%, transparent), transparent 70%); }
 .kpi-green::after  { background: radial-gradient(circle, color-mix(in srgb, var(--success) 15%, transparent), transparent 70%); }
-.kpi-amber::after  { background: radial-gradient(circle, rgba(245,158,11,.15), transparent 70%); }
-.kpi-red::after    { background: radial-gradient(circle, rgba(239,68,68,.15), transparent 70%); }
+.kpi-amber::after  { background: radial-gradient(circle, color-mix(in srgb, var(--warning) 15%, transparent), transparent 70%); }
+.kpi-red::after    { background: radial-gradient(circle, color-mix(in srgb, var(--danger) 15%, transparent), transparent 70%); }
 .kpi-icon {
   width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center;
   font-size: 1.05rem; margin-bottom: 12px;
 }
 .kpi-indigo .kpi-icon { background: color-mix(in srgb, var(--info) 15%, var(--surface)); color: var(--info); }
 .kpi-green .kpi-icon  { background: color-mix(in srgb, var(--success) 15%, var(--surface)); color: var(--success); }
-.kpi-amber .kpi-icon  { background: rgba(245,158,11,.15); color: var(--warning); }
-.kpi-red .kpi-icon    { background: rgba(239,68,68,.15); color: var(--danger); }
+.kpi-amber .kpi-icon  { background: color-mix(in srgb, var(--warning) 15%, var(--surface)); color: var(--warning); }
+.kpi-red .kpi-icon    { background: color-mix(in srgb, var(--danger) 15%, var(--surface)); color: var(--danger); }
 .kpi-label { font-size: .72rem; color: var(--ink-3); font-weight: 600; }
-.kpi-value { font-family: 'Space Grotesk','Inter',monospace; font-size: 1.7rem; font-weight: 700; line-height: 1.1; margin: 2px 0; font-variant-numeric: tabular-nums; }
+.kpi-value { font-family: var(--font-num); font-size: 1.7rem; font-weight: 700; line-height: 1.1; margin: 2px 0; font-variant-numeric: tabular-nums; }
 .kpi-sub { font-size: .7rem; color: var(--ink-3); }
 
 /* #kpiGrid（ダッシュボードのKPIだけ）を罫線区切りの帯にする。
@@ -752,7 +752,7 @@ td.num, th.num, td .num { font-family: var(--font-num); }
 }
 .chip.count   { background: var(--rule); color: var(--ink); text-align: center; }
 .chip.chip-pending { opacity: .72; border: 1.5px dashed rgba(255,255,255,.65); background: transparent !important; color: var(--ink-2); font-style: italic; }
-html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); color: var(--ink-2); }
+html[data-theme="light"] .chip.chip-pending { border-color: color-mix(in srgb, var(--ink) 45%, transparent); color: var(--ink-2); }
 .cal-pending-badge { display: inline-block; margin-left: 4px; min-width: 14px; height: 14px; padding: 0 4px; border-radius: 7px; background: var(--warning); color: #fff; font-size: 9px; font-weight: 800; line-height: 14px; text-align: center; vertical-align: middle; }
 
 .cal-hint { font-size: .68rem; color: var(--ink-3); text-align: center; margin-bottom: 8px; }
@@ -843,8 +843,11 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
     calc(400% / var(--tl-hours, 22)) 100%;
 }
 .tl-track:hover { background-color: color-mix(in srgb, var(--ink) 4%, transparent); }
-/* 24:00 の日付境界。深夜をまたぐシフトがどこで日付を越えるかを示す */
-.tl-track::after {
+/* 24:00 の日付境界。深夜をまたぐシフトがどこで日付を越えるかを示す。
+   ::before は DOM 順で .tl-bar より前として扱われるため、実測で確認した
+   「線がバーの上に乗って見づらい」問題を、z-index を使わずに解消できる
+   （::after だと生成順が最後になりバーより上に描画されてしまう）。 */
+.tl-track::before {
   content: '';
   position: absolute; top: 0; bottom: 0;
   left: var(--tl-daybreak, -1px);
@@ -872,7 +875,7 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 /* 前日から継続シフト: 左端に縦線を入れて「左に続いている」ことを視覚化 */
 .tl-bar.tl-bar-continued { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--ink) 45%, transparent); }
 /* 必要人数超過シフト: 赤枠＋⚠️で警告表示（確定はブロックしないが可視化） */
-.tl-bar.tl-bar-overcap { outline: 2px solid #EF4444; outline-offset: -2px; }
+.tl-bar.tl-bar-overcap { outline: 2px solid var(--alert); outline-offset: -2px; }
 .tl-bar-overcap-mark { position: relative; z-index: 1; font-size: .6rem; margin-right: 2px; pointer-events: none; }
 
 /* ロール色。面と文字をセットで当てる（文字色を忘れると読めなくなる） */
@@ -907,7 +910,7 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 
 .tl-legend { display: flex; gap: 10px; font-size: .66rem; color: var(--ink-2); margin-top: 6px; flex-wrap: wrap; }
 .tl-legend span { display: inline-flex; align-items: center; gap: 4px; }
-.tl-legend i { display: inline-block; width: 11px; height: 11px; border-radius: var(--radius-xs); vertical-align: -1px; margin-right: 4px; }
+.tl-legend i { display: inline-block; width: 11px; height: 11px; border-radius: var(--radius-xs); vertical-align: -1px; }
 .tl-legend i.lg-role-manager   { background: var(--role-manager); }
 .tl-legend i.lg-role-employee  { background: var(--role-employee); }
 .tl-legend i.lg-role-part-time { background: var(--role-part-time); }
@@ -938,8 +941,8 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 /* ---------- 21. Shortage ---------- */
 .shortage-chip {
   display: inline-flex; align-items: center; gap: 5px;
-  background: rgba(239,68,68,.12); color: var(--danger);
-  border: 1px solid rgba(239,68,68,.3); border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); border-radius: 8px;
   padding: 5px 10px; font-size: .74rem; font-weight: 700; margin: 0 5px 5px 0;
 }
 .shortage-none { color: var(--success); font-size: .82rem; font-weight: 600; }
@@ -966,10 +969,11 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .matrix-pat-time { font-size: .7rem; color: var(--ink-3); }
 .matrix-input {
   width: 100%; min-height: 48px; border: none; background: transparent;
-  color: var(--ink); text-align: center; font-family: 'Space Grotesk',monospace;
+  color: var(--ink); text-align: center; font-family: var(--font-num);
   font-size: 1rem; font-weight: 700; padding: 6px; transition: var(--dur) var(--ease);
 }
 .matrix-input:focus { background: color-mix(in srgb, var(--info) 10%, transparent); outline: none; }
+.matrix-input:focus-visible { outline: 2px solid var(--info); outline-offset: -2px; }
 .matrix-input.has-override { color: var(--info); }
 .matrix-row-actions { display: flex; gap: 4px; }
 .matrix-row-actions button {
@@ -986,7 +990,7 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .chat-bubble { max-width: 85%; padding: 12px 16px; border-radius: 18px; font-size: .9rem; line-height: 1.6; white-space: pre-wrap; word-break: break-word; animation: fadeIn var(--dur) var(--ease); }
 .chat-bubble-user { align-self: flex-end; background: var(--ink); color: var(--paper); border-bottom-right-radius: 4px; }
 .chat-bubble-ai { align-self: flex-start; display: flex; gap: 10px; align-items: flex-start; background: var(--paper); border: 1px solid var(--rule); border-bottom-left-radius: 4px; }
-.chat-bubble-warn { align-self: flex-start; display: flex; gap: 10px; align-items: flex-start; background: rgba(245,158,11,.10); border: 1px solid rgba(245,158,11,.45); border-bottom-left-radius: 4px; }
+.chat-bubble-warn { align-self: flex-start; display: flex; gap: 10px; align-items: flex-start; background: color-mix(in srgb, var(--warning) 10%, transparent); border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent); border-bottom-left-radius: 4px; }
 .chat-bubble-warn .chat-ai-avatar { background: linear-gradient(135deg, var(--warning), color-mix(in srgb, var(--warning) 70%, black)); }
 .chat-ai-avatar { width: 32px; height: 32px; border-radius: 9px; flex: 0 0 32px; display: flex; align-items: center; justify-content: center; background: var(--success); color: #fff; font-size: .9rem; }
 .chat-ai-text { padding: 12px 4px; flex: 1; min-width: 0; }
@@ -1009,7 +1013,7 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .gen-condition { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--rule); font-size: .86rem; }
 .gen-condition:last-child { border-bottom: none; }
 .gen-condition-label { color: var(--ink-2); }
-.gen-condition-value { font-weight: 700; font-family: 'Space Grotesk',monospace; }
+.gen-condition-value { font-weight: 700; font-family: var(--font-num); }
 
 .gen-steps { display: flex; flex-direction: column; gap: 12px; }
 .gen-step { display: flex; gap: 12px; align-items: flex-start; opacity: 0; animation: fadeIn var(--dur-slow) var(--ease) forwards; }
@@ -1040,7 +1044,7 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .wish-cell.disabled { opacity: .35; cursor: not-allowed; }
 .wish-cell .wd { font-size: .66rem; font-weight: 700; }
 .wish-cell .wmark { font-size: .56rem; font-weight: 700; padding: 2px 3px; border-radius: 5px; text-align: center; color: #fff; margin-top: auto; }
-.wmark.any{background:var(--info);} .wmark.morning{background:#F59E0B;} .wmark.evening{background:var(--info);} .wmark.rest{background:#475569;} .wmark.time{background:var(--success);}
+.wmark.any{background:var(--info);} .wmark.morning{background:var(--warning);} .wmark.evening{background:var(--info);} .wmark.rest{background:var(--ink-3);} .wmark.time{background:var(--success);}
 
 /* ---------- 27. Preview grid ---------- */
 .preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
@@ -1057,6 +1061,18 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 @keyframes slideInLeft { from { opacity: 0; transform: translateX(-16px); } to { opacity: 1; transform: translateX(0); } }
 .fade-in { animation: fadeIn var(--dur) var(--ease); }
 .slide-up { animation: slideUp var(--dur) var(--ease); }
+
+/* モーション低減設定を尊重する。アニメ・トランジション・スムーススクロールを
+   実質即時にする（0にすると一部ブラウザでアニメ完了イベントが発火しない実装があるため
+   .01ms に留める）。 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 
 /* ---------- 30. Page title ---------- */
 .page-head { margin-bottom: 20px; }
