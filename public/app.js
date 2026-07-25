@@ -1271,7 +1271,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
       const handles = editable && isDraft ? '<span class="tl-drag-handle tl-drag-handle-start" aria-hidden="true"></span><span class="tl-drag-handle tl-drag-handle-end" aria-hidden="true"></span>' : '';
       return `<div class="tl-bar ${roleClass(s.staff_role)} ${statusClass(s.status)}${contCls}${draftCls}${overCapCls}" data-id="${s.id}"${dragAttrs} title="${continued ? '前日から継続: ' : ''}${hm(s.start_datetime)}-${hm(s.end_datetime)}${isDraft ? '（ドラフト・直接調整可）' : ''}${overCapTitle}${noteTitle}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${handles}${overCapMark}<span class="tl-bar-label">${lbl}</span></div>`;
     }).join('');
-    return `<div class="tl-row" data-staff-id="${sid}" data-staff-name="${esc(st.name)}"><div class="tl-name">${esc(st.name)}</div><div class="tl-track" data-staff-id="${sid}" style="${trackVars}" title="${editable ? '空き部分をクリックで追加' : ''}">${bars}</div></div>`;
+    return `<div class="tl-row" data-staff-id="${sid}" data-staff-name="${esc(st.name)}"><div class="tl-name"><span class="tl-name-text">${esc(st.name)}</span></div><div class="tl-track" data-staff-id="${sid}" style="${trackVars}" title="${editable ? '空き部分をクリックで追加' : ''}">${bars}</div></div>`;
   }).join('');
 
   // 時間帯別不足バー（赤で視覚化）

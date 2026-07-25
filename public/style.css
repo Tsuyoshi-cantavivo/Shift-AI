@@ -1178,7 +1178,7 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
   .print-page .tl-role-badge.role-student   { background: #F2DADD !important; color: #4A2A2E !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .print-page .tl-gap-bar { background: #B14A35 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; animation: none; top: 3px; height: 26px; font-size: 10px; }
   .print-page .tl-gap-row { border-top: 1px dashed #999; padding-top: 6px; margin-top: 6px; }
-  .print-page .tl-gap-name { color: #C92A2A !important; font-size: 11px !important; font-weight: 700; }
+  .print-page .tl-gap-name { color: #B14A35 !important; font-size: 11px !important; font-weight: 700; }
 
   .print-page .tl-legend {
     margin-top: 12px; padding-top: 8px; border-top: 1px dashed #BBB;
