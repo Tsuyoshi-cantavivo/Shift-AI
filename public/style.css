@@ -726,9 +726,6 @@ td.num, th.num, td .num { font-family: var(--font-num); }
   font-size: .56rem; font-weight: 600; padding: 1px 3px; border-radius: 4px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff;
 }
-.chip.morning { background: #F59E0B; }
-.chip.noon    { background: #10B981; }
-.chip.evening { background: #6366F1; }
 .chip.count   { background: var(--t-muted); color: var(--navy); text-align: center; }
 .chip.chip-pending { opacity: .72; border: 1.5px dashed rgba(255,255,255,.65); background: transparent !important; color: var(--t-secondary); font-style: italic; }
 html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); color: var(--t-secondary); }
@@ -789,9 +786,6 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
   70% { transform: translateX(5px); }
 }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
-.dot.morning { background: #F59E0B; }
-.dot.noon    { background: #10B981; }
-.dot.evening { background: #6366F1; }
 
 /* ---------- 19b. Staff cell (名前メイン・役割サブ) ---------- */
 .staff-cell { display: flex; flex-direction: column; line-height: 1.2; }
@@ -822,18 +816,27 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
   transition: var(--dur) var(--ease);
 }
 .tl-bar:active { transform: scale(.97); }
-.tl-bar.morning { background: #F59E0B; }
-.tl-bar.noon    { background: #10B981; }
-.tl-bar.evening { background: #6366F1; }
 .tl-bar.selected { outline: 2px solid #fff; outline-offset: 1px; box-shadow: 0 0 0 3px var(--indigo); z-index: 3; }
 /* 前日から継続シフト: 左端に縦線を入れて「左に続いている」ことを視覚化 */
 .tl-bar.tl-bar-continued { box-shadow: inset 4px 0 0 rgba(255,255,255,.7); }
 /* 必要人数超過シフト: 赤枠＋⚠️で警告表示（確定はブロックしないが可視化） */
 .tl-bar.tl-bar-overcap { outline: 2px solid #EF4444; outline-offset: -2px; }
 .tl-bar-overcap-mark { position: relative; z-index: 1; font-size: .6rem; margin-right: 2px; pointer-events: none; }
+
+/* ロール色。面と文字をセットで当てる（文字色を忘れると読めなくなる） */
+.chip.role-manager,   .dot.role-manager,   .tl-bar.role-manager   { background: var(--role-manager);   color: var(--role-manager-ink); }
+.chip.role-employee,  .dot.role-employee,  .tl-bar.role-employee  { background: var(--role-employee);  color: var(--role-employee-ink); }
+.chip.role-part-time, .dot.role-part-time, .tl-bar.role-part-time { background: var(--role-part-time); color: var(--role-part-time-ink); }
+.chip.role-student,   .dot.role-student,   .tl-bar.role-student   { background: var(--role-student);   color: var(--role-student-ink); }
+
 .tl-legend { display: flex; gap: 10px; font-size: .66rem; color: var(--t-muted); margin-top: 6px; flex-wrap: wrap; }
 .tl-legend span { display: inline-flex; align-items: center; gap: 4px; }
-.tl-legend i { width: 8px; height: 8px; border-radius: 3px; display: inline-block; }
+.tl-legend i { display: inline-block; width: 11px; height: 11px; border-radius: var(--radius-xs); vertical-align: -1px; margin-right: 4px; }
+.tl-legend i.lg-role-manager   { background: var(--role-manager); }
+.tl-legend i.lg-role-employee  { background: var(--role-employee); }
+.tl-legend i.lg-role-part-time { background: var(--role-part-time); }
+.tl-legend i.lg-role-student   { background: var(--role-student); }
+.tl-legend i.lg-alert          { background: var(--alert-fill); border: 1px solid var(--alert); }
 
 /* 不足バー（赤）: タイムライン詳細・印刷ビューで共通 */
 .tl-gap-row { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--line-2); }

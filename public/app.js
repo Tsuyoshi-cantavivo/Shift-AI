@@ -109,14 +109,28 @@ function hm(iso) {
   return `${m[1].padStart(2, '0')}:${m[2]}`;
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
-/* 時刻→時間帯クラス。parseInt なので非ゼロ埋めでも崩れにくいが、
-   不正入力時は朝扱いで安全側に倒す。 */
-function slotClass(iso) {
-  const h = parseInt(String(iso || '').slice(11, 13), 10);
-  if (isNaN(h)) return 'morning';
-  if (h < 12) return 'morning';
-  if (h < 16) return 'noon';
-  return 'evening';
+/** スタッフのロールから配置帯・チップの色クラスを決める。
+ *  色は staffs.role を表す。寒色＝常勤（店長・社員）、暖色＝非常勤（パート・学生）。
+ *  未知の値や欠損は社員扱いにフォールバックする（色が消えるより誤色のほうが害が小さい）。 */
+function roleClass(role) {
+  switch (role) {
+    case 'manager':   return 'role-manager';
+    case 'employee':  return 'role-employee';
+    case 'part_time': return 'role-part-time';
+    case 'student':   return 'role-student';
+    default:          return 'role-employee';
+  }
+}
+
+/** ロールの日本語表示名。バッジに出して色だけに依存しないようにする。 */
+function roleLabel(role) {
+  switch (role) {
+    case 'manager':   return '店長';
+    case 'employee':  return '社員';
+    case 'part_time': return 'パート';
+    case 'student':   return '学生';
+    default:          return '';
+  }
 }
 function yen(n) { return '¥' + (n || 0).toLocaleString(); }
 function buzz(ms = 8) { try { navigator.vibrate?.(ms); } catch (e) {} }
@@ -726,7 +740,7 @@ function createCalendar(mountEl, opts) {
       const chips = list.slice(0, 3).map((s) => {
         // confirmed は実線、requested（調整待ち）は点線で区別（混在表示の誤認防止）
         const dashed = s.status === 'requested' ? ' chip-pending' : '';
-        return `<div class="chip ${slotClass(s.start_datetime)}${dashed}" title="${s.status === 'requested' ? '調整待ち' : '確定'}">${hm(s.start_datetime)}-${hm(s.end_datetime)}</div>`;
+        return `<div class="chip ${roleClass(s.staff_role)}${dashed}" title="${s.status === 'requested' ? '調整待ち' : '確定'}">${hm(s.start_datetime)}-${hm(s.end_datetime)}</div>`;
       }).join('');
       // 調整待ちが混在する場合は警告アイコンを右上に表示
       const pendingCnt = list.filter((s) => s.status === 'requested').length;
@@ -769,7 +783,7 @@ function createCalendar(mountEl, opts) {
 }
 
 function shiftDetailHtml(s, editable) {
-  const sc = slotClass(s.start_datetime);
+  const sc = roleClass(s.staff_role);
   const statusBadge = s.status === 'confirmed' ? badge('確定', 'success') : s.status === 'requested' ? badge('調整待ち', 'warning') : badge('調整中', 'info');
   const edit = editable ? `<button class="btn btn-sm btn-light edit-shift"><i class="bi bi-pencil"></i></button>` : '';
   return `<div class="shift-line">
@@ -850,7 +864,7 @@ function buildPrintTimelineHtml(list, anchorDate) {
       }
       const contCls = continued ? ' tl-bar-continued' : '';
       const draftCls = (s.status === 'requested' && (s.reason || '').startsWith('AIドラフト')) ? ' tl-bar-draft' : '';
-      return `<div class="tl-bar ${slotClass(s.start_datetime)}${contCls}${draftCls}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
+      return `<div class="tl-bar ${roleClass(s.staff_role)}${contCls}${draftCls}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${lbl}</div>`;
     }).join('');
     return `<div class="tl-row"><div class="tl-name">${esc(st.name)}</div><div class="tl-track">${bars}</div></div>`;
   }).join('');
@@ -885,10 +899,11 @@ function buildPrintTimelineHtml(list, anchorDate) {
     ${gapRowHtml}
   </div>
   <div class="tl-legend">
-    <span><i style="background:#F59E0B"></i>朝</span>
-    <span><i style="background:#10B981"></i>昼</span>
-    <span><i style="background:#6366F1"></i>夜</span>
-    <span><i style="background:#EF4444"></i>不足</span>
+    <span><i class="lg-role-manager"></i>店長</span>
+    <span><i class="lg-role-employee"></i>社員</span>
+    <span><i class="lg-role-part-time"></i>パート</span>
+    <span><i class="lg-role-student"></i>学生</span>
+    <span><i class="lg-alert"></i>不足</span>
   </div>`;
 }
 
@@ -1166,7 +1181,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
       let eMin = _extMinFromIso(s.end_datetime, date);
       // 【NaN対策】時刻パース失敗のシフトは安全なプレースホルダ表示に倒す
       if (isNaN(sMin) || isNaN(eMin)) {
-        return `<div class="tl-bar ${slotClass(s.start_datetime)}" data-id="${s.id}" title="${hm(s.start_datetime)}-${hm(s.end_datetime)} (時刻不正)" style="left:0%;width:5%">${hm(s.start_datetime)}?</div>`;
+        return `<div class="tl-bar ${roleClass(s.staff_role)}" data-id="${s.id}" title="${hm(s.start_datetime)}-${hm(s.end_datetime)} (時刻不正)" style="left:0%;width:5%">${hm(s.start_datetime)}?</div>`;
       }
       if (eMin <= sMin) eMin = sMin + 60;
       const rawLeft = ((sMin - rangeMin) / rangeLen) * 100;
@@ -1194,7 +1209,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
       const overCapTitle = overCap ? '\n⚠必要人数超過の時間帯を含みます' : '';
       const dragAttrs = editable && isDraft ? ' data-draft-editable="true"' : '';
       const handles = editable && isDraft ? '<span class="tl-drag-handle tl-drag-handle-start" aria-hidden="true"></span><span class="tl-drag-handle tl-drag-handle-end" aria-hidden="true"></span>' : '';
-      return `<div class="tl-bar ${slotClass(s.start_datetime)}${contCls}${draftCls}${overCapCls}" data-id="${s.id}"${dragAttrs} title="${continued ? '前日から継続: ' : ''}${hm(s.start_datetime)}-${hm(s.end_datetime)}${isDraft ? '（ドラフト・直接調整可）' : ''}${overCapTitle}${noteTitle}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${handles}${overCapMark}<span class="tl-bar-label">${lbl}</span></div>`;
+      return `<div class="tl-bar ${roleClass(s.staff_role)}${contCls}${draftCls}${overCapCls}" data-id="${s.id}"${dragAttrs} title="${continued ? '前日から継続: ' : ''}${hm(s.start_datetime)}-${hm(s.end_datetime)}${isDraft ? '（ドラフト・直接調整可）' : ''}${overCapTitle}${noteTitle}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">${handles}${overCapMark}<span class="tl-bar-label">${lbl}</span></div>`;
     }).join('');
     return `<div class="tl-row" data-staff-id="${sid}" data-staff-name="${esc(st.name)}"><div class="tl-name">${esc(st.name)}</div><div class="tl-track" data-staff-id="${sid}" title="${editable ? '空き部分をクリックで追加' : ''}">${bars}</div></div>`;
   }).join('');
@@ -1228,7 +1243,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
   const body =
     `<div class="tl-wrap"><div class="tl-axis-row"><div class="tl-name"></div><div class="tl-axis">${hours.join('')}</div></div>${rows}${gapRow}</div>
      ${emptyNotice}
-     <div class="tl-legend"><span><i style="background:#F59E0B"></i>朝</span><span><i style="background:#10B981"></i>昼</span><span><i style="background:#6366F1"></i>夜</span><span><i style="background:#EF4444"></i>不足</span>${editable ? '<span><i class="bi bi-hand-index" style="font-style:normal;font-size:.7rem"></i>空きをクリックで追加</span>' : ''}${editable && list.some(isAiDraftShift) ? '<span><i class="bi bi-arrows-move" style="font-style:normal;font-size:.7rem"></i>AIドラフトはドラッグで調整</span>' : ''}<span>バーをタップで${editable ? '編集' : '詳細'}</span></div>
+     <div class="tl-legend"><span><i class="lg-role-manager"></i>店長</span><span><i class="lg-role-employee"></i>社員</span><span><i class="lg-role-part-time"></i>パート</span><span><i class="lg-role-student"></i>学生</span><span><i class="lg-alert"></i>不足</span>${editable ? '<span><i class="bi bi-hand-index" style="font-style:normal;font-size:.7rem"></i>空きをクリックで追加</span>' : ''}${editable && list.some(isAiDraftShift) ? '<span><i class="bi bi-arrows-move" style="font-style:normal;font-size:.7rem"></i>AIドラフトはドラッグで調整</span>' : ''}<span>バーをタップで${editable ? '編集' : '詳細'}</span></div>
      <button class="btn btn-outline-secondary btn-sm mt-2" id="tlDraftUndo" hidden><i class="bi bi-arrow-counterclockwise"></i> 直前の調整を戻す</button>
      ${manualAddBtn}`;
   // PC版は広め(800px)、スマホは画面幅で横スクロール対応
