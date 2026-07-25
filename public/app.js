@@ -149,6 +149,18 @@ function statusClass(status) {
   }
 }
 
+/** 不足の時間帯を一文にまとめる。色と模様だけに頼らず言葉でも届けるため。
+ *  引数は _mergeHourlyGaps() の戻り値 [{start, end, gap}]（start/end は拡張時間の整数。25=翌1時）。
+ *  例: 「22:00–翌02:00 が 1名不足」 */
+function gapSummaryText(merged) {
+  if (!merged.length) return '';
+  const t = (h) => (h >= 24 ? `翌${_extHourLabel(h)}:00` : `${_extHourLabel(h)}:00`);
+  const head = merged.slice(0, 2)
+    .map((g) => `${t(g.start)}–${t(g.end)} が ${g.gap}名不足`)
+    .join('、');
+  return merged.length > 2 ? `${head}（ほか${merged.length - 2}件）` : head;
+}
+
 function yen(n) { return '¥' + (n || 0).toLocaleString(); }
 function buzz(ms = 8) { try { navigator.vibrate?.(ms); } catch (e) {} }
 
@@ -825,9 +837,11 @@ function _tlTimeMin(iso) {
   return +iso.slice(11, 13) * 60 + +iso.slice(14, 16);
 }
 
-function buildPrintTimelineHtml(list, anchorDate) {
-  // list: その日の confirmed シフト群。タイムライン（矢印バー）形式で返す。
-  // anchorDate: 拡張時間の基準日（"YYYY-MM-DD"）。指定時は翌日またぎを正しく扱う。
+/** 静的タイムライン（矢印バー形式）のHTML文字列を返す純粋関数。
+ *  クリック・ドラッグ等のインタラクションは持たない（編集可能な版は openDayTimeline）。
+ *  印刷ビュー（openPrintView）とダッシュボード（今日の配置帯）の両方から呼ばれる。
+ *  list: 表示対象のシフト群。anchorDate: 拡張時間の基準日（"YYYY-MM-DD"）。指定時は翌日またぎを正しく扱う。 */
+function buildStaticTimelineHtml(list, anchorDate) {
   const day = anchorDate || (list.length ? list[0].start_datetime.slice(0, 10) : '');
   const order = []; const staffMap = {};
   list.forEach((s) => {
@@ -971,7 +985,7 @@ async function openPrintView(start, end) {
     const pagesHtml = days.map((day) => {
       const list = byDay[day] || [];
       const wd = new Date(day + 'T00:00:00').getDay();
-      const timeline = buildPrintTimelineHtml(list, day);
+      const timeline = buildStaticTimelineHtml(list, day);
       return `<section class="print-page">
         <div class="print-page-header">
           <h2>${day}（${wdArr[wd]}）</h2>
@@ -1636,12 +1650,38 @@ const SCREENS = {};
 /* ---------- Dashboard ---------- */
 SCREENS.dashboard = async function (el) {
   const tok = navToken();
+  const today = todayStr();
+  // 「組む」から「確認する」へ：店長が最初に見るべきは今日の配置（穴のありか）であって
+  // 集計値ではない。配置帯を最上部、KPIはその下に小さく敷く。
   el.innerHTML = pageHead('ダッシュボード', 'bi-grid-1x2', currentUser.shop_name) +
-    `<div class="kpi-grid" id="kpiGrid"><div class="skeleton" style="height:110px;border-radius:16px"></div><div class="skeleton" style="height:110px;border-radius:16px"></div><div class="skeleton" style="height:110px;border-radius:16px"></div><div class="skeleton" style="height:110px;border-radius:16px"></div></div>
+    card(sectionTitle('bi-diagram-3', '今日の配置') + `<div id="dashTimeline"><div class="skeleton" style="height:90px;border-radius:10px"></div></div>`) +
+    `<div class="kpi-grid" id="kpiGrid"><div class="skeleton" style="height:64px"></div><div class="skeleton" style="height:64px"></div><div class="skeleton" style="height:64px"></div><div class="skeleton" style="height:64px"></div></div>
     <div class="dash-grid">
       <div id="dashLeft"></div>
       <div id="dashRight"></div>
     </div>`;
+
+  // 今日の配置帯（最上部）。/shop/dashboard の today_shifts は staff_role を持たず
+  // start/endもHH:MM文字列のため配置帯は描けない。配置帯専用に /shop/shifts を叩く。
+  // KPI等の描画を待たせないよう独立させ、失敗しても他のブロックには影響させない。
+  (async () => {
+    try {
+      await ensureBusinessHours();
+      const sd = await api(`/shop/shifts?start=${today}&end=${today}`);
+      if (!isAlive(tok) || !el.isConnected) return;
+      const todayShifts = sd.shifts || [];
+      const todayGaps = _mergeHourlyGaps(_computeHourlyGaps(todayShifts, today, { includeRequested: true }));
+      const shortageNote = todayGaps.length
+        ? `<div class="dash-shortage-note">${esc(gapSummaryText(todayGaps))}</div>`
+        : '';
+      const dashTimeline = document.getElementById('dashTimeline');
+      if (dashTimeline) dashTimeline.innerHTML = shortageNote + buildStaticTimelineHtml(todayShifts, today);
+    } catch (e) {
+      if (!isAlive(tok) || !el.isConnected) return;
+      const dashTimeline = document.getElementById('dashTimeline');
+      if (dashTimeline) dashTimeline.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
+    }
+  })();
 
   try {
     const d = await api('/shop/dashboard');

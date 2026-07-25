@@ -657,8 +657,11 @@ td.num, th.num, td .num { font-family: var(--font-num); }
   transition: width var(--dur-slow) var(--ease);
 }
 
-/* ---------- 16. KPI Cards ---------- */
-.kpi-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+/* ---------- 16. KPI Cards ----------
+   .kpi-card 単体（募集期間バナー・次回シフト等）はここまでの見た目のまま維持する。
+   .kpi-grid 配下（ダッシュボード・分析画面の集計セット）だけを、下の追記ブロックで
+   「罫線区切りの帯」に変える。配置表が主役・数字は従にするため、大きなカードにしない。 */
+.kpi-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin-bottom: 18px; border-top: 1px solid var(--rule); }
 @media (min-width: 768px) { .kpi-grid { grid-template-columns: repeat(4, 1fr); } }
 .kpi-card {
   background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius-lg);
@@ -686,8 +689,26 @@ td.num, th.num, td .num { font-family: var(--font-num); }
 .kpi-value { font-family: 'Space Grotesk','Inter',monospace; font-size: 1.7rem; font-weight: 700; line-height: 1.1; margin: 2px 0; font-variant-numeric: tabular-nums; }
 .kpi-sub { font-size: .7rem; color: var(--ink-3); }
 
+/* .kpi-grid 配下のセルだけ、大きなカードをやめて罫線区切りの帯にする
+  （.kpi-grid .kpi-card は .kpi-card 単体より詳細度が高いため、ここだけに効く） */
+.kpi-grid .kpi-card {
+  background: transparent; border: none; border-radius: 0; box-shadow: none;
+  padding: 10px 14px; overflow: visible;
+  border-right: 1px solid var(--rule);
+}
+.kpi-grid .kpi-card:last-child { border-right: none; }
+.kpi-grid .kpi-card:hover { transform: none; box-shadow: none; }
+.kpi-grid .kpi-card::after { content: none; } /* 大きなカード用の光彩装飾は帯には不要 */
+.kpi-grid .kpi-card .kpi-icon {
+  width: auto; height: auto; background: none; border-radius: 0;
+  display: inline-flex; font-size: .8rem; margin-bottom: 4px;
+}
+.kpi-grid .kpi-value { font-family: var(--font-num); font-size: 1.15rem; }
+
 /* ---------- 17. Dashboard grid ---------- */
 .dash-grid { display: grid; gap: 16px; grid-template-columns: 1fr; }
+/* 不足の要約文。色と模様（配置帯側）だけに頼らず言葉でも届ける */
+.dash-shortage-note { color: var(--alert); font-weight: 700; font-size: .8rem; margin: 2px 0 10px; }
 @media (min-width: 992px) { .dash-grid { grid-template-columns: 1.5fr 1fr; } }
 
 /* ---------- 18. Chart container ---------- */
@@ -875,6 +896,10 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .tl-legend i.lg-role-student   { background: var(--role-student); }
 .tl-legend i.lg-alert          { background: var(--alert-fill); border: 1px solid var(--alert); }
 .tl-legend-note { color: var(--ink-3); font-size: .62rem; }
+
+/* シフト0件の日の画面向け表示（buildStaticTimelineHtml が返す .print-empty を
+   ダッシュボードでも流用するため）。印刷時の見た目は @media print 側の定義（Task11）に譲る。 */
+.print-empty { padding: 16px; text-align: center; color: var(--ink-3); font-size: .78rem; border: 1px dashed var(--rule); border-radius: var(--radius); }
 
 /* 不足バー（赤）: タイムライン詳細・印刷ビューで共通 */
 .tl-gap-row { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--rule); }
