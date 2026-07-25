@@ -315,7 +315,7 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
 .login-hero p { color: var(--ink-3); font-size: .78rem; }
 .brand-logo { font-size: 1.3rem; color: var(--ink); }
 .login-form { padding: 14px 26px 26px; }
-.form-field { margin-bottom: 13px; }
+.login-form .form-field { margin-bottom: 13px; }
 
 /* ---------- 6. Components: Buttons ---------- */
 .btn {
