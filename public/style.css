@@ -851,6 +851,21 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 .chip.role-part-time, .dot.role-part-time, .tl-bar.role-part-time { background: var(--role-part-time); color: var(--role-part-time-ink); }
 .chip.role-student,   .dot.role-student,   .tl-bar.role-student   { background: var(--role-student);   color: var(--role-student-ink); }
 
+/* 状態は色ではなく質感で表す（色はロールが担っているため） */
+.tl-bar.tl-st-confirmed { /* ベタ塗り。追加の装飾なし */ }
+.tl-bar.tl-st-modifying {
+  background-image: repeating-linear-gradient(45deg,
+    rgba(255,255,255,.55) 0 4px, transparent 4px 8px);
+}
+.tl-bar.tl-st-requested {
+  opacity: .55;
+  border: 1px dashed color-mix(in srgb, var(--ink) 45%, transparent);
+}
+html[data-theme="dark"] .tl-bar.tl-st-modifying {
+  background-image: repeating-linear-gradient(45deg,
+    rgba(255,255,255,.22) 0 4px, transparent 4px 8px);
+}
+
 .tl-legend { display: flex; gap: 10px; font-size: .66rem; color: var(--ink-2); margin-top: 6px; flex-wrap: wrap; }
 .tl-legend span { display: inline-flex; align-items: center; gap: 4px; }
 .tl-legend i { display: inline-block; width: 11px; height: 11px; border-radius: var(--radius-xs); vertical-align: -1px; margin-right: 4px; }
@@ -859,6 +874,7 @@ html[data-theme="light"] .chip.chip-pending { border-color: rgba(15,23,42,.45); 
 .tl-legend i.lg-role-part-time { background: var(--role-part-time); }
 .tl-legend i.lg-role-student   { background: var(--role-student); }
 .tl-legend i.lg-alert          { background: var(--alert-fill); border: 1px solid var(--alert); }
+.tl-legend-note { color: var(--ink-3); font-size: .62rem; }
 
 /* 不足バー（赤）: タイムライン詳細・印刷ビューで共通 */
 .tl-gap-row { margin-top: 4px; padding-top: 4px; border-top: 1px dashed var(--rule); }
