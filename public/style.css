@@ -378,7 +378,7 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
   border-color: var(--rule);
 }
 .btn-light:hover, .btn-secondary:hover {
-  background: var(--zebra);
+  background: var(--paper);
   color: var(--ink);
   border-color: var(--rule);
 }
@@ -391,7 +391,7 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
   border-color: var(--rule);
 }
 .btn-outline-secondary:hover {
-  background: var(--zebra);
+  background: var(--paper);
   color: var(--ink);
   border-color: var(--rule);
 }
@@ -447,7 +447,7 @@ input[type="time"], input[type="number"], input[type="date"], .form-control.num 
 .form-select option { color: var(--ink); background: var(--surface); }
 .form-label { color: var(--ink-2); font-size: .78rem; font-weight: 500; margin-bottom: 4px; }
 .input-group-text {
-  background: var(--zebra);
+  background: var(--paper);
   color: var(--ink-3);
   border: 1px solid var(--rule);
   border-radius: var(--radius);
