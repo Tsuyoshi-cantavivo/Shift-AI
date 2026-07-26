@@ -4445,7 +4445,7 @@ def ensure_db():
 
 
 def _verify_critical_tables():
-    """ensure_db() の後に、無いと機能が黙って壊れるテーブルの実在を検証する。
+    """ensure_db() の後に、無いと機能が黙って壊れるテーブル・列の実在を検証する。
 
     【なぜ起動を落とすのか】
       login_attempts が無いと _check_login_lock の SELECT が失敗し、
@@ -4458,13 +4458,33 @@ def _verify_critical_tables():
       login_attempts の CREATE に到達しない。また D1 モードの init_schema は
       個別ステートメントの失敗を握り潰す。どちらの経路も「作られなかった」を
       検知できるよう、CREATE の成否ではなく実在を最後に確認する。
+
+    【なぜテーブルだけでなく列まで見るのか】
+      login_attempts.blocked_logged は CREATE TABLE IF NOT EXISTS では追加され
+      ず、既存DBには ensure_db() 内の ALTER TABLE ADD COLUMN で追う。この
+      ALTER が（本番D1で実際に起きた migrations/0004 のスキーマ変更失敗のよ
+      うに）何らかの理由で失敗すると、テーブルは存在するのに列だけが欠けた
+      状態になる。「SELECT 1 FROM table」はテーブルの実在しか見ないため、この
+      状態を素通りさせてしまい、結局ロック中の /api/login が
+      「no such column: blocked_logged」の 500 を未認証クライアントに返す。
+      これは本関数を導入した動機（テーブル欠如の見逃し）と同じ失敗モードが
+      列単位で再発しているだけなので、各テーブルで実際に使う列を明示して
+      SELECT することで、テーブル・列どちらの欠落も検知する。
     """
-    for table in ("login_attempts", "audit_logs", "sessions"):
+    # テーブル名 -> そのテーブルで実際に使う列（一貫性のため audit_logs /
+    # sessions も同じ形で検証する）。
+    checks = {
+        "login_attempts": "blocked_logged",
+        "audit_logs": "action",
+        "sessions": "role",
+    }
+    for table, column in checks.items():
         try:
-            query_all(f"SELECT 1 FROM {table} LIMIT 1")
+            query_all(f"SELECT {column} FROM {table} LIMIT 1")
         except Exception as e:
             raise RuntimeError(
-                f"必須テーブル {table} がありません（DB初期化が完了していません）。"
+                f"必須テーブル {table} の列 {column} が見つかりません"
+                f"（テーブルが無いか、列だけが欠けています。DB初期化が完了していません）。"
                 f"この状態で起動を続けるとログインが機能しないため停止します: {e}")
 
 

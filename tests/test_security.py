@@ -915,6 +915,30 @@ class TestStartupIntegrity:
         appmod.ensure_db()
         appmod._verify_critical_tables()
 
+    def test_verification_raises_when_blocked_logged_column_missing(self, client):
+        """テーブルはあるが blocked_logged 列だけが無い状態を再現する。
+
+        既存DBへの ALTER TABLE ADD COLUMN が何らかの理由で失敗した場合、
+        login_attempts テーブル自体は存在するのに blocked_logged 列だけが
+        欠けたままになり得る。テーブルの実在しか見ていないと検知できず、
+        ロック中の /api/login が「no such column: blocked_logged」の 500 を
+        未認証クライアントに返してしまう（本番D1でスキーマ変更が失敗した
+        migrations/0004 の実例と同種の失敗モード）。"""
+        dbmod.execute("DROP TABLE login_attempts")
+        try:
+            dbmod.execute(
+                "CREATE TABLE login_attempts ("
+                "attempt_key TEXT PRIMARY KEY, fail_count INTEGER NOT NULL DEFAULT 0, "
+                "locked_until TEXT, updated_at TEXT)")
+            with pytest.raises(Exception):
+                appmod._verify_critical_tables()
+        finally:
+            # db_reset フィクスチャは CREATE TABLE IF NOT EXISTS で整備するため、
+            # 列が欠けたテーブルが残っていると後続テストに漏れる。ensure_db() で
+            # blocked_logged 列を復元してから終える。
+            appmod.ensure_db()
+            appmod._verify_critical_tables()
+
 
 # ============================================================
 # /api/init の 403 メッセージ（情報漏洩）
