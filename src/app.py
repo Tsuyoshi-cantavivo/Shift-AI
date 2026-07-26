@@ -801,11 +801,38 @@ def admin_create_shop():
 def admin_update_shop(sid):
     require_auth(["admin"])
     body = request.get_json(silent=True) or {}
-    is_active = 1 if body.get("is_active") else 0
-    execute("UPDATE shops SET shop_name=?, is_active=? WHERE id=?",
-            (body.get("shop_name"), is_active, sid))
+    shop = query_one("SELECT id, shop_code, shop_name FROM shops WHERE id=?", (sid,))
+    if shop is None:
+        abort(404, description="店舗が見つかりません")
+
+    # 部分更新。送られてきたキーだけを更新する。
+    # NOTE: かつて body.get("shop_name") を無条件で UPDATE していたため、
+    # 有効/無効トグル（shop_name を送らない）で店舗名が空文字に潰れる事故があった。
+    sets, binds, changed = [], [], []
+    if "shop_name" in body:
+        name = (body.get("shop_name") or "").strip()
+        if not name:
+            raise ValueError("店舗名を入力してください")
+        sets.append("shop_name=?"); binds.append(name); changed.append("shop_name")
+    if "shop_code" in body:
+        code = (body.get("shop_code") or "").strip()
+        if not code:
+            raise ValueError("店舗コードを入力してください")
+        dup = query_one("SELECT id FROM shops WHERE shop_code=? AND id<>?", (code, sid))
+        if dup:
+            raise ValueError("その店舗コードは既に使われています")
+        sets.append("shop_code=?"); binds.append(code); changed.append("shop_code")
+    if "is_active" in body:
+        is_active = 1 if body.get("is_active") else 0
+        sets.append("is_active=?"); binds.append(is_active); changed.append(f"is_active={is_active}")
+
+    if not sets:
+        raise ValueError("更新する項目がありません")
+
+    binds.append(sid)
+    execute(f"UPDATE shops SET {','.join(sets)} WHERE id=?", tuple(binds))
     audit("shop.update", target_type="shop", target_id=sid, shop_id=sid,
-          detail=f"is_active={is_active}")
+          detail=",".join(changed))
     return jsonify({"ok": True})
 
 

@@ -4520,7 +4520,7 @@ SCREENS.adminShops = async function (el) {
       return `<div class="list-row" style="cursor:pointer" data-detail="${s.id}"><div><strong>${esc(s.shop_name)}</strong> <span class="text-secondary">${esc(s.shop_code)}</span> ${badge(s.is_active ? '有効' : '無効', s.is_active ? 'success' : 'warning')}<div class="small text-secondary">スタッフ${st.staff_count}名 / 確定${st.confirmed_count}件</div></div><button class="btn btn-sm btn-light" data-toggle="${s.id}" data-active="${s.is_active}">${s.is_active ? '無効化' : '有効化'}</button></div>`;
     }))).join('') : emptyState('bi-shop', '店舗がありません');
     document.getElementById('shopList').querySelectorAll('[data-detail]').forEach((b) => b?.addEventListener('click', (ev) => { if (ev.target.closest('[data-toggle]')) return; window._adminShopId = +b.dataset.detail; navigateTo('adminShopDetail'); }));
-    document.getElementById('shopList').querySelectorAll('[data-toggle]').forEach((b) => b?.addEventListener('click', async (ev) => { ev.stopPropagation(); await api(`/admin/shops/${b.dataset.toggle}`, { method: 'PUT', body: JSON.stringify({ is_active: b.dataset.active !== '1', shop_name: '' }) }); load(); }));
+    document.getElementById('shopList').querySelectorAll('[data-toggle]').forEach((b) => b?.addEventListener('click', async (ev) => { ev.stopPropagation(); await api(`/admin/shops/${b.dataset.toggle}`, { method: 'PUT', body: JSON.stringify({ is_active: b.dataset.active !== '1' }) }); load(); }));
   };
   load();
   document.getElementById('addShopBtn')?.addEventListener('click', () =>
