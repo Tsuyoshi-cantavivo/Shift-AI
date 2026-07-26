@@ -2925,11 +2925,19 @@ function _wtiExistingFor(state, staffId, date) { return state.existing[`${staffI
 function _wtiHasExisting(state, staffId, date) { return _wtiExistingFor(state, staffId, date).length > 0; }
 
 /* I-4: 既存希望1件を「休み希望 17:00-22:00」のような短い日本語にする。
-   time のときだけ実際の時刻（start_datetime/end_datetime のTHH:MM部分）を添える。 */
+   N-1修正: サーバのCritical C-1で「時間指定の希望は shifts/wish_history どちらも
+   availability=NULL」に統一された（既存の /api/staff/requests・実UIの
+   submitWish（public/app.js:4362）が time のとき availability を送らないのと
+   揃えるため）。「time」という文字列値は wish_history には存在しないため、
+   w.availability === 'time' を条件にすると常に外れ、時間指定の既存希望が
+   軒並み「種別不明」になっていた（I-4が守ろうとした「何が消えるか見せる」が
+   最も情報価値の高いケースで機能しない状態だった）。availability が無く
+   start/end があるものを「時間指定」として扱う。 */
 function _wtiExistingLabel(w) {
-  const label = { rest: '休み希望', any: 'いつでも可', morning: '早番希望', evening: '遅番希望', time: '時間指定' };
-  const base = label[w.availability] || w.availability || '種別不明';
-  if (w.availability === 'time' && w.start_datetime && w.end_datetime) {
+  const label = { rest: '休み希望', any: 'いつでも可', morning: '早番希望', evening: '遅番希望' };
+  const isTimeSpecified = !w.availability && w.start_datetime && w.end_datetime;
+  const base = isTimeSpecified ? '時間指定' : (label[w.availability] || w.availability || '種別不明');
+  if (isTimeSpecified) {
     const st = (w.start_datetime.split('T')[1] || '').slice(0, 5);
     const et = (w.end_datetime.split('T')[1] || '').slice(0, 5);
     if (st && et) return `${base} ${st}-${et}`;
@@ -3062,11 +3070,18 @@ function _wtiPeriodWarnHtml(state) {
 }
 
 /* I-1: 未割り当て・期間外警告と同格の目立ち方にする（従来は灰色小文字で
-   埋もれていた）。 */
+   埋もれていた）。
+   Minor（レビュー指摘）: 件数上限が無く、隣の期間外警告（_wtiPeriodWarnHtml）・
+   重複警告（_wtiDuplicateWarnHtml）が5件＋「他」で打ち切っているのと非対称
+   だった。サーバ側のC-1修正で unparsed に落ちる頻度が上がった（「土日」「平日」
+   等を含む文が丸ごと落ちる）ため、375pxでカレンダーが画面外に押し出される
+   実害があった。同じ「5件＋他」の形に揃える。 */
 function _wtiUnparsedHtml(state) {
   if (!state.unparsed || !state.unparsed.length) return '';
-  const rows = state.unparsed.map((u) => `<li>${esc(u)}</li>`).join('');
-  return `<div class="wti-unparsed alert alert-warning py-2 mb-2"><i class="bi bi-question-circle"></i> 読み取れなかった文（${state.unparsed.length}件）。必要であれば手入力で補ってください。<ul class="small mb-0 mt-1">${rows}</ul></div>`;
+  const shown = state.unparsed.slice(0, 5);
+  const rows = shown.map((u) => `<li>${esc(u)}</li>`).join('');
+  const moreNote = state.unparsed.length > 5 ? `<li class="text-secondary">他 ${state.unparsed.length - 5}件</li>` : '';
+  return `<div class="wti-unparsed alert alert-warning py-2 mb-2"><i class="bi bi-question-circle"></i> 読み取れなかった文（${state.unparsed.length}件）。必要であれば手入力で補ってください。<ul class="small mb-0 mt-1">${rows}${moreNote}</ul></div>`;
 }
 
 /* C-1: 同一(スタッフ,日付)に複数の読み取りが残っている状態を検出する。
@@ -3459,7 +3474,6 @@ async function _wtiSubmit(wrap, state) {
   const skippedDetail = { duplicate: 0, invalid: 0, rollback: 0 };
   let skippedDetailKnown = true;
   const succeededItems = [];
-  const serverMessages = [];
   const errors = [];
   const mergeResult = (r) => {
     created += r.created || 0;
@@ -3478,7 +3492,6 @@ async function _wtiSubmit(wrap, state) {
       const r1 = await api('/shop/wishes/bulk', { method: 'POST', body: JSON.stringify({ wishes: normalGroup.map(toWish), overwrite: false }) });
       mergeResult(r1);
       succeededItems.push(...normalGroup);
-      if (r1.message) serverMessages.push(r1.message);
     } catch (e) { errors.push(`新規分: ${e.message}`); }
   }
   if (overwriteGroup.length) {
@@ -3486,22 +3499,37 @@ async function _wtiSubmit(wrap, state) {
       const r2 = await api('/shop/wishes/bulk', { method: 'POST', body: JSON.stringify({ wishes: overwriteGroup.map(toWish), overwrite: true }) });
       mergeResult(r2);
       succeededItems.push(...overwriteGroup);
-      if (r2.message) serverMessages.push(r2.message);
     } catch (e) { errors.push(`上書き分: ${e.message}`); }
   }
   setLoading(false);
-  const succeededUids = new Set(succeededItems.map((it) => it.uid));
-  state.items = state.items.filter((it) => !succeededUids.has(it.uid));
-  // Minor(3399): 部分失敗→再送を繰り返しても、過去に成功した分の日付を失わないよう
-  // state 側に累積する（onImported へ渡す一覧フィルタ拡張レンジの計算に使う）。
-  state.succeededDates.push(...succeededItems.map((it) => it.date));
   const skSummary = _wtiSkippedSummary(skipped, skippedDetailKnown ? skippedDetail : null);
+  // N-2（レビュー指摘）: 「HTTPリクエストが成功した（例外を投げなかった）」ことと
+  // 「実際に created された」ことは別。succeededItems は前者の単位（グループ全体）
+  // でしか分からず、サーバは個々の項目のうちどれが created/skipped/rollback
+  // だったかを返さない。以前はここで無条件に state.items から取り除いていたため、
+  // created===0（全件スキップ）でもカレンダーの元になる項目が消え、セルをクリック
+  // しても無反応になり、再送しようとすると「登録できる希望がありません」という
+  // 画面と矛盾するトーストが出た。rollback>0（一部だけ書き込み失敗）でも同様に、
+  // 失敗した項目を再送する手段が失われていた。
+  // → 以下の各分岐は、state.items から取り除いてよい（＝グループがまるごと
+  //   成功したと言える）場合を created>0 かつ rollback が無い場合に限定する
+  //   （下の「全件成功」分岐のみが該当。created===0 / rollback>0 の分岐は
+  //   state.items に一切触れず、店長がカレンダーを操作し続けられる・
+  //   再送できる状態を保つ）。
 
   if (errors.length) {
     // 部分失敗: 正常系では normalGroup/overwriteGroup の一方しか失敗しえないため、
-    // ここでの serverMessages は最大1件（連結による件数の水増しは起きない）。
-    // 成功済みは取り除いて二重送信を防ぎ、件数を必ず示す。モーダルは開いたまま
-    const successPart = created > 0 ? `${serverMessages.join(' ') || `${created}件は登録済みです。`} ` : '';
+    // 成功した側のグループは「HTTP成功＝概ね意図通り送れた」とみなして取り除く
+    // （失敗した側だけを再送できるようにする。既存のテストが前提にしている挙動）。
+    const succeededUids = new Set(succeededItems.map((it) => it.uid));
+    state.items = state.items.filter((it) => !succeededUids.has(it.uid));
+    state.succeededDates.push(...succeededItems.map((it) => it.date));
+    // Minor（レビュー指摘）: successPart にサーバの message をそのまま使うと、
+    // その message 自体がスキップ理由（例:「1件は既存の希望と重複のためスキップ」）
+    // を含んでいる場合があり、skippedPart（skipped_detailベースの自前の内訳）と
+    // 同じ内容が2回・別の言い回しで出てしまう。created件数だけを自前で述べ、
+    // スキップの理由説明は skippedPart に一本化する。
+    const successPart = created > 0 ? `${created}件を登録しました。` : '';
     const skippedPart = skSummary.phrase ? `${skSummary.phrase}。` : '';
     // fix round 3: #wtiSubmitMsg への直書きは、この2行下の _wtiRenderStep2 が
     // #wtiSubmitMsg ごと再描画するため直後に消えてしまう（e2e が実機で検出）。
@@ -3514,10 +3542,6 @@ async function _wtiSubmit(wrap, state) {
     return;
   }
 
-  // Minor（再レビュー指摘）: normalGroup と overwriteGroup が両方成功すると
-  // serverMessages に2件たまる。両者を単純に連結すると「3件登録しました 1件登録しました」
-  // のように読め、合計4件であることが伝わらない。サーバ個別の message 文字列は使わず、
-  // 常に created/skipped の合算から自前で組み立てる（正確さを優先）。
   if (created === 0) {
     // M-2: 全件スキップは成功ではない。緑トーストにせず、モーダルも閉じずに内容を
     // 見直せるようにする。★最優先修正: 以前は skipped を無条件に「重複のため」と
@@ -3525,6 +3549,8 @@ async function _wtiSubmit(wrap, state) {
     // wish_history書き込み失敗によるrollback（データが失われた可能性）も同じ
     // skipped に含まれるため、実際には書き込みエラーでも「重複のため」と表示
     // されてしまっていた。skipped_detail に基づく正確な内訳に直す。
+    // N-2: shouldDiscardSucceeded は false（created===0）なので state.items には
+    // 触れていない。画面（カレンダー・合計件数）も変わっていないので再描画不要。
     const msg = skSummary.phrase ? `登録できる項目がありませんでした。${skSummary.phrase}` : '登録できる項目がありませんでした';
     // rollback（書き込み失敗による取り消し＝データ消失の可能性）は通常のスキップより
     // 一段強い警告色（alert-danger）で目立たせる。
@@ -3534,7 +3560,32 @@ async function _wtiSubmit(wrap, state) {
     return;
   }
 
-  // 一部でも登録できた。一覧側の反映（フィルタ拡張＋再読み込み）は常に行う。
+  if (skSummary.hasRollback) {
+    // N-2: created>0 でも、rollback（書き込み失敗による取り消し）した項目が
+    // どれかはサーバから分からない。グループ全体を state.items から取り除くと、
+    // 実際には失敗した分を二度と再送できなくなる。最低限の安全策として、ここでも
+    // state.items には触れない（黙って閉じないだけでなく、再送できる状態を保つ。
+    // 再送すれば、既にcreated済みの分はサーバ側の重複判定で無害にスキップされる）。
+    // 一覧側の背景更新は今回createdできたと分かっている分の日付だけを使う
+    // （state.succeededDates には積まない＝「確定した」ことにはしない）。
+    const optimisticDates = succeededItems.map((it) => it.date).sort();
+    const optimisticRange = optimisticDates.length
+      ? { start: optimisticDates[0], end: optimisticDates[optimisticDates.length - 1] } : null;
+    if (typeof state.onImported === 'function') state.onImported(optimisticRange);
+    state.submitMsg = `<div class="alert alert-danger py-2"><i class="bi bi-exclamation-octagon"></i> ${esc(`${created}件を登録しました。${skSummary.phrase}`)}</div>`;
+    if (msgBox) msgBox.innerHTML = state.submitMsg;
+    toast(`${created}件を登録しましたが、一部は書き込みに失敗して取り消されました`, 'error');
+    return;
+  }
+
+  // 全件成功（スキップがあっても重複・不正な入力のみ）。created>0 かつ
+  // rollback 無しと確認できたのはこの分岐だけなので、ここでのみ
+  // succeededItems を state.items から取り除く。
+  const succeededUids = new Set(succeededItems.map((it) => it.uid));
+  state.items = state.items.filter((it) => !succeededUids.has(it.uid));
+  // Minor(3399): 部分失敗→再送を繰り返しても、過去に成功した分の日付を失わないよう
+  // state 側に累積する（onImported へ渡す一覧フィルタ拡張レンジの計算に使う）。
+  state.succeededDates.push(...succeededItems.map((it) => it.date));
   // M-9（再レビュー指摘）: I-5で月またぎ取り込みが可能になったため、フィルタ拡張は
   // state.yearMonth（対象月）ではなく、実際に登録できた項目の日付min〜maxを渡す
   // （8/31〜9/2のように対象月をまたぐ場合、対象月だけでは9月分の日付が一覧に出ない）。
@@ -3543,17 +3594,6 @@ async function _wtiSubmit(wrap, state) {
     ? { start: submittedDates[0], end: submittedDates[submittedDates.length - 1] }
     : null;
   if (typeof state.onImported === 'function') state.onImported(range);
-
-  if (skSummary.hasRollback) {
-    // rollback が混ざっている場合は、一部登録できていても黙って閉じない。
-    // 「書き込みに失敗して取り消した」＝データが失われた可能性を店長に明示する。
-    state.submitMsg = `<div class="alert alert-danger py-2"><i class="bi bi-exclamation-octagon"></i> ${esc(`${created}件を登録しました。${skSummary.phrase}`)}</div>`;
-    toast(`${created}件を登録しましたが、一部は書き込みに失敗して取り消されました`, 'error');
-    _wtiRenderStep2(wrap, state);
-    return;
-  }
-
-  // 全件成功（スキップがあっても重複・不正な入力のみ）
   wrap.remove();
   toast(`${created}件を登録しました${skSummary.phrase ? `。${skSummary.phrase}` : ''}`, 'success');
 }

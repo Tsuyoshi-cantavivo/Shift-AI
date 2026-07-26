@@ -758,7 +758,7 @@ test.describe('希望テキスト取り込み（wish text import）', () => {
     expect(errors).toEqual([]);
   });
 
-  test('rollback>0は一部登録できていてもモーダルを閉じず警告を出す', async ({ page, request }) => {
+  test('rollback>0は一部登録できていてもモーダルを閉じず警告を出す。N-2: 項目は消えず再送できる', async ({ page, request }) => {
     const errors = attachConsoleCollector(page);
     const sid = await createStaff(request, shopHdr, 'RB1', 'rollback太郎');
     await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
@@ -769,7 +769,9 @@ test.describe('希望テキスト取り込み（wish text import）', () => {
       ],
       unparsed: [], source: 'llm',
     });
+    const bulkCalls = [];
     await page.route((url) => url.pathname.endsWith('/api/shop/wishes/bulk'), async (route) => {
+      bulkCalls.push(route.request().postDataJSON());
       await route.fulfill({ json: {
         ok: true, created: 1, skipped: 1,
         skipped_detail: { duplicate: 0, invalid: 0, rollback: 1 },
@@ -782,6 +784,18 @@ test.describe('希望テキスト取り込み（wish text import）', () => {
     await page.click('#wtiSubmitBtn');
     await expect(page.locator('#wtiSubmitMsg')).toContainText('書き込みに失敗して取り消し', { timeout: 5000 });
     await expect(page.locator('#wtiSubmitBtn')).toBeVisible(); // rollbackがあるので閉じない
+
+    // N-2: rollbackした項目がどれか分からない以上、グループ全体を消してはいけない。
+    // 合計件数は変わっておらず、カレンダーのセルは引き続きクリックできる（無反応にならない）。
+    await expect(page.locator('#wtiSubmitBtn')).toContainText('合計 2件を登録する');
+    await page.click('.wish-cell[data-day="2026-08-04"]');
+    await expect(page.locator('.wti-detail-entry')).toBeVisible();
+    await closeDetailModal(page);
+
+    // 再送すると、消えていない全項目（2件）がもう一度送信される
+    await page.click('#wtiSubmitBtn');
+    await expect.poll(() => bulkCalls.length, { timeout: 5000 }).toBe(2);
+    expect(bulkCalls[1].wishes.map((w) => w.date).sort()).toEqual(['2026-08-04', '2026-08-05']);
     expect(errors).toEqual([]);
   });
 
@@ -809,6 +823,42 @@ test.describe('希望テキスト取り込み（wish text import）', () => {
     expect(msg).not.toContain('重複');
     expect(msg).not.toContain('書き込みに失敗');
     await expect(page.locator('#wtiSubmitBtn')).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  // N-2: created:0（全件スキップ）で state.items から項目を取り除いてしまうと、
+  // カレンダーのセルが無反応になり、再送しようとすると「登録できる希望がありません
+  // （未割り当てのみです）」という画面と矛盾するトーストが出てしまっていた。
+  test('N-2: created:0でもカレンダーは無反応にならず、再送で同じ内容が送られる', async ({ page, request }) => {
+    const errors = attachConsoleCollector(page);
+    const sid = await createStaff(request, shopHdr, 'ZS1', '全滅再送花子');
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await stubParse(page, {
+      entries: [{ staff_id: sid, dates: ['2026-08-31'], availability: 'rest', start: null, end: null, raw: '8/31は休みます' }],
+      unparsed: [], source: 'llm',
+    });
+    const bulkCalls = [];
+    await page.route((url) => url.pathname.endsWith('/api/shop/wishes/bulk'), async (route) => {
+      bulkCalls.push(route.request().postDataJSON());
+      await route.fulfill({ json: { ok: true, created: 0, skipped: 1, skipped_detail: { duplicate: 1, invalid: 0, rollback: 0 }, message: 'ok' } });
+    });
+    await openImportModal(page);
+    await parseAndWaitStep2(page, { yearMonth: '2026-08' });
+
+    await page.click('#wtiSubmitBtn');
+    await expect(page.locator('#wtiSubmitMsg')).toContainText('登録できる項目がありませんでした', { timeout: 5000 });
+
+    // 合計件数は変わらず、カレンダーのセルは引き続きクリックできる（無反応にならない）
+    await expect(page.locator('#wtiSubmitBtn')).toContainText('合計 1件を登録する');
+    await page.click('.wish-cell[data-day="2026-08-31"]');
+    await expect(page.locator('.wti-detail-entry')).toBeVisible();
+    await closeDetailModal(page);
+
+    // 再送すると、消えていない項目がもう一度送信される（「登録できる希望がありません」に
+    // ならない）
+    await page.click('#wtiSubmitBtn');
+    await expect.poll(() => bulkCalls.length, { timeout: 5000 }).toBe(2);
+    expect(bulkCalls[1].wishes.map((w) => w.date)).toEqual(['2026-08-31']);
     expect(errors).toEqual([]);
   });
 
@@ -843,9 +893,14 @@ test.describe('希望テキスト取り込み（wish text import）', () => {
   test('I-4: 既存希望のある日の詳細モーダルに、上書きで消える内容が列挙される', async ({ page, request }) => {
     const errors = attachConsoleCollector(page);
     const sid = await createStaff(request, shopHdr, 'EX1', '既存列挙花子');
-    // 既存希望を2件、同日の重ならない時間帯で作る（上書きすると両方消える）
-    await submitExistingWish(request, SHOP, 'EX1', { start: '2026-08-13T08:00:00', end: '2026-08-13T12:00:00', availability: 'time' });
-    await submitExistingWish(request, SHOP, 'EX1', { start: '2026-08-13T15:00:00', end: '2026-08-13T20:00:00', availability: 'time' });
+    // 既存希望を2件、同日の重ならない時間帯で作る（上書きすると両方消える）。
+    // レビュー指摘(N-1): 時間指定の希望は実UI（public/app.js:4362 submitWish）が
+    // availability を送らない（= wish_history 側も NULL、schema.sql:103参照）。
+    // availability:'time' というリテラル値は実データに存在しないため、それを
+    // 種にするとテストが「存在しないデータ」で通ってしまう（_wtiExistingLabel の
+    // 欠陥を隠す）。実UIと同じ形（availability省略）で作る。
+    await submitExistingWish(request, SHOP, 'EX1', { start: '2026-08-13T08:00:00', end: '2026-08-13T12:00:00' });
+    await submitExistingWish(request, SHOP, 'EX1', { start: '2026-08-13T15:00:00', end: '2026-08-13T20:00:00' });
 
     await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
     await stubParse(page, {
