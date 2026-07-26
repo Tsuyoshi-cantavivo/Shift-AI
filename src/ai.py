@@ -903,6 +903,12 @@ _WISH_FULLWIDTH_MAP = str.maketrans("０１２３４５６７８９／", "012345
 # 書き方に対応するための小節分割。LINEの文面ではごく自然な書き方のため。
 _WISH_SEGMENT_SPLIT_RE = re.compile(r"[、,;；]")
 
+# 日付（範囲・単独）を取り除いたあとに残っても意味を持たない残骸。
+# 助詞（は/も/と/の/が/を/に/へ/や）と、空白・記号類のみを列挙する。
+# 「から」「まで」「出れます」のように意味を持つ語はここに入れない
+# （入れると「8/9からは出れます」が『日付だけの小節』と誤認される）。
+_WISH_FILLER_RE = re.compile(r"[はもとのがをにへや\s　・/／,，.。．、;；:：\-ー―—–〜～~]+")
+
 
 def _normalize_wish_text(s):
     """全角数字・全角スラッシュを半角に正規化する。"""
@@ -1032,6 +1038,30 @@ def _wish_has_conflicting_signals(segment):
     return has_rest and has_time
 
 
+def _wish_segment_is_dates_only(segment):
+    """小節が『日付だけ』かを判定する（fix round 4）。
+
+    日付範囲・日付トークンを取り除き、さらに助詞・記号・空白といった意味を
+    持たない残骸（`_WISH_FILLER_RE`）を取り除いて、残りが空なら True。
+
+    「8/3」「8/3は」「8/10〜8/12」「8/10から8/12」は True。
+    「8/9からは出れます」「8/9出勤希望」は『出れます』『出勤希望』が残るため False。
+
+    この区別が無いと、日付＋未認識テキストの小節が後続の小節の availability に
+    黙って吸収され、書かれていない内容（極性が反転した rest、述べられていない
+    時間帯）が確定してしまう。範囲を先に取り除くのは `_extract_dates` と同じ順で、
+    「8/10から8/12」の『から』を範囲の区切りとして正しく消すため。
+    """
+    # 行頭の「小久保:」「【小久保】」は希望内容ではなく行単位のメタ情報
+    # （_extract_staff_hint が別途拾う）。残骸として扱わないと
+    # 「小久保: 8/3、8/5は17-22」の先頭小節が日付だけと見なされなくなる。
+    residue = _WISH_STAFF_BRACKET_RE.sub("", segment, count=1)
+    residue = _WISH_STAFF_COLON_RE.sub("", residue, count=1)
+    residue = _WISH_DATE_RANGE_RE.sub("", residue)
+    residue = _WISH_DATE_TOKEN_RE.sub("", residue)
+    return _WISH_FILLER_RE.sub("", residue) == ""
+
+
 def _parse_wish_line(line, year_month):
     """1行を『、,;；』で小節に分け、日付と希望内容を対応付ける。
 
@@ -1039,6 +1069,10 @@ def _parse_wish_line(line, year_month):
     dates をまとめて引き継ぐ。これにより「8/3、8/5、8/7 は17時から」
     のような列挙+末尾条件の書き方と、「8/3は休み、8/5は17-22」のように
     小節ごとに条件が違う書き方の両方を区別して扱える。
+
+    引き継ぎの対象は `_wish_segment_is_dates_only()` が真の小節（日付＋助詞・
+    記号のみ）に限る。日付に加えて意味の読み取れない文言を含む小節
+    （例:「8/9からは出れます」）は引き継がず unparsed へ送る（fix round 4）。
 
     戻り値: (entries, unparsed_fragments)
     entries の要素は {"dates", "availability", "start", "end", "raw"}。
@@ -1081,9 +1115,19 @@ def _parse_wish_line(line, year_month):
                 # 希望内容はわかったが日付が伴わない → 保留せず unparsed へ
                 unparsed_fragments.append(raw)
             pending_dates, pending_raw = [], []
-        elif seg_dates:
+        elif seg_dates and _wish_segment_is_dates_only(seg):
             pending_dates = pending_dates + seg_dates
             pending_raw.append(seg)
+        elif seg_dates:
+            # 日付は取れたが、意味の読み取れない文言が同居する小節
+            # （例:「8/9からは出れます」「8/9出勤希望」）。fix round 4。
+            # 引き継がせると後続の小節の availability に黙って吸収され、
+            # 「8/9からは出れます、8/12は休み」の 8/9 が rest（＝真逆）になる。
+            # 先行して溜まっている pending_dates も、この未認識の小節に係る
+            # つもりで書かれた可能性があり後続の条件に紐づけられないため、
+            # まとめて unparsed に送って人に判断してもらう。
+            _flush_pending_as_unparsed()
+            unparsed_fragments.append(seg)
         else:
             # 日付も希望内容も読み取れない小節（雑談・接続語等）
             unparsed_fragments.append(seg)

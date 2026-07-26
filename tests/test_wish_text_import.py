@@ -171,6 +171,103 @@ class TestParseWishFallback:
         assert r["unparsed"] == ["8/3は休みだけど17-22なら"]
 
 
+    def test_ambiguous_segment_before_rest_does_not_flip_polarity(self):
+        """fix round 4: 「8/9からは出れます」（＝出勤可能）が、後続の小節の
+        rest に黙って吸収されて 8/9 が『休み』として登録される極性反転の回帰。
+
+        round 3 で「8/9からは出れます」の availability が None になった結果、
+        _parse_wish_line の `elif seg_dates:` 分岐（日付だけの小節を後続へ
+        引き継ぐ経路）にこの小節が流れ込み、次の小節が宣言した rest に
+        dates ごと吸収されていた。書かれた内容の真逆が unparsed も残さずに
+        確定するため、譲れない原則（誤登録より unparsed）に反する。
+        """
+        r = ai._parse_wish_fallback("8/9からは出れます、8/12は休み", "2026-08")
+        # 8/9 が rest として登録されていないこと（極性反転の核心）
+        assert not any("2026-08-09" in e["dates"] for e in r["entries"])
+        assert "8/9からは出れます" in r["unparsed"]
+        # 8/12 は正しく rest のままであること（安全側に倒しすぎていないこと）
+        assert len(r["entries"]) == 1
+        assert r["entries"][0]["dates"] == ["2026-08-12"]
+        assert r["entries"][0]["availability"] == "rest"
+
+    def test_ambiguous_segment_between_dates_and_time_is_not_absorbed(self):
+        """fix round 4: 曖昧な小節が実条件の小節より前にあるとき、述べられて
+        いない時間帯が黙って割り当てられない回帰。
+
+        「8/3、8/9からは出れます、8/12は17-22」は、修正前は3日付＋17:00-22:00の
+        1エントリになり、8/9 に一度も述べられていない 17-22 が付いていた。
+
+        設計判断: 未認識の小節が挟まったら、それ以前に溜まっている
+        pending_dates（ここでは 8/3）も unparsed に送る。「8/3、8/9からは
+        出れます」と読めば 8/3 は後続の 17-22 ではなく落とした文に係っている
+        可能性があり、どちらに紐づくか決められないため。
+        """
+        r = ai._parse_wish_fallback("8/3、8/9からは出れます、8/12は17-22", "2026-08")
+        # 核心: 8/9 に 17:00-22:00 が割り当たっていないこと
+        assert not any("2026-08-09" in e["dates"] for e in r["entries"])
+        assert len(r["entries"]) == 1
+        assert r["entries"][0]["dates"] == ["2026-08-12"]
+        assert r["entries"][0]["availability"] == "time"
+        assert r["entries"][0]["start"] == "17:00"
+        assert r["entries"][0]["end"] == "22:00"
+        # 挟まれた pending_dates（8/3）も曖昧な小節も人に渡すこと
+        assert "8/3" in r["unparsed"]
+        assert "8/9からは出れます" in r["unparsed"]
+
+    def test_ambiguous_segment_without_kara_is_also_not_absorbed(self):
+        """fix round 4: 同じ穴は『から』『まで』に依存しない。
+        「8/9出勤希望」も availability を判定できない日付付き小節であり、
+        後続の rest に吸収されてはいけない（round 3 以前から存在した経路）。
+        """
+        r = ai._parse_wish_fallback("8/9出勤希望、8/12は休み", "2026-08")
+        assert not any("2026-08-09" in e["dates"] for e in r["entries"])
+        assert "8/9出勤希望" in r["unparsed"]
+        assert len(r["entries"]) == 1
+        assert r["entries"][0]["dates"] == ["2026-08-12"]
+        assert r["entries"][0]["availability"] == "rest"
+
+    def test_date_only_segment_with_particle_still_carries_over(self):
+        """fix round 4 のガード: 助詞つきの『日付だけの小節』は引き継ぎが
+        壊れていないこと。「8/3は」は日付＋助詞のみで意味を持つ残骸が無いため、
+        後続の「8/5は17-22」に条件を引き継ぎ、1エントリ2日付になる。
+        """
+        r = ai._parse_wish_fallback("8/3は、8/5は17-22", "2026-08")
+        assert r["unparsed"] == []
+        assert len(r["entries"]) == 1
+        e = r["entries"][0]
+        assert e["dates"] == ["2026-08-03", "2026-08-05"]
+        assert e["availability"] == "time"
+        assert e["start"] == "17:00"
+        assert e["end"] == "22:00"
+
+    def test_segment_is_dates_only_classification(self):
+        """fix round 4 の判定基準そのものを直接検証する。
+
+        日付範囲・日付トークン・助詞・記号を取り除いて実質空なら『日付だけ』。
+        『から』『まで』『出れます』のような意味を持つ語は残骸として扱わない。
+        """
+        assert ai._wish_segment_is_dates_only("8/3") is True
+        assert ai._wish_segment_is_dates_only("8/3は") is True
+        assert ai._wish_segment_is_dates_only("8月3日") is True
+        assert ai._wish_segment_is_dates_only("8/10〜8/12") is True
+        assert ai._wish_segment_is_dates_only("8/10から8/12") is True  # 範囲の区切りの『から』
+        assert ai._wish_segment_is_dates_only("8/9からは出れます") is False
+        assert ai._wish_segment_is_dates_only("8/9出勤希望") is False
+        assert ai._wish_segment_is_dates_only("8/9は無理かも") is False
+
+    def test_staff_prefix_before_date_only_segment_still_carries_over(self):
+        """fix round 4 のガード: 行頭の『名前:』『【名前】』は希望内容ではなく
+        行単位のメタ情報なので、先頭小節を『日付だけ』と見なす妨げにならないこと。
+        """
+        r = ai._parse_wish_fallback("小久保: 8/3、8/5は17-22", "2026-08", ["小久保"])
+        assert r["unparsed"] == []
+        assert len(r["entries"]) == 1
+        e = r["entries"][0]
+        assert e["staff_hint"] == "小久保"
+        assert e["dates"] == ["2026-08-03", "2026-08-05"]
+        assert e["availability"] == "time"
+
+
 class TestParseWishText:
     """LLM が使えない環境では自動でフォールバックに落ちること。"""
 
