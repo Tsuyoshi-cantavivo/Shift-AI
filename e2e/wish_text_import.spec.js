@@ -690,12 +690,109 @@ test.describe('希望テキスト取り込み（wish text import）', () => {
   // ==========================================================
   // 項目12: created:0 の扱い
   // ==========================================================
-  test('created:0/skipped:Nは成功ではなく警告として表示され、モーダルは閉じない', async ({ page, request }) => {
+  // 注意（レビュー指摘）: このテストは以前、実サーバの message
+  // 「0件の希望を登録しました（2件は重複または不正のためスキップ）」を返しつつ、
+  // クライアントは message を使わず独自に「（2件は重複のためスキップ）」と
+  // 組み立てていた。テストは後者の文言しか assert していなかったため、
+  // サーバとクライアントの文言が食い違っていること自体を固定してしまっていた。
+  // 今回の修正でサーバの新インターフェース（skipped_detail）を使うようになった
+  // ため、スタブにも skipped_detail を含め、内訳ベースの正確な文言を assert する。
+  test('created:0/skipped:Nは成功ではなく警告として表示され、モーダルは閉じない（skipped_detailの内訳で正確に理由を示す）', async ({ page, request }) => {
     const errors = attachConsoleCollector(page);
     const sid = await createStaff(request, shopHdr, 'ZERO1', '全滅九子');
     await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
     await stubParse(page, {
       entries: [{ staff_id: sid, dates: ['2026-08-25'], availability: 'rest', start: null, end: null, raw: '8/25は休みます' }],
+      unparsed: [], source: 'llm',
+    });
+    await page.route((url) => url.pathname.endsWith('/api/shop/wishes/bulk'), async (route) => {
+      await route.fulfill({ json: {
+        ok: true, created: 0, skipped: 2,
+        skipped_detail: { duplicate: 1, invalid: 1, rollback: 0 },
+        message: '0件の希望を登録しました（2件は重複または不正のためスキップ）',
+      } });
+    });
+    await openImportModal(page);
+    await parseAndWaitStep2(page, { yearMonth: '2026-08' });
+
+    await page.click('#wtiSubmitBtn');
+    await expect(page.locator('#wtiSubmitMsg')).toContainText('登録できる項目がありませんでした', { timeout: 5000 });
+    const msg = await page.locator('#wtiSubmitMsg').textContent();
+    expect(msg).toContain('2件');
+    expect(msg).toContain('重複');
+    expect(msg).toContain('不正な入力');
+    await expect(page.locator('#wtiSubmitBtn')).toBeVisible(); // モーダルは閉じない
+    expect(errors).toEqual([]);
+  });
+
+  // ★最優先修正の受け入れテスト: skipped の内訳（重複／不正／rollback）を正確に
+  // 区別して表示すること。特に rollback（wish_historyへの書き込みに失敗して
+  // 取り消した＝データが失われた可能性）は「重複のため」と誤って伝えてはならず、
+  // 警告として目立たせる（alert-danger）。
+  test('skipped_detailのrollbackは「重複」と混同されず、警告色（alert-danger）で目立つ', async ({ page, request }) => {
+    const errors = attachConsoleCollector(page);
+    const sid = await createStaff(request, shopHdr, 'SKD1', '内訳詳細子');
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await stubParse(page, {
+      entries: [{ staff_id: sid, dates: ['2026-08-29'], availability: 'rest', start: null, end: null, raw: '8/29は休みます' }],
+      unparsed: [], source: 'llm',
+    });
+    await page.route((url) => url.pathname.endsWith('/api/shop/wishes/bulk'), async (route) => {
+      await route.fulfill({ json: {
+        ok: true, created: 0, skipped: 2,
+        skipped_detail: { duplicate: 1, invalid: 0, rollback: 1 },
+        message: 'ok',
+      } });
+    });
+    await openImportModal(page);
+    await parseAndWaitStep2(page, { yearMonth: '2026-08' });
+
+    await page.click('#wtiSubmitBtn');
+    const msgEl = page.locator('#wtiSubmitMsg .alert');
+    await expect(msgEl).toBeVisible({ timeout: 5000 });
+    const msg = await msgEl.textContent();
+    expect(msg).toContain('重複');
+    expect(msg).toContain('書き込みに失敗して取り消し');
+    await expect(msgEl).toHaveClass(/alert-danger/); // rollbackがあるので通常のwarningより強い警告色
+    await expect(page.locator('#wtiSubmitBtn')).toBeVisible(); // モーダルは閉じない
+    expect(errors).toEqual([]);
+  });
+
+  test('rollback>0は一部登録できていてもモーダルを閉じず警告を出す', async ({ page, request }) => {
+    const errors = attachConsoleCollector(page);
+    const sid = await createStaff(request, shopHdr, 'RB1', 'rollback太郎');
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await stubParse(page, {
+      entries: [
+        { staff_id: sid, dates: ['2026-08-04'], availability: 'rest', start: null, end: null, raw: '8/4は休みます' },
+        { staff_id: sid, dates: ['2026-08-05'], availability: 'rest', start: null, end: null, raw: '8/5も休みます' },
+      ],
+      unparsed: [], source: 'llm',
+    });
+    await page.route((url) => url.pathname.endsWith('/api/shop/wishes/bulk'), async (route) => {
+      await route.fulfill({ json: {
+        ok: true, created: 1, skipped: 1,
+        skipped_detail: { duplicate: 0, invalid: 0, rollback: 1 },
+        message: 'ok',
+      } });
+    });
+    await openImportModal(page);
+    await parseAndWaitStep2(page, { yearMonth: '2026-08' });
+
+    await page.click('#wtiSubmitBtn');
+    await expect(page.locator('#wtiSubmitMsg')).toContainText('書き込みに失敗して取り消し', { timeout: 5000 });
+    await expect(page.locator('#wtiSubmitBtn')).toBeVisible(); // rollbackがあるので閉じない
+    expect(errors).toEqual([]);
+  });
+
+  // サーバが skipped_detail 未対応（過渡期・旧サーバ）の場合のフォールバック。
+  // 理由を断定してはいけない（「重複」等と決め打ちしない）。
+  test('skipped_detailが無い場合は理由を断定しない文言にフォールバックする', async ({ page, request }) => {
+    const errors = attachConsoleCollector(page);
+    const sid = await createStaff(request, shopHdr, 'SKDF1', 'フォールバック十二子');
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await stubParse(page, {
+      entries: [{ staff_id: sid, dates: ['2026-08-30'], availability: 'rest', start: null, end: null, raw: '8/30は休みます' }],
       unparsed: [], source: 'llm',
     });
     await page.route((url) => url.pathname.endsWith('/api/shop/wishes/bulk'), async (route) => {
@@ -708,7 +805,88 @@ test.describe('希望テキスト取り込み（wish text import）', () => {
     await expect(page.locator('#wtiSubmitMsg')).toContainText('登録できる項目がありませんでした', { timeout: 5000 });
     const msg = await page.locator('#wtiSubmitMsg').textContent();
     expect(msg).toContain('2件');
-    await expect(page.locator('#wtiSubmitBtn')).toBeVisible(); // モーダルは閉じない
+    // 内訳が不明なので理由を断定しない（「重複」「書き込みに失敗」と決め打ちしない）
+    expect(msg).not.toContain('重複');
+    expect(msg).not.toContain('書き込みに失敗');
+    await expect(page.locator('#wtiSubmitBtn')).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  // ==========================================================
+  // I-3: raw_verified:false の警告表示
+  // ==========================================================
+  test('I-3: raw_verified:falseの項目は詳細モーダルとカレンダーに警告が出る', async ({ page, request }) => {
+    const errors = attachConsoleCollector(page);
+    const sid = await createStaff(request, shopHdr, 'RV1', 'raw検証太郎');
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await stubParse(page, {
+      entries: [
+        { staff_id: sid, dates: ['2026-08-11'], availability: 'rest', start: null, end: null, raw: 'この文はテキストに実在しません', raw_verified: false },
+      ],
+      unparsed: [], source: 'llm',
+    });
+    await openImportModal(page);
+    await parseAndWaitStep2(page, { yearMonth: '2026-08' });
+
+    // カレンダーのセルにも印が出る（開かないと気づけないため）
+    await expect(page.locator('.wish-cell[data-day="2026-08-11"] .wti-raw-unverified-flag')).toBeVisible();
+
+    // 詳細モーダルに警告が出る
+    await page.click('.wish-cell[data-day="2026-08-11"]');
+    await expect(page.locator('.wti-detail-entry')).toContainText('AIが要約または創作した可能性があります');
+    expect(errors).toEqual([]);
+  });
+
+  // ==========================================================
+  // I-4: 既存希望の中身を列挙してから上書きさせる
+  // ==========================================================
+  test('I-4: 既存希望のある日の詳細モーダルに、上書きで消える内容が列挙される', async ({ page, request }) => {
+    const errors = attachConsoleCollector(page);
+    const sid = await createStaff(request, shopHdr, 'EX1', '既存列挙花子');
+    // 既存希望を2件、同日の重ならない時間帯で作る（上書きすると両方消える）
+    await submitExistingWish(request, SHOP, 'EX1', { start: '2026-08-13T08:00:00', end: '2026-08-13T12:00:00', availability: 'time' });
+    await submitExistingWish(request, SHOP, 'EX1', { start: '2026-08-13T15:00:00', end: '2026-08-13T20:00:00', availability: 'time' });
+
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await stubParse(page, {
+      entries: [{ staff_id: sid, dates: ['2026-08-13'], availability: 'rest', start: null, end: null, raw: '8/13は休みたいです' }],
+      unparsed: [], source: 'llm',
+    });
+    await openImportModal(page);
+    await parseAndWaitStep2(page, { yearMonth: '2026-08' });
+
+    await page.click('.wish-cell[data-day="2026-08-13"]');
+    const detailText = await page.locator('.modal-overlay').filter({ has: page.locator('#wtiDetailErr') }).textContent();
+    expect(detailText).toContain('現在の登録');
+    expect(detailText).toContain('08:00');
+    expect(detailText).toContain('12:00');
+    expect(detailText).toContain('15:00');
+    expect(detailText).toContain('20:00');
+    expect(detailText).toContain('2件');
+    expect(errors).toEqual([]);
+  });
+
+  // ==========================================================
+  // I-7: 既存希望の取得を対象スタッフに絞る
+  // ==========================================================
+  test('I-7: /shop/wishesのリクエストに解析結果のstaff_idが含まれる', async ({ page, request }) => {
+    const errors = attachConsoleCollector(page);
+    const sid = await createStaff(request, shopHdr, 'SID1', 'スタッフ絞込十三子');
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    let wishesUrl = null;
+    await page.route((url) => url.pathname.endsWith('/api/shop/wishes'), async (route) => {
+      wishesUrl = route.request().url();
+      await route.continue();
+    });
+    await stubParse(page, {
+      entries: [{ staff_id: sid, dates: ['2026-08-18'], availability: 'rest', start: null, end: null, raw: '8/18は休みます' }],
+      unparsed: [], source: 'llm',
+    });
+    await openImportModal(page);
+    await parseAndWaitStep2(page, { yearMonth: '2026-08' });
+
+    expect(wishesUrl).toBeTruthy();
+    expect(wishesUrl).toContain(`staff_id=${sid}`);
     expect(errors).toEqual([]);
   });
 

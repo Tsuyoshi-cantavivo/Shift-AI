@@ -1458,6 +1458,15 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 .wti-existing-flag {
   position: absolute; top: 3px; right: 3px; font-size: .62rem; color: var(--warning);
 }
+/* I-3: raw が貼り付けテキストに実在しない（AIの要約・創作の疑い）ことを示す印。
+   既存希望フラグ（右上）と同時に出ても重ならないよう反対側（左上）に置く。 */
+.wti-raw-unverified-flag {
+  position: absolute; top: 3px; left: 3px; font-size: .62rem; color: var(--danger);
+}
+/* Minor: 項目は無いが既存希望の印だけがある日は、クリックしても何も起きない
+   （no-op）。.disabled のように暗くはしたくない（印を目立たせたい）ので、
+   opacity はそのままに cursor だけ既定へ戻す別クラス。 */
+.wti-cal .wish-cell.wti-existing-only { cursor: default; }
 /* 同一(スタッフ,日付)に複数の読み取りが残っている日のマーク（レビュー C-1）。
    .wmark.morning と同じ配色（--warning地に--paper文字）を流用し、コントラストは
    既に検証済みの組み合わせのまま新規トークンを増やさない。 */
