@@ -5,6 +5,8 @@
 """
 import os
 import json
+import re
+import unicodedata
 from datetime import datetime, timedelta
 from flask import (Flask, request, jsonify, abort, Response, send_file, g)
 from werkzeug.exceptions import HTTPException
@@ -3438,15 +3440,46 @@ def staff_wishes():
 
 @app.get("/api/shop/wishes")
 def shop_wishes():
-    """店舗の全スタッフ希望履歴を取得（店長が確認用）。"""
+    """店舗の全スタッフ希望履歴を取得（店長が確認用）。
+
+    `staff_id` を渡すとそのスタッフだけに絞り込む（省略時は従来どおり店舗全体）。
+    絞り込みが必要な理由: 末尾の LIMIT 500 は ORDER BY start_datetime DESC と
+    組み合わさるため、上限に達したときに黙って落ちるのは「古い日付側」＝
+    取り込みプレビューが確認したい対象月そのものになる。wish_history は永久履歴で
+    上書き分も蓄積するため、11名運用でも数ヶ月で到達する。到達すると「既存あり」の
+    印が出ず、サーバ側は重複としてスキップするのに画面は新規登録できるように見え、
+    created がプレビュー件数と乖離する。対象スタッフが分かっている呼び出し元は
+    staff_id を渡すことで、必要な行が黙って欠けないようにできる。
+    指定形式: ?staff_id=3&staff_id=5 / ?staff_id=3,5 の両方を受け付ける。
+    """
     shop, shop_id, _ = _shop_ctx()
     start_d = request.args.get("start")
     end_d = request.args.get("end")
+    raw_staff_args = request.args.getlist("staff_id")
+    staff_ids = []
+    for raw_v in raw_staff_args:
+        for part in str(raw_v).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                sid = int(part)
+            except ValueError:
+                continue
+            if sid not in staff_ids:
+                staff_ids.append(sid)
+    if raw_staff_args and not staff_ids:
+        # 絞り込みを指定されたが有効なIDが1つも無い。店舗全体を返すと
+        # 「頼んだ範囲」と違うものを返すことになるため、空で返す。
+        return jsonify({"wishes": []})
     sql = ("SELECT wh.id, wh.staff_id, s.name as staff_name, s.staff_code, "
            "wh.start_datetime, wh.end_datetime, wh.availability, wh.submitted_at, wh.note "
            "FROM wish_history wh "
            "JOIN staffs s ON wh.staff_id=s.id WHERE wh.shop_id=?")
     params = [shop_id]
+    if staff_ids:
+        sql += " AND wh.staff_id IN (" + ",".join(["?"] * len(staff_ids)) + ")"
+        params.extend(staff_ids)
     if start_d:
         sql += " AND wh.start_datetime>=?"
         params.append(start_d + "T00:00:00")
@@ -3461,26 +3494,102 @@ def shop_wishes():
     return jsonify({"wishes": rows})
 
 
+_YEAR_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+# 「元の文」照合時に無視する引用符（LLM が 「…」 や "…" で括って返すことがある）
+_RAW_QUOTE_CHARS = "「」『』“”‘’\"'`"
+
+
+def _wish_raw_norm(s):
+    """raw と貼り付けテキストを照合するための「緩い」正規化。
+
+    全角/半角（NFKC）・大文字小文字・空白・引用符の差だけを吸収する。
+    意味のある文字は落とさない（落とすと幻覚された raw まで一致してしまう）。
+    厳しすぎると常に不一致になり、警告そのものが無意味になるためこの粒度にする。
+    """
+    if not isinstance(s, str):
+        return ""
+    t = unicodedata.normalize("NFKC", s).casefold()
+    return "".join(ch for ch in t if not ch.isspace() and ch not in _RAW_QUOTE_CHARS)
+
+
+def _wish_raw_verified(raw, text_norm):
+    """entry の raw が貼り付けテキストに実在するか（設計書 §6 の関門を守る）。
+
+    raw は LLM が生成した文字列で、入力テキストの部分文字列である保証がどこにも
+    無い。要約・言い換え・幻覚された raw を「元の文」として見せると、店長は
+    捏造された文と照合することになり、「元の文を必ず見せる＝誤読を発見する唯一の
+    手段」（設計書 §6）が機能しなくなる。プロンプトインジェクションと組み合わせ
+    れば意図的にも悪用できる。ここで照合し、確認できないものには
+    raw_verified=false を立てて UI に警告させる。
+
+    raw が複数の断片を連結したもの（フォールバックは "\\n" や " / " で連結する）の
+    場合は、全ての断片が入力に含まれるときだけ verified とする。
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return False  # 照合するものが無い＝店長は確認できない
+    parts = []
+    for line in raw.split("\n"):
+        parts.extend(line.split(" / "))
+    checked = 0
+    for p in parts:
+        n = _wish_raw_norm(p)
+        if not n:
+            continue
+        checked += 1
+        if n not in text_norm:
+            return False
+    return checked > 0
+
+
 @app.post("/api/shop/wishes/parse")
 def shop_wishes_parse():
     """希望テキストを解析する。保存はしない（何度でも試せる）。"""
     shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
-    text = (body.get("text") or "").strip()
+    raw_text = body.get("text")
+    text = raw_text.strip() if isinstance(raw_text, str) else ""
     if not text:
         abort(400, description="text が必要です")
-    year_month = body.get("year_month") or jst_today().strftime("%Y-%m")
-    staff_id = body.get("staff_id")
+    # year_month を検証してから使う（不正値のまま解析に渡すと int() の ValueError が
+    # そのまま 400 のメッセージになり、Python の内部メッセージが利用者に露出する）
+    raw_ym = body.get("year_month")
+    year_month = raw_ym.strip() if isinstance(raw_ym, str) else ""
+    if not year_month:
+        year_month = jst_today().strftime("%Y-%m")
+    if not _YEAR_MONTH_RE.match(year_month):
+        abort(400, description="year_month は YYYY-MM 形式で指定してください（例: 2026-08）")
+    # ★ 明示指定された staff_id も店舗所属を検証する。bulk 側でも弾いてはいるが、
+    # 未検証のままエコーバックすると parse のレスポンスだけを信じる呼び出し元
+    # （将来の画面・外部連携）に他店舗の staff_id が渡ってしまう。
+    raw_staff_id = body.get("staff_id")
+    staff_id = None
+    if raw_staff_id not in (None, ""):
+        try:
+            sid = int(raw_staff_id)
+        except (TypeError, ValueError):
+            abort(400, description="staff_id が不正です")
+        row = query_one("SELECT id FROM staffs WHERE id=? AND shop_id=? AND is_resigned=0",
+                        (sid, shop_id))
+        if not row:
+            abort(400, description="指定されたスタッフが見つかりません")
+        staff_id = row["id"]
     staffs = query_all("SELECT id, name FROM staffs WHERE shop_id=? AND is_resigned=0", (shop_id,))
     result = ai.parse_wish_text(text, year_month, [s["name"] for s in staffs])
     # staff_hint をスタッフIDに解決する（一致しなければ None のまま＝未割り当て。推測はしない）
     by_name = {s["name"]: s["id"] for s in staffs}
-    for e in result.get("entries", []):
-        if staff_id:
+    entries = [e for e in (result.get("entries") or []) if isinstance(e, dict)]
+    result["entries"] = entries
+    text_norm = _wish_raw_norm(text)
+    for e in entries:
+        # ★ 「元の文」が本当に入力に在るかを毎回検証して返す（UI が警告を出す）
+        e["raw_verified"] = _wish_raw_verified(e.get("raw"), text_norm)
+        if staff_id is not None:
             e["staff_id"] = staff_id  # 明示指定が最優先。staff_hint は無視する
         else:
             hint = e.get("staff_hint")
-            e["staff_id"] = by_name.get(hint) if hint else None
+            # LLM が list/dict を返しても落ちないこと（dict.get に非ハッシュ可能な
+            # 値を渡すと TypeError で 500 になる）
+            e["staff_id"] = by_name.get(hint) if isinstance(hint, str) and hint else None
     return jsonify(result)
 
 
@@ -3506,6 +3615,23 @@ def _wish_times(date, availability, start, end, shop_end):
 # 明示的にスキップする（未知トークンによる画面表示崩れを防ぐ）。
 _WISH_AVAILABILITY_VALUES = ("rest", "any", "morning", "evening", "time")
 
+# availability='time' の start/end はこの形式のみ受け付ける（00:00〜23:59）。
+# 検証しないと utils.norm_hhmm が "17時" を黙って "00:00" に潰し、24時間の希望
+# として保存される。"25:00" は不正な datetime を組み立てて後続処理を例外にする。
+_WISH_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
+_WISH_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_wish_date(s):
+    """'YYYY-MM-DD' 形式かつ暦上有効な日付か。"""
+    if not isinstance(s, str) or not _WISH_DATE_RE.match(s):
+        return False
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
 
 def _wish_history_exists(staff_id, start_dt, end_dt):
     """wish_history に同一 (staff_id, start_datetime, end_datetime) の行が既存か。
@@ -3513,7 +3639,8 @@ def _wish_history_exists(staff_id, start_dt, end_dt):
     wish_history はスキーマ初期化時に必ず作成される（schema.sql）。
     「no such table」以外の DB エラーはここで握りつぶさず呼び出し元に伝える。
     黙って握りつぶすと「実際には確認できていないのに既存なしとして登録を進めた」
-    という事故につながるため。
+    という事故につながるため。呼び出し元（bulk）は item 単位で捕捉し、その1件だけを
+    スキップして続行する（1件のDB不調でバッチ全体を 500 にしない）。
     """
     try:
         return query_one(
@@ -3538,6 +3665,14 @@ def shop_wishes_bulk():
     店長の代理入力なので、スタッフ提出時の募集期間・締切の検証は行わない
     （締切はスタッフに対する期限であり店長を縛らない。募集期間が未設定の
     店舗でも取り込めるようにする）。
+
+    レスポンスの `skipped_detail` は skipped の内訳（合計は必ず skipped と一致）。
+      - duplicate : 既に同じ希望がある（_check_staff_overlap / _wish_history_exists）
+      - invalid   : 入力が不正（他店舗/退職スタッフ、enum外 availability、
+                    不正な date/start/end）
+      - rollback  : 書き込みに失敗して取り消した（DB不調で書けなかった分を含む）
+    内訳を分けずに「重複のためスキップ」とだけ返すと、書き込みエラーまで
+    「重複」と偽って店長に伝えることになる。
     """
     shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
@@ -3546,27 +3681,71 @@ def shop_wishes_bulk():
     if not wishes:
         abort(400, description="wishes が必要です")
     shop_end = _get_shop_shift_end_time(shop_id)
-    created = skipped = 0
+    created = 0
+    detail = {"duplicate": 0, "invalid": 0, "rollback": 0}
     for w in wishes:
+        if not isinstance(w, dict):
+            detail["invalid"] += 1
+            continue
         staff_id = w.get("staff_id")
         date = w.get("date")
         avail = w.get("availability")
-        if not staff_id or not date or avail not in _WISH_AVAILABILITY_VALUES:
-            skipped += 1
+        if not staff_id or avail not in _WISH_AVAILABILITY_VALUES or not _is_wish_date(date):
+            detail["invalid"] += 1
             continue
-        if avail == "time" and (not w.get("start") or not w.get("end")):
-            skipped += 1
+        try:
+            staff_id = int(staff_id)
+        except (TypeError, ValueError):
+            detail["invalid"] += 1
+            continue
+        # ★ time は start/end の「形式」まで検証する（存在チェックだけでは不足）。
+        # "17時" は norm_hhmm が黙って "00:00" に潰し 00:00〜24:00 の終日希望として
+        # 保存され、"25:00" は不正な datetime を組み立てて破壊的な例外経路に入る。
+        # パーサ側でも検証するが、bulk はサーバ側の最終防衛線なのでここでも弾く。
+        if avail == "time" and not (
+                _WISH_TIME_RE.match(str(w.get("start") or "")) and
+                _WISH_TIME_RE.match(str(w.get("end") or ""))):
+            detail["invalid"] += 1
             continue
         # ★ 他店舗/退職者の staff_id を弾く（parse 側では未検証。保存側が最終防衛線）
-        staff = query_one("SELECT id FROM staffs WHERE id=? AND shop_id=?", (staff_id, shop_id))
-        if not staff:
-            skipped += 1
+        try:
+            staff = query_one("SELECT id FROM staffs WHERE id=? AND shop_id=?", (staff_id, shop_id))
+        except Exception as e:
+            detail["rollback"] += 1
+            print(f"[wishes/bulk] staffs 照会に失敗（この1件のみスキップ・データは無傷） "
+                  f"staff_id={staff_id} date={date}: {e}", flush=True)
             continue
-        start_dt, end_dt = _wish_times(date, avail, w.get("start"), w.get("end"), shop_end)
+        if not staff:
+            detail["invalid"] += 1
+            continue
+        try:
+            start_dt, end_dt = _wish_times(date, avail, w.get("start"), w.get("end"), shop_end)
+        except Exception as e:
+            detail["invalid"] += 1
+            print(f"[wishes/bulk] 日時の組み立てに失敗 staff_id={staff_id} date={date}: {e}", flush=True)
+            continue
+        # ★ overwrite でも「先に DELETE」はしない。
+        # 先に消すと、後続の INSERT が失敗したときに既存の希望が消えたまま戻らない
+        # （HTTP 200・ok:true・「重複のためスキップ」と報告しながら、店長やスタッフ
+        # 本人が持っていた希望だけが消える）。再送すればまた DELETE が走り、また失敗し、
+        # データは戻らない。本番は D1（REST API 越し）でタイムアウト・レート制限が
+        # 現実に起きるため、消す前に対象を id で退避し、両テーブルへの INSERT が
+        # 成功したときだけ退避行を削除する（失敗時は1行も消えない）。
+        stale_wh, stale_sh = [], []
         if overwrite:
-            # 店長がプレビューで明示的に選んだ場合のみ、その日の既存希望を消して入れ直す
-            execute("DELETE FROM wish_history WHERE staff_id=? AND start_datetime LIKE ?", (staff_id, date + "%"))
-            execute("DELETE FROM shifts WHERE staff_id=? AND status='requested' AND start_datetime LIKE ?", (staff_id, date + "%"))
+            try:
+                stale_wh = [r["id"] for r in query_all(
+                    "SELECT id FROM wish_history WHERE shop_id=? AND staff_id=? AND start_datetime LIKE ?",
+                    (shop_id, staff_id, date + "%"))]
+                stale_sh = [r["id"] for r in query_all(
+                    "SELECT id FROM shifts WHERE shop_id=? AND staff_id=? AND status='requested' "
+                    "AND start_datetime LIKE ?",
+                    (shop_id, staff_id, date + "%"))]
+            except Exception as e:
+                detail["rollback"] += 1
+                print(f"[wishes/bulk] 上書き対象の照会に失敗（既存希望は無傷のまま中止） "
+                      f"staff_id={staff_id} date={date}: {e}", flush=True)
+                continue
         else:
             # ★ shifts と wish_history はスキップ判定の基準が違う
             #   （shifts=時間帯の重なり判定 / wish_history=完全一致判定）。
@@ -3574,43 +3753,105 @@ def shop_wishes_bulk():
             # 行ができるが、wish_history は完全一致の既存行があるため書けない」という
             # 非対称が起き、created が実態と乖離する。両方をここでまとめて判定し、
             # どちらかに該当すれば INSERT 自体を行わない。
-            overlap, _conflict = _check_staff_overlap(shop_id, staff_id, start_dt, end_dt, include_requested=True)
-            if overlap or _wish_history_exists(staff_id, start_dt, end_dt):
-                skipped += 1
+            try:
+                overlap, _conflict = _check_staff_overlap(
+                    shop_id, staff_id, start_dt, end_dt, include_requested=True)
+                is_dup = bool(overlap) or _wish_history_exists(staff_id, start_dt, end_dt)
+            except Exception as e:
+                # 重複判定そのものが失敗した。「確認できていないのに登録する」ことは
+                # しない。かつ 1件のDB不調でバッチ全体を 500 にもしない（item 単位で
+                # スキップして続行する）。重複ではないので rollback に計上する。
+                detail["rollback"] += 1
+                print(f"[wishes/bulk] 重複判定に失敗（この1件のみスキップ・データは無傷） "
+                      f"staff_id={staff_id} date={date}: {e}", flush=True)
+                continue
+            if is_dup:
+                detail["duplicate"] += 1
                 continue
         note = "店長が取り込み"
-        raw = (w.get("raw") or "").strip()
+        raw = str(w.get("raw") or "").strip()
         if raw:
-            note += f": {raw[:200]}"
-        if avail == "time":
-            work = minutes_between(start_dt, end_dt)
-            shift_meta = execute(
-                "INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason) VALUES (?,?,?,?,?,?,?)",
-                (shop_id, staff_id, start_dt, end_dt, compute_break_minutes(work), "requested", note))
-        else:
-            shift_meta = execute(
-                "INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, status, reason, availability) VALUES (?,?,?,?,?,?,?)",
-                (shop_id, staff_id, start_dt, end_dt, "requested", note, avail))
+            # プレビューは raw を全文見せる。切り詰めた記録だけが残ると「見た文」と
+            # 「残る記録」がずれるため、切り詰めた事実を記録側にも残す。
+            note += f": {raw[:500]}" + ("…（元の文はここで省略）" if len(raw) > 500 else "")
+        try:
+            if avail == "time":
+                work = minutes_between(start_dt, end_dt)
+                shift_meta = execute(
+                    "INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason) VALUES (?,?,?,?,?,?,?)",
+                    (shop_id, staff_id, start_dt, end_dt, compute_break_minutes(work), "requested", note))
+            else:
+                shift_meta = execute(
+                    "INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, status, reason, availability) VALUES (?,?,?,?,?,?,?)",
+                    (shop_id, staff_id, start_dt, end_dt, "requested", note, avail))
+        except Exception as e:
+            detail["rollback"] += 1
+            print(f"[wishes/bulk] shifts INSERT失敗（既存希望は削除していないため無傷） "
+                  f"staff_id={staff_id} date={date}: {e}", flush=True)
+            continue
         # ★ wish_history にも永久保存（AI再生成の入力 + 希望表管理画面の参照元）。
+        # availability は shifts 側と完全に同じ値にする。時間指定希望は shifts に
+        # availability を書かない（NULL）ので、ここも None を書く。既存の唯一の
+        # 書き手 /api/staff/requests も時間指定では両テーブル NULL であり、
+        # 'time' という値は本ブランチ以前 DB に一度も存在しなかった。
+        # 'time' を書くと壊れるもの:
+        #   1. 希望表管理画面が「時間指定」を「柔軟 17:00-22:00（目安）」と
+        #      偽って表示する（.wmark の語彙に 'time' が無く「柔軟」に落ちる）
+        #   2. shift_engine Step2a の UNION が畳めず同じ希望が2行に増え、片方は
+        #      flex 扱いになるが _slot_matches('time', ...) が常に False なので
+        #      永久に配置されない幽霊希望として残る
+        #   3. 希望反映率の分母（req_count）が水増しされ、「調整待ち」の件数が嘘になる
         # ここで失敗すると shifts 側だけ書けた状態（片方だけ入る）になってしまうため、
-        # 直前に作った shifts 行を取り消し、created ではなく skipped として扱う。
+        # 直前に作った shifts 行を取り消し、created ではなく rollback として扱う。
         # 例外は握りつぶさず print で残す（「登録できていないのに登録した」と
         # 表示する事故を防ぐため、原因は追えるようにする）。
+        wh_avail = None if avail == "time" else avail
         try:
             execute(
                 "INSERT INTO wish_history (shop_id, staff_id, start_datetime, end_datetime, availability, note) VALUES (?,?,?,?,?,?)",
-                (shop_id, staff_id, start_dt, end_dt, avail, note))
+                (shop_id, staff_id, start_dt, end_dt, wh_avail, note))
         except Exception as e:
-            execute("DELETE FROM shifts WHERE id=?", (shift_meta["last_row_id"],))
+            new_shift_id = (shift_meta or {}).get("last_row_id")
+            if new_shift_id:
+                try:
+                    execute("DELETE FROM shifts WHERE id=? AND shop_id=?", (new_shift_id, shop_id))
+                except Exception as de:
+                    print(f"[wishes/bulk] ★補償失敗: shifts行 id={new_shift_id} を取り消せなかった "
+                          f"staff_id={staff_id} date={date}: {de}", flush=True)
+            else:
+                # D1 では meta.last_row_id が取れないと 0 が返る（src/db.py）。
+                # id=0 で DELETE を撃っても無言で空振りするだけなので、撃たずに
+                # 「補償できなかった」と記録する（孤立行が残った可能性がある）。
+                print(f"[wishes/bulk] ★補償失敗: last_row_id を取得できず shifts行を取り消せない "
+                      f"staff_id={staff_id} date={date}", flush=True)
+            detail["rollback"] += 1
             print(f"[wishes/bulk] wish_history INSERT失敗のため shifts行を取消 "
                   f"staff_id={staff_id} date={date}: {e}", flush=True)
-            skipped += 1
             continue
+        # 両テーブルに書けたので、ここで初めて既存行を消す（overwrite 指定時のみ）。
+        # 退避した id を消すので、直前に INSERT した新しい行は対象にならない。
+        for table, stale_ids in (("wish_history", stale_wh), ("shifts", stale_sh)):
+            for old_id in stale_ids:
+                try:
+                    execute(f"DELETE FROM {table} WHERE id=? AND shop_id=?", (old_id, shop_id))
+                except Exception as e:
+                    print(f"[wishes/bulk] 上書き対象の {table} 行 id={old_id} を削除できず "
+                          f"（新しい希望は登録済み・古い希望が残っている） "
+                          f"staff_id={staff_id} date={date}: {e}", flush=True)
         created += 1
+    skipped = detail["duplicate"] + detail["invalid"] + detail["rollback"]
     msg = f"{created}件の希望を登録しました"
-    if skipped:
-        msg += f"（{skipped}件は重複または不正のためスキップ）"
-    return jsonify({"ok": True, "created": created, "skipped": skipped, "message": msg})
+    reasons = []
+    if detail["duplicate"]:
+        reasons.append(f"{detail['duplicate']}件は既存の希望と重複")
+    if detail["invalid"]:
+        reasons.append(f"{detail['invalid']}件は入力が不正")
+    if detail["rollback"]:
+        reasons.append(f"{detail['rollback']}件は登録に失敗（取り消し済み）")
+    if reasons:
+        msg += "（" + "、".join(reasons) + "のためスキップ）"
+    return jsonify({"ok": True, "created": created, "skipped": skipped,
+                    "skipped_detail": detail, "message": msg})
 
 
 @app.get("/api/shop/staff-tendencies")

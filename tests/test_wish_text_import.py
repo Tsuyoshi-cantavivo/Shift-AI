@@ -806,3 +806,493 @@ class TestWishBulkApi:
         # shifts 行がロールバックされ、孤立レコードが残っていないこと
         assert self._shifts_requested_count(shop_id) == 0
         assert self._wish_history_count(shop_id) == 0
+
+
+class TestWishBulkIntegrity:
+    """取り込みの「報告が事実と一致すること」の回帰（最終レビュー指摘分）。
+
+    - C-1: wish_history.availability に 'time' を書くと、同じ希望が2テーブルで
+      別の値になり、希望表管理画面の表示・shift_engine の UNION 重複排除・
+      希望反映率の3つが同時に壊れる。
+    - C-2: overwrite=true の途中失敗が、既存希望を消したまま「スキップしました」と
+      報告する（HTTP 200・ok:true のままデータだけ失われる）。
+    """
+
+    def _shifts_requested_count(self, shop_id):
+        return dbmod.query_one(
+            "SELECT COUNT(*) as c FROM shifts WHERE status='requested' AND shop_id=?", (shop_id,))["c"]
+
+    def _wish_history_count(self, shop_id):
+        return dbmod.query_one("SELECT COUNT(*) as c FROM wish_history WHERE shop_id=?", (shop_id,))["c"]
+
+    def _post_bulk(self, client, token, wishes, overwrite=False):
+        return client.post("/api/shop/wishes/bulk",
+                           json={"wishes": wishes, "overwrite": overwrite},
+                           headers=auth(token))
+
+    # ---------------- C-1 ----------------
+
+    def test_time_wish_availability_is_identical_in_both_tables(self, client):
+        """time 希望は shifts と wish_history で availability が同じ値（NULL）になること。
+
+        既存の唯一の書き手 /api/staff/requests は時間指定希望に対して両テーブルとも
+        NULL を書く。wish_history にだけ 'time' を書くと
+          1. 希望表管理画面が「時間指定」を「柔軟（目安）」と偽って表示する
+          2. shift_engine Step2a の UNION が畳めず同じ希望が2行に増える
+          3. 希望反映率の分母が水増しされ「調整待ち」の件数が嘘になる
+        """
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        wishes = [{"staff_id": staff_id, "date": "2026-08-05", "availability": "time",
+                   "start": "17:00", "end": "22:00", "raw": "8/5は17時から22時まで"}]
+        r = self._post_bulk(client, token, wishes)
+
+        assert r.status_code == 200, r.get_json()
+        assert r.get_json()["created"] == 1
+        sh = dbmod.query_one(
+            "SELECT start_datetime, end_datetime, availability FROM shifts "
+            "WHERE staff_id=? AND status='requested'", (staff_id,))
+        wh = dbmod.query_one(
+            "SELECT start_datetime, end_datetime, availability FROM wish_history WHERE staff_id=?",
+            (staff_id,))
+        assert wh["availability"] is None, "時間指定希望に 'time' を書いてはいけない（既存経路は NULL）"
+        assert (sh["start_datetime"], sh["end_datetime"], sh["availability"]) == \
+               (wh["start_datetime"], wh["end_datetime"], wh["availability"])
+
+    def test_time_wish_is_single_row_in_engine_union(self, client):
+        """shift_engine Step2a の UNION が同じ希望を1行に畳めること（幽霊希望の回帰）。
+
+        2テーブルのタプルが一致しないと UNION が畳めず、片方が flex 扱いになるが
+        _slot_matches('time', ...) は常に False なので永久に配置されない行が残る。
+        """
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+        self._post_bulk(client, token, [
+            {"staff_id": staff_id, "date": "2026-08-05", "availability": "time",
+             "start": "17:00", "end": "22:00", "raw": "8/5は17時から22時まで"}])
+
+        # shift_engine.auto_generate の Step2a と同じ UNION（src/shift_engine.py）
+        rows = dbmod.query_all(
+            "SELECT staff_id, start_datetime, end_datetime, availability FROM ("
+            "  SELECT wh.staff_id, wh.start_datetime, wh.end_datetime, wh.availability "
+            "  FROM wish_history wh WHERE wh.shop_id=?"
+            "  UNION"
+            "  SELECT sh.staff_id, sh.start_datetime, sh.end_datetime, sh.availability "
+            "  FROM shifts sh WHERE sh.shop_id=? AND sh.status='requested'"
+            ")", (shop_id, shop_id))
+        assert len(rows) == 1, f"同じ希望が {len(rows)} 行に増えている: {rows}"
+
+    def test_flex_wish_keeps_its_availability_in_both_tables(self, client):
+        """time 以外（rest 等）は従来どおり両テーブルに同じ availability が入ること。"""
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        self._post_bulk(client, token, [
+            {"staff_id": staff_id, "date": "2026-08-03", "availability": "rest",
+             "start": None, "end": None, "raw": "8/3は休み"}])
+
+        sh = dbmod.query_one(
+            "SELECT availability FROM shifts WHERE staff_id=? AND status='requested'", (staff_id,))
+        wh = dbmod.query_one("SELECT availability FROM wish_history WHERE staff_id=?", (staff_id,))
+        assert sh["availability"] == "rest"
+        assert wh["availability"] == "rest"
+
+    # ---------------- C-2 ----------------
+
+    def _make_existing_rest_wish(self, client, token, staff_id, date="2026-09-05"):
+        r = self._post_bulk(client, token, [
+            {"staff_id": staff_id, "date": date, "availability": "rest",
+             "start": None, "end": None, "raw": f"{date}は休み"}])
+        assert r.get_json()["created"] == 1
+
+    def test_overwrite_wish_history_failure_keeps_existing_wish(self, client, monkeypatch):
+        """overwrite の途中で wish_history INSERT が失敗しても、既存の希望が消えないこと。
+
+        先に DELETE してから INSERT すると、失敗時に DELETE だけが残り、
+        HTTP 200・ok:true・「重複または不正のためスキップ」と報告しながら
+        店長／スタッフ本人が持っていた希望が消える。再送してもまた消えるだけで戻らない。
+        """
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+        self._make_existing_rest_wish(client, token, staff_id)
+        assert (self._wish_history_count(shop_id), self._shifts_requested_count(shop_id)) == (1, 1)
+
+        real_execute = appmod.execute
+
+        def fake_execute(sql, params=()):
+            if sql.strip().startswith("INSERT INTO wish_history"):
+                raise RuntimeError("simulated wish_history insert failure")
+            return real_execute(sql, params)
+
+        monkeypatch.setattr(appmod, "execute", fake_execute)
+        r = self._post_bulk(client, token, [
+            {"staff_id": staff_id, "date": "2026-09-05", "availability": "time",
+             "start": "17:00", "end": "22:00", "raw": "9/5は17-22に変更"}], overwrite=True)
+
+        assert r.status_code == 200, r.get_json()
+        body = r.get_json()
+        assert body["created"] == 0
+        assert body["skipped"] == 1
+        assert body["skipped_detail"] == {"duplicate": 0, "invalid": 0, "rollback": 1}
+        # ★ 既存の希望が失われていないこと（消したまま「スキップ」と報告しない）
+        assert self._wish_history_count(shop_id) == 1
+        assert self._shifts_requested_count(shop_id) == 1
+        wh = dbmod.query_one(
+            "SELECT start_datetime, end_datetime, availability FROM wish_history WHERE staff_id=?",
+            (staff_id,))
+        assert wh["start_datetime"] == "2026-09-05T00:00:00"
+        assert wh["end_datetime"] == "2026-09-05T23:59:59"
+        assert wh["availability"] == "rest"
+
+    def test_overwrite_shift_insert_failure_keeps_existing_wish(self, client, monkeypatch):
+        """overwrite で shifts INSERT が失敗した場合も既存の希望が残ること。"""
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+        self._make_existing_rest_wish(client, token, staff_id)
+
+        real_execute = appmod.execute
+
+        def fake_execute(sql, params=()):
+            if sql.strip().startswith("INSERT INTO shifts"):
+                raise RuntimeError("simulated shifts insert failure")
+            return real_execute(sql, params)
+
+        monkeypatch.setattr(appmod, "execute", fake_execute)
+        r = self._post_bulk(client, token, [
+            {"staff_id": staff_id, "date": "2026-09-05", "availability": "any",
+             "start": None, "end": None, "raw": "9/5は終日OK"}], overwrite=True)
+
+        assert r.status_code == 200, r.get_json()
+        body = r.get_json()
+        assert body["created"] == 0
+        assert body["skipped_detail"]["rollback"] == 1
+        assert self._wish_history_count(shop_id) == 1
+        assert self._shifts_requested_count(shop_id) == 1
+
+    def test_overwrite_partial_batch_failure_keeps_the_failed_days_wish(self, client, monkeypatch):
+        """バッチ途中の失敗でも、失敗した日の既存希望だけは無傷で残ること。
+
+        成功した日は上書きされ、失敗した日は「元のまま」であること
+        （どちらも「消えたまま登録もされていない」状態にならない）。
+        """
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+        self._make_existing_rest_wish(client, token, staff_id, "2026-09-05")
+        self._make_existing_rest_wish(client, token, staff_id, "2026-09-06")
+
+        real_execute = appmod.execute
+        calls = {"n": 0}
+
+        def fake_execute(sql, params=()):
+            if sql.strip().startswith("INSERT INTO wish_history"):
+                calls["n"] += 1
+                if calls["n"] == 2:  # 2件目（9/6）だけ失敗させる
+                    raise RuntimeError("simulated wish_history insert failure")
+            return real_execute(sql, params)
+
+        monkeypatch.setattr(appmod, "execute", fake_execute)
+        r = self._post_bulk(client, token, [
+            {"staff_id": staff_id, "date": "2026-09-05", "availability": "time",
+             "start": "17:00", "end": "22:00", "raw": "9/5は17-22"},
+            {"staff_id": staff_id, "date": "2026-09-06", "availability": "time",
+             "start": "18:00", "end": "22:00", "raw": "9/6は18-22"},
+        ], overwrite=True)
+
+        assert r.status_code == 200, r.get_json()
+        body = r.get_json()
+        assert body["created"] == 1
+        assert body["skipped_detail"] == {"duplicate": 0, "invalid": 0, "rollback": 1}
+        # 9/5 は上書き成功（time になっている）
+        wh0905 = dbmod.query_all(
+            "SELECT start_datetime, availability FROM wish_history WHERE start_datetime LIKE '2026-09-05%'")
+        assert len(wh0905) == 1
+        assert wh0905[0]["start_datetime"] == "2026-09-05T17:00:00"
+        # 9/6 は失敗したが、元の休み希望が残っていること
+        wh0906 = dbmod.query_all(
+            "SELECT start_datetime, availability FROM wish_history WHERE start_datetime LIKE '2026-09-06%'")
+        assert len(wh0906) == 1, "失敗した日の既存希望が消えている"
+        assert wh0906[0]["availability"] == "rest"
+        assert self._shifts_requested_count(shop_id) == 2
+
+    def test_overwrite_still_replaces_when_everything_succeeds(self, client):
+        """退避→INSERT→削除の順にしても、上書き自体は従来どおり働くこと。"""
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+        self._make_existing_rest_wish(client, token, staff_id, "2026-09-05")
+
+        r = self._post_bulk(client, token, [
+            {"staff_id": staff_id, "date": "2026-09-05", "availability": "time",
+             "start": "17:00", "end": "22:00", "raw": "9/5は17-22に変更"}], overwrite=True)
+
+        assert r.get_json()["created"] == 1
+        assert self._wish_history_count(shop_id) == 1
+        assert self._shifts_requested_count(shop_id) == 1
+        wh = dbmod.query_one("SELECT start_datetime FROM wish_history WHERE staff_id=?", (staff_id,))
+        assert wh["start_datetime"] == "2026-09-05T17:00:00"
+
+    def test_wish_history_lookup_failure_skips_only_that_item(self, client, monkeypatch):
+        """重複判定のDBエラーは、その1件だけをスキップしてバッチを続行すること。
+
+        以前は _wish_history_exists が re-raise して 1件のDB不調でバッチ全体が 500 に
+        なっていた（直後の INSERT 失敗パスは per-item で継続するのに不整合だった）。
+        """
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        real_query_one = appmod.query_one
+
+        def fake_query_one(sql, params=()):
+            if sql.strip().startswith("SELECT id FROM wish_history") and "2026-08-04" in str(params):
+                raise RuntimeError("simulated wish_history lookup failure")
+            return real_query_one(sql, params)
+
+        monkeypatch.setattr(appmod, "query_one", fake_query_one)
+        r = self._post_bulk(client, token, [
+            {"staff_id": staff_id, "date": "2026-08-03", "availability": "rest",
+             "start": None, "end": None, "raw": "8/3は休み"},
+            {"staff_id": staff_id, "date": "2026-08-04", "availability": "rest",
+             "start": None, "end": None, "raw": "8/4は休み"},
+        ])
+
+        assert r.status_code == 200, r.get_json()
+        body = r.get_json()
+        assert body["created"] == 1
+        assert body["skipped"] == 1
+        assert body["skipped_detail"]["rollback"] == 1
+        assert body["skipped_detail"]["duplicate"] == 0  # 重複ではないので重複と偽らない
+        assert self._wish_history_count(shop_id) == 1
+        assert self._shifts_requested_count(shop_id) == 1
+
+    # ---------------- I-1: start/end の形式検証 ----------------
+
+    def test_malformed_time_is_skipped_as_invalid(self, client):
+        """"17時" / "25:00" のような不正な時刻は invalid としてスキップすること。
+
+        norm_hhmm は "17時" を黙って "00:00" に潰すため、検証しないと
+        00:00〜24:00（=24時間）の希望として保存される。
+        """
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        r = self._post_bulk(client, token, [
+            {"staff_id": staff_id, "date": "2026-09-01", "availability": "time",
+             "start": "17時", "end": "22時", "raw": "17時から22時"},
+            {"staff_id": staff_id, "date": "2026-09-02", "availability": "time",
+             "start": "25:00", "end": "26:00", "raw": "25時から"},
+        ])
+
+        assert r.status_code == 200, r.get_json()
+        body = r.get_json()
+        assert body["created"] == 0
+        assert body["skipped"] == 2
+        assert body["skipped_detail"]["invalid"] == 2
+        assert self._shifts_requested_count(shop_id) == 0
+        assert self._wish_history_count(shop_id) == 0
+
+    def test_malformed_date_is_skipped_as_invalid(self, client):
+        """不正な date も invalid としてスキップし、例外でバッチを落とさないこと。"""
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        r = self._post_bulk(client, token, [
+            {"staff_id": staff_id, "date": "2026-02-30", "availability": "rest",
+             "start": None, "end": None, "raw": "2/30は休み"},
+            {"staff_id": staff_id, "date": "oops", "availability": "rest",
+             "start": None, "end": None, "raw": "?"},
+        ])
+
+        assert r.status_code == 200, r.get_json()
+        assert r.get_json()["skipped_detail"]["invalid"] == 2
+        assert self._wish_history_count(shop_id) == 0
+
+    # ---------------- skipped_detail ----------------
+
+    def test_skipped_detail_separates_reasons_and_sums_to_skipped(self, client):
+        """skipped_detail の3つの合計が skipped と一致し、理由が混ざらないこと。"""
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        other_shop_id = insert_shop(code="SHOP2")
+        other_staff_id = insert_staff(other_shop_id, "E9", "他店舗")
+        token = make_session("shop", shop_id, shop_id)
+        # 先に 8/3 を登録しておく（2回目は duplicate になる）
+        self._post_bulk(client, token, [
+            {"staff_id": staff_id, "date": "2026-08-03", "availability": "rest",
+             "start": None, "end": None, "raw": "8/3は休み"}])
+
+        r = self._post_bulk(client, token, [
+            {"staff_id": staff_id, "date": "2026-08-03", "availability": "rest",
+             "start": None, "end": None, "raw": "8/3は休み"},           # duplicate
+            {"staff_id": staff_id, "date": "2026-08-04", "availability": "typo",
+             "start": None, "end": None, "raw": "?"},                   # invalid(enum外)
+            {"staff_id": other_staff_id, "date": "2026-08-05", "availability": "rest",
+             "start": None, "end": None, "raw": "他店舗"},               # invalid(他店舗)
+            {"staff_id": staff_id, "date": "2026-08-06", "availability": "rest",
+             "start": None, "end": None, "raw": "8/6は休み"},            # created
+        ])
+
+        assert r.status_code == 200, r.get_json()
+        body = r.get_json()
+        assert body["created"] == 1
+        assert body["skipped_detail"] == {"duplicate": 1, "invalid": 2, "rollback": 0}
+        d = body["skipped_detail"]
+        assert d["duplicate"] + d["invalid"] + d["rollback"] == body["skipped"]
+
+    # ---------------- I-3: raw の照合 ----------------
+
+    def test_raw_verified_flags_raw_missing_from_input(self, client, monkeypatch):
+        """LLM が入力に無い raw（要約・幻覚）を返したら raw_verified=false を立てること。
+
+        raw は「元の文」として店長に見せられ、誤読を発見する唯一の手段になる
+        （設計書 §6）。捏造された文と照合させてはならない。
+        """
+        shop_id = insert_shop()
+        insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        def fake_parse(text, year_month, staff_names=None):
+            return {"entries": [
+                {"staff_hint": "小久保", "dates": ["2026-08-03"], "availability": "rest",
+                 "start": None, "end": None, "raw": "8/3は休みたいです"},
+                {"staff_hint": "小久保", "dates": ["2026-08-10"], "availability": "rest",
+                 "start": None, "end": None, "raw": "8/10も休みたいです"},  # 入力に存在しない
+            ], "unparsed": [], "source": "llm"}
+
+        monkeypatch.setattr(appmod.ai, "parse_wish_text", fake_parse)
+        r = client.post("/api/shop/wishes/parse",
+                        json={"text": "小久保: 8/3は休みたいです", "year_month": "2026-08"},
+                        headers=auth(token))
+
+        assert r.status_code == 200, r.get_json()
+        entries = r.get_json()["entries"]
+        assert entries[0]["raw_verified"] is True
+        assert entries[1]["raw_verified"] is False
+
+    def test_raw_verified_absorbs_width_and_space_differences(self, client, monkeypatch):
+        """全角/半角・空白の差だけで false にしないこと（厳しすぎる照合は警告を無意味にする）。"""
+        shop_id = insert_shop()
+        insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        def fake_parse(text, year_month, staff_names=None):
+            return {"entries": [
+                {"staff_hint": "小久保", "dates": ["2026-08-03"], "availability": "rest",
+                 "start": None, "end": None, "raw": "「8/3は休みたいです」"},
+            ], "unparsed": [], "source": "llm"}
+
+        monkeypatch.setattr(appmod.ai, "parse_wish_text", fake_parse)
+        r = client.post("/api/shop/wishes/parse",
+                        json={"text": "小久保:  ８/３は 休みたいです", "year_month": "2026-08"},
+                        headers=auth(token))
+
+        assert r.get_json()["entries"][0]["raw_verified"] is True
+
+    def test_fallback_entries_are_raw_verified(self, client):
+        """通常のフォールバック解析では raw_verified=true になること（誤検知しない）。"""
+        shop_id = insert_shop()
+        insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        r = client.post("/api/shop/wishes/parse",
+                        json={"text": "小久保: 8/3は休みたいです\n8/5、8/7は17時から22時まで入れます",
+                              "year_month": "2026-08"},
+                        headers=auth(token))
+
+        assert r.status_code == 200, r.get_json()
+        entries = r.get_json()["entries"]
+        assert entries, r.get_json()
+        assert all(e["raw_verified"] is True for e in entries), entries
+
+    # ---------------- I-8 / Minor: parse の入力検証 ----------------
+
+    def test_parse_non_string_staff_hint_does_not_500(self, client, monkeypatch):
+        """LLM が list/dict の staff_hint を返しても 500 にしないこと。"""
+        shop_id = insert_shop()
+        insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        def fake_parse(text, year_month, staff_names=None):
+            return {"entries": [
+                {"staff_hint": ["小久保", "佐藤"], "dates": ["2026-08-03"], "availability": "rest",
+                 "start": None, "end": None, "raw": "8/3は休み"},
+            ], "unparsed": [], "source": "llm"}
+
+        monkeypatch.setattr(appmod.ai, "parse_wish_text", fake_parse)
+        r = client.post("/api/shop/wishes/parse",
+                        json={"text": "8/3は休み", "year_month": "2026-08"},
+                        headers=auth(token))
+
+        assert r.status_code == 200, r.get_json()
+        assert r.get_json()["entries"][0]["staff_id"] is None
+
+    def test_parse_invalid_year_month_returns_readable_message(self, client):
+        """不正な year_month で Python の内部メッセージを返さないこと。"""
+        shop_id = insert_shop()
+        token = make_session("shop", shop_id, shop_id)
+
+        r = client.post("/api/shop/wishes/parse",
+                        json={"text": "8/3は休み", "year_month": "oops"},
+                        headers=auth(token))
+
+        assert r.status_code == 400
+        err = str(r.get_json().get("error", ""))
+        assert "invalid literal" not in err
+        assert "YYYY-MM" in err
+
+    def test_parse_rejects_other_shop_staff_id(self, client):
+        """他店舗の staff_id をそのままエコーバックしないこと。"""
+        shop_id = insert_shop(code="SHOP1")
+        other_shop_id = insert_shop(code="SHOP2")
+        other_staff_id = insert_staff(other_shop_id, "E9", "他店舗スタッフ")
+        token = make_session("shop", shop_id, shop_id)
+
+        r = client.post("/api/shop/wishes/parse",
+                        json={"text": "8/3は休み", "year_month": "2026-08",
+                              "staff_id": other_staff_id},
+                        headers=auth(token))
+
+        assert r.status_code == 400, r.get_json()
+
+    # ---------------- I-7: /api/shop/wishes の絞り込み ----------------
+
+    def test_shop_wishes_filters_by_staff_id(self, client):
+        """staff_id で絞り込めること（省略時は従来どおり全件）。"""
+        from helpers import insert_wish
+        shop_id = insert_shop()
+        a = insert_staff(shop_id, "E1", "小久保")
+        b = insert_staff(shop_id, "E2", "佐藤")
+        token = make_session("shop", shop_id, shop_id)
+        insert_wish(shop_id, a, "2026-08-03", "09:00", "22:00")
+        insert_wish(shop_id, b, "2026-08-04", "09:00", "22:00")
+
+        all_r = client.get("/api/shop/wishes", headers=auth(token))
+        one_r = client.get(f"/api/shop/wishes?staff_id={a}", headers=auth(token))
+        both_r = client.get(f"/api/shop/wishes?staff_id={a},{b}", headers=auth(token))
+
+        assert len(all_r.get_json()["wishes"]) == 2  # 既存の呼び出し元は無変更で動く
+        one = one_r.get_json()["wishes"]
+        assert len(one) == 1 and one[0]["staff_id"] == a
+        assert len(both_r.get_json()["wishes"]) == 2
+
+    def test_shop_wishes_invalid_staff_id_returns_empty(self, client):
+        """絞り込みを指定したのに有効なIDが無ければ、店舗全体を返さず空で返すこと。"""
+        from helpers import insert_wish
+        shop_id = insert_shop()
+        a = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+        insert_wish(shop_id, a, "2026-08-03", "09:00", "22:00")
+
+        r = client.get("/api/shop/wishes?staff_id=abc", headers=auth(token))
+
+        assert r.status_code == 200
+        assert r.get_json()["wishes"] == []
