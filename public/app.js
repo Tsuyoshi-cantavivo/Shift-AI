@@ -4676,6 +4676,7 @@ const AUDIT_ACTION_LABELS = {
   'auth.login_failed': 'ログイン失敗',
   'auth.login_blocked': 'ログインブロック',
   'auth.logout': 'ログアウト',
+  'admin.password_change': '管理者PW変更',
 };
 function auditActionLabel(a) { return AUDIT_ACTION_LABELS[a] || a || '—'; }
 

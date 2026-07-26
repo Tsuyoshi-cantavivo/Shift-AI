@@ -1893,6 +1893,40 @@ def admin_notifs_readall():
     return jsonify({"ok": True})
 
 
+@app.put("/api/admin/password")
+def admin_change_password():
+    """システム管理者が自分のパスワードを変更する。
+
+    【なぜ必要か】
+      system_admins への UPDATE がコード全体でゼロで、変更手段が存在しなかった。
+      /api/init の初期パスワードはランダム生成（S4）なので、手段が無いままだと
+      発行された値を一生使い続けることになる。
+    """
+    require_auth(["admin"])
+    body = request.get_json(silent=True) or {}
+    current = body.get("current_password") or ""
+    new_pw = body.get("new_password") or ""
+    admin_id = (getattr(g, "user", None) or {}).get("id")
+    row = query_one("SELECT id, admin_id, password_hash FROM system_admins WHERE id=?",
+                    (admin_id,))
+    if row is None:
+        abort(404, description="管理者が見つかりません")
+    if not verify_password(current, row["password_hash"]):
+        raise ValueError("現在のパスワードが正しくありません")
+    msg = validate_password(new_pw)
+    if msg:
+        raise ValueError(msg)
+    execute("UPDATE system_admins SET password_hash=? WHERE id=?",
+            (hash_password(new_pw), admin_id))
+    # 他端末のセッションは失効させる。自分の今のセッションだけ残す
+    # （変更直後に再ログインを強いられるのは体験が悪いため）。
+    token = request.headers.get("Authorization", "")[7:]
+    execute("DELETE FROM sessions WHERE role='admin' AND user_id=? AND token<>?",
+            (admin_id, token))
+    audit("admin.password_change", target_type="system_admin", target_id=admin_id)
+    return jsonify({"ok": True})
+
+
 @app.get("/api/shop/settings")
 def shop_settings_get():
     shop, shop_id, settings = _shop_ctx()
