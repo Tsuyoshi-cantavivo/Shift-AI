@@ -73,3 +73,114 @@ def test_audit_logs_requires_admin(client):
     tok = make_session("shop", shop_id, shop_id)
     r = client.get("/api/admin/audit-logs", headers=auth(tok))
     assert r.status_code == 403
+
+
+def test_login_success_is_audited(client):
+    insert_admin("admin", "Admin123")
+    r = client.post("/api/login", json={"user_code": "admin", "password": "Admin123"})
+    assert r.status_code == 200
+    row = dbmod.query_one("SELECT action, actor_role, actor_name FROM audit_logs "
+                          "WHERE action='auth.login' ORDER BY id DESC LIMIT 1")
+    assert row is not None, "ログイン成功が監査ログに残っていない"
+    assert row["actor_role"] == "admin"
+
+
+def test_login_failure_is_audited_without_password(client):
+    insert_admin("admin", "Admin123")
+    r = client.post("/api/login", json={"user_code": "admin", "password": "wrongpass"})
+    assert r.status_code == 400
+    row = dbmod.query_one("SELECT action, actor_role, actor_name, detail FROM audit_logs "
+                          "WHERE action='auth.login_failed' ORDER BY id DESC LIMIT 1")
+    assert row is not None, "ログイン失敗が監査ログに残っていない"
+    assert row["actor_role"] == "anonymous"
+    # 入力されたパスワードが記録されていないこと
+    joined = f"{row['actor_name']} {row['detail']}"
+    assert "wrongpass" not in joined, "パスワードが監査ログに漏れている"
+
+
+def test_logout_is_audited(client):
+    insert_admin("admin", "Admin123")
+    r = client.post("/api/login", json={"user_code": "admin", "password": "Admin123"})
+    token = r.get_json()["token"]
+    r = client.post("/api/logout", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    row = dbmod.query_one("SELECT action FROM audit_logs WHERE action='auth.logout' "
+                          "ORDER BY id DESC LIMIT 1")
+    assert row is not None, "ログアウトが監査ログに残っていない"
+
+
+# ============================================================
+# ログアウトの操作者名
+# ============================================================
+def test_logout_records_admin_name(client):
+    """auth.logout に氏名が入ること（auth.login と同じ画面で表示が揃うように）。"""
+    insert_admin("admin", "Admin123", name="運営太郎")
+    r = client.post("/api/login", json={"user_code": "admin", "password": "Admin123"})
+    token = r.get_json()["token"]
+    client.post("/api/logout", headers=auth(token))
+    row = dbmod.query_one("SELECT actor_name FROM audit_logs WHERE action='auth.logout' "
+                          "ORDER BY id DESC LIMIT 1")
+    assert row is not None
+    assert row["actor_name"] == "運営太郎", f"actor_name が入っていない: {row}"
+
+
+def test_logout_records_shop_name(client):
+    shop_id = insert_shop("SHOP1", "pw12345678", "テスト店舗")
+    insert_staff(shop_id, "mgr", "店長", role="manager", password="pw12345678")
+    r = client.post("/api/login", json={"shop_code": "SHOP1", "user_code": "mgr",
+                                        "password": "pw12345678"})
+    token = r.get_json()["token"]
+    client.post("/api/logout", headers=auth(token))
+    row = dbmod.query_one("SELECT actor_name FROM audit_logs WHERE action='auth.logout' "
+                          "ORDER BY id DESC LIMIT 1")
+    assert row is not None and row["actor_name"] == "テスト店舗"
+
+
+def test_logout_records_staff_name(client):
+    shop_id = insert_shop("SHOP1", "pw12345678")
+    insert_staff(shop_id, "p1", "山田花子", password="pw12345678")
+    r = client.post("/api/login", json={"shop_code": "SHOP1", "user_code": "p1",
+                                        "password": "pw12345678"})
+    token = r.get_json()["token"]
+    client.post("/api/logout", headers=auth(token))
+    row = dbmod.query_one("SELECT actor_name FROM audit_logs WHERE action='auth.logout' "
+                          "ORDER BY id DESC LIMIT 1")
+    assert row is not None and row["actor_name"] == "山田花子"
+
+
+# ============================================================
+# レート制限でブロックした試行の記録（膨張しないこと）
+# ============================================================
+def test_blocked_login_is_audited_once_per_lock(client):
+    """429 でブロックした試行を監査に残すが、ロック期間中は1件だけに抑える。"""
+    insert_admin("admin", "Admin123")
+    for _ in range(10):
+        assert client.post("/api/login", json={"id": "admin", "password": "wrong"}).status_code == 400
+    for _ in range(30):
+        assert client.post("/api/login", json={"id": "admin", "password": "wrong"}).status_code == 429
+    blocked = dbmod.query_all("SELECT * FROM audit_logs WHERE action='auth.login_blocked'")
+    assert len(blocked) == 1, f"ブロック記録が無制限に増えている: {len(blocked)} 件"
+    assert blocked[0]["actor_role"] == "anonymous"
+    # login_attempts も1行のままであること
+    assert len(dbmod.query_all("SELECT * FROM login_attempts")) == 1
+    # 失敗ログはロック発動までの10件で頭打ち
+    fails = dbmod.query_all("SELECT * FROM audit_logs WHERE action='auth.login_failed'")
+    assert len(fails) == 10
+
+
+def test_blocked_login_is_audited_again_in_a_new_lock_period(client, monkeypatch):
+    """ロックが明けて再度ロックされたら、その期間についても1件記録されること。"""
+    import app as appmod
+    from datetime import timedelta
+    insert_admin("admin", "Admin123")
+    for _ in range(10):
+        client.post("/api/login", json={"id": "admin", "password": "wrong"})
+    assert client.post("/api/login", json={"id": "admin", "password": "wrong"}).status_code == 429
+    assert len(dbmod.query_all("SELECT * FROM audit_logs WHERE action='auth.login_blocked'")) == 1
+    # ロック期限を過ぎさせる
+    future = appmod.jst_now() + timedelta(minutes=appmod._LOGIN_LOCK_MIN + 1)
+    monkeypatch.setattr(appmod, "jst_now", lambda: future)
+    for _ in range(10):
+        assert client.post("/api/login", json={"id": "admin", "password": "wrong"}).status_code == 400
+    assert client.post("/api/login", json={"id": "admin", "password": "wrong"}).status_code == 429
+    assert len(dbmod.query_all("SELECT * FROM audit_logs WHERE action='auth.login_blocked'")) == 2

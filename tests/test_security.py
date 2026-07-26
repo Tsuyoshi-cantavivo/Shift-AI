@@ -17,9 +17,11 @@
 """
 import json
 import time
+from datetime import timedelta
 
 import pytest
 
+import app as appmod
 import db as dbmod
 from auth import hash_password
 from helpers import (
@@ -182,15 +184,111 @@ class TestIDOR:
 # 認証: Brute-force / Mass Assignment
 # ============================================================
 class TestAuthSecurity:
-    def test_login_brute_force_no_lockout(self, client):
-        """[警告] ログイン失敗を何度繰り返してもロックアウト無し（Rate Limit 脆弱性）。"""
+    def test_login_brute_force_locks_out(self, client):
+        """10回失敗した時点でロックされ、正しいパスワードでもログインできないこと。"""
         insert_admin("admin", "Admin123")
-        for _ in range(50):
+        for i in range(10):
+            r = client.post("/api/login", json={"id": "admin", "password": "wrong"})
+            assert r.status_code == 400, f"{i+1}回目が想定外のステータス: {r.status_code}"
+        # 11回目はロックされて 429
+        r = client.post("/api/login", json={"id": "admin", "password": "wrong"})
+        assert r.status_code == 429
+        # 正しいパスワードでもロック中は通らない
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 429, "ロック中に正しいパスワードで通ってしまう"
+
+    def test_login_success_clears_failure_count(self, client):
+        """失敗のあと成功すると、失敗カウントがリセットされること。"""
+        insert_admin("admin", "Admin123")
+        for _ in range(5):
+            client.post("/api/login", json={"id": "admin", "password": "wrong"})
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 200
+        # リセットされているので、さらに5回失敗してもロックされない
+        for _ in range(5):
             r = client.post("/api/login", json={"id": "admin", "password": "wrong"})
             assert r.status_code == 400
-        # 50 回失敗後も正しいパスワードで即ログイン可能
         r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
-        assert r.status_code == 200, "Rate Limit 無し — 50 回失敗後も即座に成功可能"
+        assert r.status_code == 200
+
+    def test_login_lock_is_per_account(self, client):
+        """あるアカウントのロックが、別アカウントのログインを妨げないこと。"""
+        insert_admin("admin", "Admin123")
+        shop_id = insert_shop("SHOP1", "pw12345678")
+        insert_staff(shop_id, "mgr", "店長", role="manager", password="pw12345678")
+        for _ in range(11):
+            client.post("/api/login", json={"id": "admin", "password": "wrong"})
+        r = client.post("/api/login", json={"shop_code": "SHOP1", "user_code": "mgr",
+                                            "password": "pw12345678"})
+        assert r.status_code == 200, "別アカウントまで巻き添えでロックされている"
+
+    def test_login_lock_is_per_client_ip(self, client):
+        """X-Forwarded-For が異なるクライアントは独立にカウントされること。
+
+        ProxyFix が無いとエッジプロキシ配下で全員の remote_addr が同じ値に潰れ、
+        第三者が10回失敗を送るだけで正規の管理者を締め出せてしまう
+        （アカウントロックアウトDoS）。その回帰テスト。
+        """
+        insert_admin("admin", "Admin123")
+        attacker = {"X-Forwarded-For": "203.0.113.10"}
+        victim = {"X-Forwarded-For": "198.51.100.20"}
+        for _ in range(11):
+            client.post("/api/login", json={"id": "admin", "password": "wrong"},
+                        headers=attacker)
+        # 攻撃者側の送信元はロックされる
+        r = client.post("/api/login", json={"id": "admin", "password": "wrong"},
+                        headers=attacker)
+        assert r.status_code == 429
+        # 別IPの正規管理者は影響を受けない
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"},
+                        headers=victim)
+        assert r.status_code == 200, "別IPの正規管理者が巻き添えロックされている"
+
+    def test_incomplete_input_is_not_counted_as_failure(self, client):
+        """入力不備は認証試行ではないので失敗として数えないこと。
+
+        「店舗コードとユーザーコードを入力してください」「パスワードを入力してください」
+        の分岐で _record_login_failure を呼ばないことの回帰テスト。
+        """
+        insert_admin("admin", "Admin123")
+        for _ in range(15):
+            client.post("/api/login", json={"id": "admin"})                # パスワード欠落
+            client.post("/api/login", json={"password": "x"})              # コード欠落
+            client.post("/api/login", json={"shop_code": "SHOP1", "password": "x"})  # user_code 欠落
+        rows = dbmod.query_all("SELECT * FROM login_attempts")
+        assert rows == [], f"入力不備が失敗として記録されている: {rows}"
+        # 45回の入力不備のあとでも正しいログインは通る
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 200
+
+    def test_login_lock_expires_after_lock_minutes(self, client, monkeypatch):
+        """_LOGIN_LOCK_MIN 経過するとロックが解除されること。"""
+        insert_admin("admin", "Admin123")
+        for _ in range(10):
+            client.post("/api/login", json={"id": "admin", "password": "wrong"})
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 429
+        # ロック時間ぶん時間を進める（時間旅行）
+        future = appmod.jst_now() + timedelta(minutes=appmod._LOGIN_LOCK_MIN + 1)
+        monkeypatch.setattr(appmod, "jst_now", lambda: future)
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 200, "ロック期限を過ぎても解除されない"
+
+    def test_failure_count_resets_after_window(self, client, monkeypatch):
+        """_LOGIN_WINDOW_MIN を超えて間隔が空くと失敗カウントがリセットされること。"""
+        insert_admin("admin", "Admin123")
+        for _ in range(9):
+            r = client.post("/api/login", json={"id": "admin", "password": "wrong"})
+            assert r.status_code == 400
+        # ウィンドウを超えて間隔を空ける
+        future = appmod.jst_now() + timedelta(minutes=appmod._LOGIN_WINDOW_MIN + 1)
+        monkeypatch.setattr(appmod, "jst_now", lambda: future)
+        # カウントがリセットされていれば、さらに9回失敗してもロックされない
+        for i in range(9):
+            r = client.post("/api/login", json={"id": "admin", "password": "wrong"})
+            assert r.status_code == 400, f"{i+1}回目でロック済み（カウントが持ち越されている）"
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 200
 
     def test_login_timing_attack_resistance(self, client):
         """存在しないIDと存在するIDの応答時間が近いこと（タイミング攻撃耐性）。"""
@@ -500,15 +598,27 @@ class TestMassAssignment:
 
 
 # ============================================================
-# Init endpoint (公開状態)
+# Init endpoint (S4修正: ALLOW_INIT ガード)
 # ============================================================
 class TestPublicInit:
-    def test_init_endpoint_is_public(self, client):
-        """[警告] /api/init は認証不要で誰でもデモデータを作成可能。"""
+    def test_init_endpoint_requires_allow_init(self, client, monkeypatch):
+        """[修正済み] ALLOW_INIT 未設定なら 403 で拒否される（旧: 認証不要で公開）。
+
+        詳細な回帰テストは tests/test_admin_init.py 側にまとめてある。
+        """
+        monkeypatch.delenv("ALLOW_INIT", raising=False)
+        r = client.post("/api/init")
+        assert r.status_code == 403
+
+    def test_init_endpoint_works_when_explicitly_allowed(self, client, monkeypatch):
+        """ALLOW_INIT=1 を明示したときのみデモ初期化が動くこと。"""
+        monkeypatch.setenv("ALLOW_INIT", "1")
         r = client.post("/api/init")
         assert r.status_code == 200
-        # 危険性: 本番環境でこのエンドポイントが有効だと、第三者が初期化可能
-        # （ただし既存データがあれば "既に存在します" と返す設計）
+        # ALLOW_INIT=1 は初回セットアップ時だけ立てて、済んだら戻す運用にする。
+        # 立てっぱなしでも、既に管理者がいれば "既に存在します" を返すだけで
+        # 上書きはされない（多層防御）。初期パスワードはランダム生成され、
+        # このレスポンスで1回だけ返る（保存も再表示もしない）。
 
 
 # ============================================================
@@ -531,3 +641,354 @@ class TestSessionToken:
         client.post("/api/logout", headers=auth(tok))
         r = client.get("/api/me", headers=auth(tok))
         assert r.status_code == 401
+
+
+# ============================================================
+# 固定シフト: 未認証アクセス / テナント越境（回帰テスト）
+# ============================================================
+class TestFixedShiftsAuth:
+    def test_fixed_shift_create_requires_auth(self, client):
+        """認証ヘッダ無しで固定シフトを作成できないこと。"""
+        shop_id = insert_shop("SHOP1")
+        staff_id = insert_staff(shop_id, "p1", "太郎")
+        r = client.post("/api/shop/fixed-shifts",
+                        json={"staff_id": staff_id, "weekday": 1,
+                              "start_time": "09:00", "end_time": "17:00"})
+        assert r.status_code == 401, "未認証で固定シフトが作成できてしまう"
+
+    def test_fixed_shift_update_requires_auth(self, client):
+        shop_id = insert_shop("SHOP1")
+        staff_id = insert_staff(shop_id, "p1", "太郎")
+        fid = insert_fixed(staff_id, 1, "09:00", "17:00")
+        r = client.put(f"/api/shop/fixed-shifts/{fid}",
+                       json={"weekday": 2, "start_time": "10:00", "end_time": "18:00"})
+        assert r.status_code == 401
+
+    def test_fixed_shift_delete_requires_auth(self, client):
+        shop_id = insert_shop("SHOP1")
+        staff_id = insert_staff(shop_id, "p1", "太郎")
+        fid = insert_fixed(staff_id, 1, "09:00", "17:00")
+        r = client.delete(f"/api/shop/fixed-shifts/{fid}")
+        assert r.status_code == 401
+
+    def test_fixed_shift_create_rejects_other_shop_staff(self, client):
+        """他店舗のスタッフを指定した固定シフトは作成できないこと。"""
+        shop_a = insert_shop("SHOPA", "pw12345678")
+        insert_staff(shop_a, "mgrA", "店長A", role="manager", password="pw12345678")
+        shop_b = insert_shop("SHOPB", "pw12345678")
+        staff_b = insert_staff(shop_b, "p1", "他店の人")
+
+        r = client.post("/api/login", json={"shop_code": "SHOPA", "user_code": "mgrA",
+                                            "password": "pw12345678"})
+        assert r.status_code == 200
+        token = r.get_json()["token"]
+
+        r = client.post("/api/shop/fixed-shifts",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"staff_id": staff_b, "weekday": 1,
+                              "start_time": "09:00", "end_time": "17:00"})
+        assert r.status_code == 404, "他店舗スタッフの固定シフトが作れてしまう"
+
+    def test_fixed_shift_update_rejects_other_shop(self, client):
+        shop_a = insert_shop("SHOPA", "pw12345678")
+        insert_staff(shop_a, "mgrA", "店長A", role="manager", password="pw12345678")
+        shop_b = insert_shop("SHOPB", "pw12345678")
+        staff_b = insert_staff(shop_b, "p1", "他店の人")
+        fid = insert_fixed(staff_b, 1, "09:00", "17:00")
+
+        r = client.post("/api/login", json={"shop_code": "SHOPA", "user_code": "mgrA",
+                                            "password": "pw12345678"})
+        token = r.get_json()["token"]
+
+        r = client.put(f"/api/shop/fixed-shifts/{fid}",
+                       headers={"Authorization": f"Bearer {token}"},
+                       json={"weekday": 2, "start_time": "10:00", "end_time": "18:00"})
+        assert r.status_code == 404
+
+    def test_fixed_shift_delete_rejects_other_shop(self, client):
+        shop_a = insert_shop("SHOPA", "pw12345678")
+        insert_staff(shop_a, "mgrA", "店長A", role="manager", password="pw12345678")
+        shop_b = insert_shop("SHOPB", "pw12345678")
+        staff_b = insert_staff(shop_b, "p1", "他店の人")
+        fid = insert_fixed(staff_b, 1, "09:00", "17:00")
+
+        r = client.post("/api/login", json={"shop_code": "SHOPA", "user_code": "mgrA",
+                                            "password": "pw12345678"})
+        token = r.get_json()["token"]
+
+        r = client.delete(f"/api/shop/fixed-shifts/{fid}",
+                          headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 404
+        # 他店舗のデータが残っていること
+        from db import query_one as qo
+        assert qo("SELECT id FROM fixed_shifts WHERE id=?", (fid,)) is not None
+
+
+class TestShiftStaffScope:
+    def _login_shop_a(self, client):
+        shop_a = insert_shop("SHOPA", "pw12345678")
+        insert_staff(shop_a, "mgrA", "店長A", role="manager", password="pw12345678")
+        r = client.post("/api/login", json={"shop_code": "SHOPA", "user_code": "mgrA",
+                                            "password": "pw12345678"})
+        assert r.status_code == 200
+        return shop_a, r.get_json()["token"]
+
+    def test_shift_create_rejects_other_shop_staff(self, client):
+        """他店舗スタッフを指すシフトを作成できないこと。"""
+        shop_a, token = self._login_shop_a(client)
+        shop_b = insert_shop("SHOPB", "pw12345678")
+        staff_b = insert_staff(shop_b, "p1", "他店の人")
+
+        # NOTE: /api/shop/shifts の実際のリクエスト形は staff_id/start_datetime/
+        # end_datetime（brief 記載の date/start_time/end_time ではない。
+        # public/app.js の実呼び出しおよび tests/test_admin_staff_apis.py で確認済み）。
+        r = client.post("/api/shop/shifts",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"staff_id": staff_b,
+                              "start_datetime": "2026-08-03T09:00:00",
+                              "end_datetime": "2026-08-03T17:00:00"})
+        assert r.status_code == 404, "他店舗スタッフのシフトが作れてしまう"
+
+    def test_shift_update_rejects_other_shop_staff(self, client):
+        """自店舗のシフトを他店舗スタッフに付け替えられないこと。"""
+        shop_a, token = self._login_shop_a(client)
+        staff_a = insert_staff(shop_a, "p1", "自店の人")
+        shop_b = insert_shop("SHOPB", "pw12345678")
+        staff_b = insert_staff(shop_b, "p2", "他店の人")
+
+        r = client.post("/api/shop/shifts",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"staff_id": staff_a,
+                              "start_datetime": "2026-08-03T09:00:00",
+                              "end_datetime": "2026-08-03T17:00:00"})
+        assert r.status_code == 200
+        shift_id = r.get_json().get("id")
+
+        r = client.put(f"/api/shop/shifts/{shift_id}",
+                       headers={"Authorization": f"Bearer {token}"},
+                       json={"staff_id": staff_b,
+                             "start_datetime": "2026-08-03T09:00:00",
+                             "end_datetime": "2026-08-03T17:00:00"})
+        assert r.status_code == 404, "他店舗スタッフに付け替えできてしまう"
+
+
+# ============================================================
+# require_auth の後方互換フォールバック (CWE-639: IDOR / テナント越境)
+# ============================================================
+class TestSessionFallback:
+    def test_deleted_shop_session_does_not_land_on_other_tenant(self, client):
+        """セッションの shop_id が指す店舗が消えたとき、別テナントに着地しないこと。
+
+        manager セッションの user_id は staffs.id。フォールバックが残っていると
+        staffs.id と同値の shops.id を持つ無関係な店舗の権限を得てしまう。
+        """
+        import db as dbmod
+        # 店舗A(id=1) を作り、その manager でログイン
+        shop_a = insert_shop("SHOPA", "pw12345678")
+        insert_staff(shop_a, "mgrA", "店長A", role="manager", password="pw12345678")
+        r = client.post("/api/login", json={"shop_code": "SHOPA", "user_code": "mgrA",
+                                            "password": "pw12345678"})
+        assert r.status_code == 200
+        token = r.get_json()["token"]
+
+        # セッションの shop_id を存在しない店舗に differ させ、
+        # user_id を「別の実在店舗のid」に書き換える（フォールバックが発火する条件）
+        shop_b = insert_shop("SHOPB", "pw12345678")
+        dbmod.execute("UPDATE sessions SET shop_id=99999, user_id=? WHERE token=?",
+                      (shop_b, token))
+
+        r = client.get("/api/shop/staffs", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code != 200, "存在しない店舗のセッションで別テナントに着地している"
+
+
+class TestAdminNotificationsAuth:
+    def test_admin_notifications_requires_auth(self, client):
+        """未認証で管理者通知を読めないこと。"""
+        assert client.get("/api/admin/notifications").status_code == 401
+
+    def test_admin_notifications_read_all_requires_auth(self, client):
+        assert client.put("/api/admin/notifications/read-all").status_code == 401
+
+    def test_shop_role_cannot_read_admin_notifications(self, client):
+        """shop ロールでは403になること。"""
+        sid = insert_shop("SHOP1", "pw12345678")
+        insert_staff(sid, "mgr", "店長", role="manager", password="pw12345678")
+        r = client.post("/api/login", json={"shop_code": "SHOP1", "user_code": "mgr",
+                                            "password": "pw12345678"})
+        t = r.get_json()["token"]
+        r = client.get("/api/admin/notifications", headers={"Authorization": f"Bearer {t}"})
+        assert r.status_code == 403
+
+
+# ============================================================
+# ログイン入力の長さ・制御文字（未認証での無制限書き込み対策）
+# ============================================================
+class TestLoginInputLimits:
+    """未認証クライアントが login_attempts / audit_logs を無制限に膨らませられない。
+
+    背景: shop_code / user_code が無制限だと、毎回違う値を送るだけで
+    「ロックが一度も発動しないまま行だけが増え続ける」状態が作れた。
+    本番は Cloudflare D1（書き込み課金・ストレージ上限）なので実害がある。
+    """
+
+    def test_overlong_shop_code_is_rejected_without_writing_rows(self, client):
+        insert_admin("admin", "Admin123")
+        r = client.post("/api/login", json={"shop_code": "S" * 65, "user_code": "u",
+                                            "password": "x"})
+        assert r.status_code == 400
+        assert dbmod.query_all("SELECT * FROM login_attempts") == [], \
+            "長すぎる入力が login_attempts に書き込まれている"
+        assert dbmod.query_all("SELECT * FROM audit_logs") == [], \
+            "長すぎる入力が audit_logs に書き込まれている"
+
+    def test_overlong_user_code_is_rejected_without_writing_rows(self, client):
+        insert_admin("admin", "Admin123")
+        r = client.post("/api/login", json={"shop_code": "SHOP1", "user_code": "u" * 65,
+                                            "password": "x"})
+        assert r.status_code == 400
+        assert dbmod.query_all("SELECT * FROM login_attempts") == []
+        assert dbmod.query_all("SELECT * FROM audit_logs") == []
+
+    def test_huge_payload_is_rejected_without_writing_rows(self, client):
+        """レビュアー実測の 20,000 文字ケース。"""
+        r = client.post("/api/login", json={"shop_code": "A" * 20000, "user_code": "admin",
+                                            "password": "x"})
+        assert r.status_code == 400
+        assert dbmod.query_all("SELECT * FROM login_attempts") == []
+        assert dbmod.query_all("SELECT * FROM audit_logs") == []
+
+    def test_repeated_overlong_attempts_never_grow_tables(self, client):
+        """毎回別の長い値を送っても行が増えないこと（60回のレビュアー再現）。"""
+        for i in range(60):
+            client.post("/api/login", json={"shop_code": f"{i}" + "X" * 100,
+                                            "user_code": "u", "password": "x"})
+        assert dbmod.query_all("SELECT * FROM login_attempts") == []
+        assert dbmod.query_all("SELECT * FROM audit_logs") == []
+
+    def test_boundary_64_chars_is_still_a_normal_attempt(self, client):
+        """64文字ちょうどは正常な認証試行として扱う（上限は 64 文字まで許可）。"""
+        r = client.post("/api/login", json={"shop_code": "S" * 64, "user_code": "u" * 64,
+                                            "password": "x"})
+        assert r.status_code == 400
+        rows = dbmod.query_all("SELECT * FROM login_attempts")
+        assert len(rows) == 1, "64文字は認証試行として数えられるべき"
+
+    def test_rejection_is_not_counted_as_login_failure(self, client):
+        """長さ超過は入力不備であって認証試行ではないので、失敗カウントに影響しない。"""
+        insert_admin("admin", "Admin123")
+        for _ in range(30):
+            client.post("/api/login", json={"shop_code": "S" * 200, "user_code": "u",
+                                            "password": "x"})
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 200, "長さ超過でロックされてしまっている"
+
+    def test_newlines_are_removed_from_audit_and_attempt_key(self, client):
+        """改行入りコードでも監査ログ・レート制限キーに生の改行が残らない（ログ偽装対策）。"""
+        r = client.post("/api/login", json={"shop_code": "a\nFAKE/<img src=x onerror=1>",
+                                            "user_code": "b\rX", "password": "x"})
+        assert r.status_code == 400
+        row = dbmod.query_one("SELECT actor_name FROM audit_logs "
+                              "WHERE action='auth.login_failed' ORDER BY id DESC LIMIT 1")
+        assert row is not None
+        assert "\n" not in (row["actor_name"] or ""), "監査ログに生の改行が入っている"
+        assert "\r" not in (row["actor_name"] or "")
+        keys = [x["attempt_key"] for x in dbmod.query_all("SELECT attempt_key FROM login_attempts")]
+        assert keys and all("\n" not in k and "\r" not in k for k in keys)
+
+
+# ============================================================
+# 起動時の整合性検証（login_attempts が無いと全ログインが 500 になる）
+# ============================================================
+class TestStartupIntegrity:
+    def test_verification_passes_on_a_healthy_db(self, client):
+        appmod._verify_critical_tables()  # 例外が出なければOK
+
+    def test_verification_raises_when_login_attempts_missing(self, client):
+        """テーブルが無いまま起動を続けると、未認証クライアントに 500 が返り、
+        かつブルートフォース防御が黙って無効化される。起動時に落とす。"""
+        dbmod.execute("DROP TABLE login_attempts")
+        with pytest.raises(Exception):
+            appmod._verify_critical_tables()
+
+    def test_ensure_db_recreates_login_attempts(self, client):
+        dbmod.execute("DROP TABLE login_attempts")
+        appmod.ensure_db()
+        appmod._verify_critical_tables()
+
+    def test_verification_raises_when_blocked_logged_column_missing(self, client):
+        """テーブルはあるが blocked_logged 列だけが無い状態を再現する。
+
+        既存DBへの ALTER TABLE ADD COLUMN が何らかの理由で失敗した場合、
+        login_attempts テーブル自体は存在するのに blocked_logged 列だけが
+        欠けたままになり得る。テーブルの実在しか見ていないと検知できず、
+        ロック中の /api/login が「no such column: blocked_logged」の 500 を
+        未認証クライアントに返してしまう（本番D1でスキーマ変更が失敗した
+        migrations/0004 の実例と同種の失敗モード）。"""
+        dbmod.execute("DROP TABLE login_attempts")
+        try:
+            dbmod.execute(
+                "CREATE TABLE login_attempts ("
+                "attempt_key TEXT PRIMARY KEY, fail_count INTEGER NOT NULL DEFAULT 0, "
+                "locked_until TEXT, updated_at TEXT)")
+            with pytest.raises(Exception):
+                appmod._verify_critical_tables()
+        finally:
+            # db_reset フィクスチャは CREATE TABLE IF NOT EXISTS で整備するため、
+            # 列が欠けたテーブルが残っていると後続テストに漏れる。ensure_db() で
+            # blocked_logged 列を復元してから終える。
+            appmod.ensure_db()
+            appmod._verify_critical_tables()
+
+
+# ============================================================
+# /api/init の 403 メッセージ（情報漏洩）
+# ============================================================
+class TestInitErrorMessage:
+    def test_403_message_does_not_leak_env_var_name(self, client, monkeypatch):
+        monkeypatch.delenv("ALLOW_INIT", raising=False)
+        r = client.post("/api/init")
+        assert r.status_code == 403
+        msg = r.get_json()["error"]
+        assert "ALLOW_INIT" not in msg, f"環境変数名が未認証クライアントに漏れている: {msg}"
+
+
+# ============================================================
+# require_auth: 参照先の行が消えているセッション
+# ============================================================
+class TestRequireAuthOrphanSession:
+    """削除済みのスタッフ／管理者のセッションは 401。
+
+    shop 分岐だけが 401 で、admin / staff は g.user=None のまま後段に進み
+    staff["id"] で TypeError → 500 になっていた。
+    """
+
+    def test_deleted_admin_session_is_401(self, client):
+        admin_id = insert_admin()
+        tok = make_session("admin", admin_id)
+        dbmod.execute("DELETE FROM system_admins WHERE id=?", (admin_id,))
+        r = client.get("/api/me", headers=auth(tok))
+        assert r.status_code == 401, f"削除済み管理者のセッションが通っている: {r.status_code}"
+
+    def test_deleted_staff_session_is_401(self, client):
+        shop_id = insert_shop("SHOP1")
+        staff_id = insert_staff(shop_id, "p1", "太郎")
+        tok = make_session("staff", staff_id, shop_id)
+        dbmod.execute("DELETE FROM staffs WHERE id=?", (staff_id,))
+        r = client.get("/api/me", headers=auth(tok))
+        assert r.status_code == 401, f"削除済みスタッフのセッションが通っている: {r.status_code}"
+
+    def test_deleted_staff_does_not_cause_500(self, client):
+        """後段で staff["id"] を触るエンドポイントが 500 にならないこと。"""
+        shop_id = insert_shop("SHOP1")
+        staff_id = insert_staff(shop_id, "p1", "太郎")
+        tok = make_session("staff", staff_id, shop_id)
+        dbmod.execute("DELETE FROM staffs WHERE id=?", (staff_id,))
+        r = client.get("/api/staff/shifts", headers=auth(tok))
+        assert r.status_code == 401, f"500 になっている: {r.status_code}"
+
+    def test_non_string_codes_do_not_cause_500(self, client):
+        """文字列以外を送られても 500（未認証への内部エラー露出）にならないこと。"""
+        for payload in ({"shop_code": 12345, "user_code": ["a"], "password": "x"},
+                        {"shop_code": {"a": 1}, "user_code": None, "password": "x"}):
+            r = client.post("/api/login", json=payload)
+            assert r.status_code == 400, f"{payload} で {r.status_code}"

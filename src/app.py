@@ -6,10 +6,12 @@
 import os
 import json
 import re
+import secrets
 import unicodedata
 from datetime import datetime, timedelta
 from flask import (Flask, request, jsonify, abort, Response, send_file, g)
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import safe_join
 from dotenv import load_dotenv
 
@@ -37,6 +39,15 @@ SCHEMA_PATH = os.path.join(BASE_DIR, "schema.sql")
 
 app = Flask(__name__, static_folder=None)
 app.config["JSON_AS_ASCII"] = False  # 日本語をそのまま返す
+
+# Railway 等のエッジプロキシ配下では REMOTE_ADDR がプロキシのIPに潰れ、
+# 全利用者が同一クライアント扱いになる。そのままだとログインのレート制限
+# （_login_attempt_key）が機能せず、第三者が10回失敗を送るだけで正規の
+# 管理者を締め出せるアカウントロックアウトDoSが成立する。
+# x_for=1 は X-Forwarded-For の「最右」＝直近のプロキシが記録した実クライアントIP
+# のみを採用するため、クライアントが自分でヘッダを付けても偽装にはならない。
+# 前提: 信頼できるプロキシ1段の背後で動かすこと（多段構成なら x_for を増やす）。
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
 
 # ===========================================================
@@ -81,6 +92,129 @@ def handle_exc(e):
 # ===========================================================
 # 認証ヘルパ
 # ===========================================================
+# ログイン試行のレート制限
+_LOGIN_MAX_FAILS = 10        # この回数失敗したらロック
+_LOGIN_WINDOW_MIN = 15       # 失敗カウントを保持する時間（分）
+_LOGIN_LOCK_MIN = 15         # ロックする時間（分）
+_LOGIN_CODE_MAX = 64         # 店舗コード／ユーザーコードの最大長
+
+
+def _sanitize_login_code(value):
+    """ログイン入力のコードを正規化する（前後の空白除去 ＋ 改行の除去）。
+
+    【なぜ改行を落とすか】
+      失敗したコードは監査ログの actor_name とレート制限キーにそのまま入る。
+      改行が生で残ると、監査ログを1行1レコードとして読む運用（将来のCSV出力を含む）で
+      攻撃者が偽の行を差し込めてしまう。UI 側は esc() を通すので XSS にはならないが、
+      ログ偽装は残るため入口で落とす。
+
+    str() を挟むのは、JSON で文字列以外（数値・配列・オブジェクト）を送られたときに
+    .strip() が AttributeError になり、未認証クライアントに 500 が返るのを避けるため。
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    return value.replace("\r", "").replace("\n", "").strip()
+
+
+def _login_attempt_key(shop_code, user_code):
+    """レート制限のキー。管理者ログインは user_code を 'admin' に正規化する。
+
+    管理者は「店舗コード欄・ユーザーコード欄のどちらかに admin」で試行できる
+    （login() 参照）ため、正規化しないと同じ管理者アカウントに対して
+    2つの別キーが立ち、許される試行回数が2倍になってしまう。
+
+    【トレードオフ】
+      正規化の結果、同一IPからの管理者ログインは admin_id の違いに関わらず
+      1つのバケツを共有する。system_admins は複数行を許すテーブルなので、
+      管理者が複数いる環境では、ある管理者への総当たりが他の管理者まで
+      巻き添えでロックする。試行回数を2倍にしないことを優先した判断。
+      admin_id 単位に分けるには login() 側の「どちらかの欄に admin」という
+      マジックワード仕様そのものを見直す必要がある（Phase 2 で再検討）。
+    """
+    ip = request.remote_addr or "-"
+    if shop_code == "admin" or user_code == "admin":
+        return f"{ip}|admin"
+    return f"{ip}|{shop_code}|{user_code}"
+
+
+def _check_login_lock(key):
+    """ロック中なら 429 で中断する。期限切れの行はここで掃除する。
+
+    定期実行のバックグラウンドジョブが無い構成のため、行の掃除は
+    「そのキーに触ったログイン処理のついで」に行う。放置すると
+    login_attempts が古い行で膨らみ続ける。
+    """
+    now = jst_now()
+    row = query_one("SELECT fail_count, locked_until, updated_at FROM login_attempts WHERE attempt_key=?",
+                    (key,))
+    if not row:
+        return
+    locked_until = row.get("locked_until")
+    if locked_until:
+        try:
+            lock_dt = datetime.strptime(locked_until, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            lock_dt = None
+        if lock_dt and now < lock_dt:
+            # ブロックした試行も監査に残す（残さないと、攻撃はちょうど _LOGIN_MAX_FAILS 件で
+            # 途切れて見え、その後の継続や規模が後から一切分からない）。
+            # ただしロック中は何百回でもリクエストが来るため、記録は「そのロック期間中に1回だけ」。
+            # SELECT してから UPDATE すると並列時に複数回記録され得るので、
+            # blocked_logged=0 を条件にした1文の UPDATE が当たったときだけ記録する。
+            claimed = execute(
+                "UPDATE login_attempts SET blocked_logged=1 "
+                "WHERE attempt_key=? AND blocked_logged=0", (key,))
+            if claimed.get("changes"):
+                audit("auth.login_blocked", actor_role="anonymous", actor_name=key,
+                      detail=f"ロック中のログイン試行をブロック（{_LOGIN_LOCK_MIN}分）")
+            abort(429, description="ログイン試行が多すぎます。しばらく待ってからお試しください")
+    # ロック期限切れ、または最終試行がウィンドウ外なら行を捨てる
+    updated = row.get("updated_at")
+    stale = True
+    if updated:
+        try:
+            stale = (now - datetime.strptime(updated, "%Y-%m-%d %H:%M:%S")) > timedelta(minutes=_LOGIN_WINDOW_MIN)
+        except (ValueError, TypeError):
+            stale = True
+    if stale or locked_until:
+        execute("DELETE FROM login_attempts WHERE attempt_key=?", (key,))
+
+
+def _record_login_failure(key):
+    """失敗を1回数える。上限に達したらロック時刻を設定する。
+
+    【なぜ UPSERT か】
+      SELECT でカウントを読んでから UPDATE/INSERT する2段構えだと、その間に
+      到達した並列リクエストが同じ古い値を読み、失敗が取りこぼされる。
+      さらに行がまだ無い状態で同時到達すると INSERT が主キー衝突し、
+      未認証クライアントに 500 と生の SQL エラーを返してしまう。
+      本番は DB_MODE=d1（REST API 経由）で1文ごとにネットワーク往復が挟まり、
+      ローカル SQLite より競合ウィンドウが桁違いに広いため実害が出る。
+      加算を1文の UPSERT にまとめて DB 側で原子的に行う。
+    """
+    now = jst_now()
+    now_s = now.strftime("%Y-%m-%d %H:%M:%S")
+    execute(
+        "INSERT INTO login_attempts (attempt_key, fail_count, updated_at) VALUES (?,1,?) "
+        "ON CONFLICT(attempt_key) DO UPDATE SET "
+        "fail_count=login_attempts.fail_count+1, updated_at=excluded.updated_at",
+        (key, now_s))
+    # 上限到達時のみロック時刻を立てる。locked_until IS NULL を条件にすることで、
+    # ロック中にさらに失敗してもロック期限が延び続けること（無期限ロック）を防ぐ。
+    lock_until_s = (now + timedelta(minutes=_LOGIN_LOCK_MIN)).strftime("%Y-%m-%d %H:%M:%S")
+    # blocked_logged=0 も同時に戻す。新しいロック期間ごとに監査へ1件だけ残すため。
+    execute("UPDATE login_attempts SET locked_until=?, blocked_logged=0 "
+            "WHERE attempt_key=? AND fail_count>=? AND locked_until IS NULL",
+            (lock_until_s, key, _LOGIN_MAX_FAILS))
+
+
+def _clear_login_failures(key):
+    """ログイン成功時に失敗カウントを消す。"""
+    execute("DELETE FROM login_attempts WHERE attempt_key=?", (key,))
+
+
 def require_auth(allowed):
     auth = request.headers.get("Authorization", "")
     token = auth[7:] if auth.startswith("Bearer ") else ""
@@ -101,18 +235,27 @@ def require_auth(allowed):
     role = session["role"]
     if role not in allowed:
         abort(403, description="権限がありません")
+    # 参照先の行が引けないセッションは 401 にする（role 3種で対称にすること）。
+    # g.user = strip_password(None) = None のまま先へ進むと、後段の staff["id"] 等が
+    # TypeError になり、削除済みスタッフ／管理者のトークンで 500 が返っていた。
     if role == "admin":
         user = query_one("SELECT id, admin_id, name FROM system_admins WHERE id=?", (session["user_id"],))
+        if user is None:
+            abort(401, description="セッションの管理者が見つかりません")
     elif role == "shop":
         # user_id は従来 shops.id（旧店主）または staffs.id（manager ロール）。
-        # shop_id を使って店舗情報を取得する方がロバスト。
-        shop = query_one("SELECT * FROM shops WHERE id=?", (session.get("shop_id"),))
-        if shop is None:
-            # フォールバック: user_id を shops.id とみなす（後方互換）
-            shop = query_one("SELECT * FROM shops WHERE id=?", (session["user_id"],))
-        user = shop
+        # shop_id を使って店舗情報を取得する。
+        # NOTE: かつて shop が引けないとき user_id を shops.id とみなすフォールバックが
+        # あったが、manager セッションでは user_id が staffs.id のため、staffs.id と同値の
+        # shops.id を持つ別テナントに着地し得た。旧店主ログインも _create_session で
+        # shop_id を正しく入れている（src/app.py:671）ため、フォールバックは削除した。
+        user = query_one("SELECT * FROM shops WHERE id=?", (session.get("shop_id"),))
+        if user is None:
+            abort(401, description="セッションの店舗が見つかりません")
     else:
         user = query_one("SELECT * FROM staffs WHERE id=?", (session["user_id"],))
+        if user is None:
+            abort(401, description="セッションのスタッフが見つかりません")
     g.role = role
     g.user = strip_password(user)
     g.shop_id = session.get("shop_id")
@@ -125,17 +268,24 @@ def notify(shop_id, staff_id, ntype, title, body):
                                 "title": title, "body": body})
 
 
-def audit(action, target_type=None, target_id=None, shop_id=None, detail=None):
+def audit(action, target_type=None, target_id=None, shop_id=None, detail=None,
+          actor_role=None, actor_id=None, actor_name=None):
     """監査ログを1件記録。失敗しても業務処理を止めない。
 
-    actor は現在の認証コンテキスト(g.role / g.user)から解決する。
+    actor は既定で現在の認証コンテキスト(g.role / g.user)から解決する。
     shop の g.user は shops 行なので氏名は shop_name、それ以外は name。
+
+    ログイン失敗のように認証コンテキストが存在しない場面では、
+    actor_role / actor_name を明示的に渡す（g より優先される）。
     """
     try:
-        role = getattr(g, "role", None)
+        role = actor_role if actor_role is not None else getattr(g, "role", None)
         user = getattr(g, "user", None) or {}
-        actor_id = user.get("id")
-        actor_name = user.get("shop_name") if role == "shop" else user.get("name")
+        if actor_id is None:
+            actor_id = user.get("id")
+        if actor_name is None:
+            g_role = getattr(g, "role", None)
+            actor_name = user.get("shop_name") if g_role == "shop" else user.get("name")
         insert_row("audit_logs", {
             "actor_role": role, "actor_id": actor_id, "actor_name": actor_name,
             "action": action, "target_type": target_type, "target_id": target_id,
@@ -593,16 +743,25 @@ def health():
 # ===========================================================
 @app.post("/api/init")
 def handle_init():
-    """初回セットアップ: 管理者が未登録の場合のみ、初期管理者(admin/admin123)を作成。
-    ※ 認証不要だが、管理者が既に存在する場合は何もしない（安全性）。
-    ※ 本番運用開始後は必ず admin のパスワードを変更すること。
+    """初回セットアップ: 管理者が未登録の場合のみ、初期管理者を作成。
+
+    ※ 認証不要のエンドポイントなので、環境変数 ALLOW_INIT=1 のときだけ有効にする。
+       既定で無効なのは、DBリセット直後に第三者が初期管理者を作れてしまうため。
+    ※ 初期パスワードはランダム生成し、このレスポンスで1回だけ返す（保存も再表示もしない）。
     """
+    if os.getenv("ALLOW_INIT") != "1":
+        # 未認証で叩けるエンドポイントなので、有効化条件（環境変数名）はレスポンスに出さない。
+        # 運用者向けの案内はサーバログにだけ出す。
+        print("[init] blocked: 初期セットアップは無効。有効化するには環境変数 ALLOW_INIT=1 "
+              "を設定してから再起動し、セットアップ後に必ず戻すこと。", flush=True)
+        abort(403, description="初期セットアップは無効です")
     msg = {"admin": "", "shop": "", "logins": {}}
     if not query_one("SELECT id FROM system_admins LIMIT 1"):
+        initial_pw = secrets.token_urlsafe(12)
         execute("INSERT INTO system_admins (admin_id, password_hash, name) VALUES (?,?,?)",
-                ("admin", hash_password("admin123"), "システム管理者"))
-        msg["admin"] = "管理者作成: admin / admin123（※必ずパスワードを変更してください）"
-        msg["logins"] = {"admin": {"id": "admin", "password": "admin123"}}
+                ("admin", hash_password(initial_pw), "システム管理者"))
+        msg["admin"] = "管理者を作成しました。このパスワードは再表示されません。"
+        msg["logins"] = {"admin": {"id": "admin", "password": initial_pw}}
         return jsonify({"ok": True, "message": "初期管理者を作成しました", "details": msg,
                         "logins": msg["logins"]})
     return jsonify({"ok": True, "message": "管理者は既に存在します。ログインしてください。",
@@ -629,11 +788,26 @@ def login():
       さらに 'manager' ロールで店舗権限も一本化する。
     """
     body = request.get_json(silent=True) or {}
-    shop_code = (body.get("shop_code") or body.get("id") or "").strip()
-    user_code = (body.get("user_code") or body.get("staff_code") or "").strip()
+    shop_code = _sanitize_login_code(body.get("shop_code") or body.get("id"))
+    user_code = _sanitize_login_code(body.get("user_code") or body.get("staff_code"))
     pw = body.get("password") or ""
+
+    # 【なぜ長さ上限か】
+    #   shop_code / user_code は無制限だと、そのまま attempt_key（login_attempts の
+    #   主キー）と audit_logs.actor_name に入る。毎回違う値を送るだけでキーが分散し、
+    #   ロックが一度も発動しないまま未認証クライアントが行を無限に増やせてしまう
+    #   （本番は Cloudflare D1 で書き込み課金・ストレージ上限がある）。
+    #   正当な店舗コード・ユーザーコードが64文字を超えることは無いので、
+    #   切り詰めず 400 で弾く（＝1行も書かずに帰す）。
+    #   入力不備であって認証試行ではないため、_record_login_failure は呼ばない。
+    if len(shop_code) > _LOGIN_CODE_MAX or len(user_code) > _LOGIN_CODE_MAX:
+        raise ValueError(f"店舗コード・ユーザーコードは{_LOGIN_CODE_MAX}文字以内で入力してください")
     if not pw:
         raise ValueError("パスワードを入力してください")
+
+    # 認証を試みる前にロック状態を確認する（正しいパスワードでもロック中は通さない）
+    attempt_key = _login_attempt_key(shop_code, user_code)
+    _check_login_lock(attempt_key)
 
     # ---- システム管理者 ("admin" マジックワード) ----
     if user_code == "admin" or shop_code == "admin":
@@ -645,9 +819,17 @@ def login():
         if not admin and admin_id_guess != "admin":
             admin = query_one("SELECT * FROM system_admins WHERE admin_id=?", ("admin",))
         if admin and verify_password(pw, admin["password_hash"]):
+            _clear_login_failures(attempt_key)
+            audit("auth.login", target_type="system_admin", target_id=admin["id"],
+                  actor_role="admin", actor_id=admin["id"], actor_name=admin.get("name"),
+                  detail=f"admin_id={admin['admin_id']}")
             return jsonify(_create_session("admin", admin["id"], None, admin))
+        _record_login_failure(attempt_key)
+        audit("auth.login_failed", actor_role="anonymous",
+              actor_name=admin_id_guess, detail="管理者ログイン失敗")
         raise ValueError("管理者IDまたはパスワードが正しくありません")
 
+    # 入力不備は認証の試行ではないので失敗としては数えない
     if not shop_code or not user_code:
         raise ValueError("店舗コードとユーザーコードを入力してください")
 
@@ -657,6 +839,11 @@ def login():
         "WHERE sh.shop_code=? AND s.staff_code=? AND s.is_resigned=0 AND sh.is_active=1",
         (shop_code, user_code))
     if staff and verify_password(pw, staff["password_hash"]):
+        _clear_login_failures(attempt_key)
+        audit("auth.login", target_type="staff", target_id=staff["id"], shop_id=staff["shop_id"],
+              actor_role="shop" if staff["role"] == "manager" else "staff",
+              actor_id=staff["id"], actor_name=staff.get("name"),
+              detail=f"role={staff['role']}")
         if staff["role"] == "manager":
             # manager は店舗権限(shopping) → user オブジェクトは shops 行を返す
             shop = query_one("SELECT * FROM shops WHERE id=?", (staff["shop_id"],))
@@ -668,8 +855,15 @@ def login():
     if user_code == shop_code:
         shop = query_one("SELECT * FROM shops WHERE shop_code=? AND is_active=1", (shop_code,))
         if shop and verify_password(pw, shop["password_hash"]):
+            _clear_login_failures(attempt_key)
+            audit("auth.login", target_type="shop", target_id=shop["id"], shop_id=shop["id"],
+                  actor_role="shop", actor_id=shop["id"], actor_name=shop.get("shop_name"),
+                  detail="旧仕様の店主ログイン")
             return jsonify(_create_session("shop", shop["id"], shop["id"], shop))
 
+    _record_login_failure(attempt_key)
+    audit("auth.login_failed", actor_role="anonymous",
+          actor_name=f"{shop_code}/{user_code}", detail="店舗またはスタッフのログイン失敗")
     raise ValueError("店舗コード・ユーザーコードまたはパスワードが正しくありません")
 
 
@@ -685,11 +879,39 @@ def _create_session(role, user_id, shop_id, user):
     return {"token": token, "role": role, "user": strip_password(user)}
 
 
+def _session_actor_name(session):
+    """セッション行から操作者の表示名を引く（引けなければ None）。
+
+    shop ロールの user_id は staffs.id（manager）と shops.id（旧店主）が混在するため、
+    require_auth と同じく shop_id を使って店舗名を引く。
+    """
+    try:
+        role = session.get("role")
+        if role == "admin":
+            row = query_one("SELECT name FROM system_admins WHERE id=?", (session.get("user_id"),))
+            return row.get("name") if row else None
+        if role == "shop":
+            row = query_one("SELECT shop_name FROM shops WHERE id=?", (session.get("shop_id"),))
+            return row.get("shop_name") if row else None
+        row = query_one("SELECT name FROM staffs WHERE id=?", (session.get("user_id"),))
+        return row.get("name") if row else None
+    except Exception:
+        return None  # 監査のための付加情報なので、引けなくてもログアウト自体は通す
+
+
 @app.post("/api/logout")
 def logout():
     auth = request.headers.get("Authorization", "")
     token = auth[7:] if auth.startswith("Bearer ") else ""
     if token:
+        session = query_one("SELECT role, user_id, shop_id FROM sessions WHERE token=?", (token,))
+        if session:
+            # トークン削除の前に監査する（削除後だと誰がログアウトしたか分からなくなるため）
+            # logout は require_auth を通らないので g.user が無い。auth.login と同じ画面で
+            # 表示が揃うよう、セッションの role / user_id から氏名を引いて明示的に渡す。
+            audit("auth.logout", shop_id=session.get("shop_id"),
+                  actor_role=session["role"], actor_id=session["user_id"],
+                  actor_name=_session_actor_name(session))
         execute("DELETE FROM sessions WHERE token=?", (token,))
     return jsonify({"ok": True})
 
@@ -799,11 +1021,38 @@ def admin_create_shop():
 def admin_update_shop(sid):
     require_auth(["admin"])
     body = request.get_json(silent=True) or {}
-    is_active = 1 if body.get("is_active") else 0
-    execute("UPDATE shops SET shop_name=?, is_active=? WHERE id=?",
-            (body.get("shop_name"), is_active, sid))
+    shop = query_one("SELECT id, shop_code, shop_name FROM shops WHERE id=?", (sid,))
+    if shop is None:
+        abort(404, description="店舗が見つかりません")
+
+    # 部分更新。送られてきたキーだけを更新する。
+    # NOTE: かつて body.get("shop_name") を無条件で UPDATE していたため、
+    # 有効/無効トグル（shop_name を送らない）で店舗名が空文字に潰れる事故があった。
+    sets, binds, changed = [], [], []
+    if "shop_name" in body:
+        name = (body.get("shop_name") or "").strip()
+        if not name:
+            raise ValueError("店舗名を入力してください")
+        sets.append("shop_name=?"); binds.append(name); changed.append("shop_name")
+    if "shop_code" in body:
+        code = (body.get("shop_code") or "").strip()
+        if not code:
+            raise ValueError("店舗コードを入力してください")
+        dup = query_one("SELECT id FROM shops WHERE shop_code=? AND id<>?", (code, sid))
+        if dup:
+            raise ValueError("その店舗コードは既に使われています")
+        sets.append("shop_code=?"); binds.append(code); changed.append("shop_code")
+    if "is_active" in body:
+        is_active = 1 if body.get("is_active") else 0
+        sets.append("is_active=?"); binds.append(is_active); changed.append(f"is_active={is_active}")
+
+    if not sets:
+        raise ValueError("更新する項目がありません")
+
+    binds.append(sid)
+    execute(f"UPDATE shops SET {','.join(sets)} WHERE id=?", tuple(binds))
     audit("shop.update", target_type="shop", target_id=sid, shop_id=sid,
-          detail=f"is_active={is_active}")
+          detail=",".join(changed))
     return jsonify({"ok": True})
 
 
@@ -1426,6 +1675,13 @@ def _shop_ctx():
     return g.user, g.user["id"], parse_settings(g.user.get("settings"))
 
 
+def _assert_staff_in_shop(staff_id, shop_id):
+    """staff_id が自店舗に属することを検証する（他店舗・存在しないIDは404）。"""
+    row = query_one("SELECT id FROM staffs WHERE id=? AND shop_id=?", (staff_id, shop_id))
+    if row is None:
+        abort(404, description="スタッフが見つかりません")
+
+
 def _get_shop_shift_end_time(shop_id):
     """店舗のシフト終了時刻を取得（shift_hours優先 → shift_patterns → 22:00）。
 
@@ -1625,12 +1881,49 @@ def shop_notifs_readall():
 
 @app.get("/api/admin/notifications")
 def admin_notifs():
-    # システム管理者向け通知は現状なし（空リストを返す）
+    require_auth(["admin"])
+    # システム管理者向け通知は現状なし（空リストを返す）。
+    # Phase 2 で一斉通知の配信履歴を返す実装に置き換える。
     return jsonify({"notifications": [], "unread": 0})
 
 
 @app.put("/api/admin/notifications/read-all")
 def admin_notifs_readall():
+    require_auth(["admin"])
+    return jsonify({"ok": True})
+
+
+@app.put("/api/admin/password")
+def admin_change_password():
+    """システム管理者が自分のパスワードを変更する。
+
+    【なぜ必要か】
+      system_admins への UPDATE がコード全体でゼロで、変更手段が存在しなかった。
+      /api/init の初期パスワードはランダム生成（S4）なので、手段が無いままだと
+      発行された値を一生使い続けることになる。
+    """
+    require_auth(["admin"])
+    body = request.get_json(silent=True) or {}
+    current = body.get("current_password") or ""
+    new_pw = body.get("new_password") or ""
+    admin_id = (getattr(g, "user", None) or {}).get("id")
+    row = query_one("SELECT id, admin_id, password_hash FROM system_admins WHERE id=?",
+                    (admin_id,))
+    if row is None:
+        abort(404, description="管理者が見つかりません")
+    if not verify_password(current, row["password_hash"]):
+        raise ValueError("現在のパスワードが正しくありません")
+    msg = validate_password(new_pw)
+    if msg:
+        raise ValueError(msg)
+    execute("UPDATE system_admins SET password_hash=? WHERE id=?",
+            (hash_password(new_pw), admin_id))
+    # 他端末のセッションは失効させる。自分の今のセッションだけ残す
+    # （変更直後に再ログインを強いられるのは体験が悪いため）。
+    token = request.headers.get("Authorization", "")[7:]
+    execute("DELETE FROM sessions WHERE role='admin' AND user_id=? AND token<>?",
+            (admin_id, token))
+    audit("admin.password_change", target_type="system_admin", target_id=admin_id)
     return jsonify({"ok": True})
 
 
@@ -2362,9 +2655,24 @@ def shop_fixed():
     return jsonify({"fixed_shifts": rows})
 
 
+def _assert_fixed_shift_in_shop(fid, shop_id):
+    """固定シフトが自店舗スタッフのものであることを検証する。
+
+    fixed_shifts には shop_id 列が無く staff_id しか持たないため、staffs 経由で
+    JOIN して所属を判定する。他店舗のものは 404（存在を秘匿する既存方針に合わせる）。
+    """
+    row = query_one(
+        "SELECT fs.id FROM fixed_shifts fs JOIN staffs s ON fs.staff_id=s.id "
+        "WHERE fs.id=? AND s.shop_id=?", (fid, shop_id))
+    if row is None:
+        abort(404, description="固定シフトが見つかりません")
+
+
 @app.post("/api/shop/fixed-shifts")
 def shop_fixed_post():
+    shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
+    _assert_staff_in_shop(body["staff_id"], shop_id)
     meta = execute("INSERT INTO fixed_shifts (staff_id, weekday, start_time, end_time) VALUES (?,?,?,?)",
                    (body["staff_id"], body["weekday"], body["start_time"], body["end_time"]))
     return jsonify({"ok": True, "id": meta["last_row_id"]})
@@ -2372,13 +2680,18 @@ def shop_fixed_post():
 
 @app.put("/api/shop/fixed-shifts/<int:fid>")
 def shop_fixed_put(fid):
+    shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
-    execute("UPDATE fixed_shifts SET weekday=?, start_time=?, end_time=? WHERE id=?", (body["weekday"], body["start_time"], body["end_time"], fid))
+    _assert_fixed_shift_in_shop(fid, shop_id)
+    execute("UPDATE fixed_shifts SET weekday=?, start_time=?, end_time=? WHERE id=?",
+            (body["weekday"], body["start_time"], body["end_time"], fid))
     return jsonify({"ok": True})
 
 
 @app.delete("/api/shop/fixed-shifts/<int:fid>")
 def shop_fixed_del(fid):
+    shop, shop_id, _ = _shop_ctx()
+    _assert_fixed_shift_in_shop(fid, shop_id)
     execute("DELETE FROM fixed_shifts WHERE id=?", (fid,))
     return jsonify({"ok": True})
 
@@ -2812,6 +3125,9 @@ def shop_shifts_post():
     body = request.get_json(silent=True) or {}
     auto_adjust = bool(body.get("auto_adjust"))
     staff_id = body["staff_id"]
+    # 自店舗の shop_id を持ちながら他店舗スタッフを指す行を作らせない。
+    # /api/shop/wishes/bulk (src/app.py:3711-3720 付近) と同じ防御。
+    _assert_staff_in_shop(staff_id, shop_id)
     start_dt = body["start_datetime"]
     end_dt = body["end_datetime"]
     # 隣接する同一スタッフの confirmed があれば自動的に統合（17-18 + 18-22 → 17-22）
@@ -2941,6 +3257,11 @@ def shop_shifts_put(sid):
     if not existing:
         abort(404, description="シフトが見つかりません")
     staff_id = body.get("staff_id") or existing["staff_id"]
+    # 自店舗の shop_id を持ちながら他店舗スタッフへ付け替えられないようにする。
+    # staff_id 省略時は既存値を維持するだけなので検証不要（値があるときだけ検証）。
+    # /api/shop/wishes/bulk (src/app.py:3711-3720 付近) と同じ防御。
+    if body.get("staff_id") is not None:
+        _assert_staff_in_shop(body.get("staff_id"), shop_id)
     # 確定シフトのロック：確定済みシフトの時間・担当変更は直接編集できない。
     # 変更はスタッフの「変更申請」を承認して反映する（時刻・担当が変わらない再保存や
     # requested/modifying からの確定は許可）。UI もメモ以外を編集不可にしている。
@@ -4104,6 +4425,67 @@ def ensure_db():
         execute("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at)")
     except Exception as e:
         print(f"[ensure_db] WARN: audit_logs setup failed (skipped): {e}", flush=True)
+    # ログイン試行のレート制限テーブル。
+    # ここで握り潰しても _verify_critical_tables() が起動を止めるので、
+    # 「テーブルが無いのに healthy」という状態にはならない。
+    try:
+        execute(
+            "CREATE TABLE IF NOT EXISTS login_attempts ("
+            "attempt_key TEXT PRIMARY KEY, fail_count INTEGER NOT NULL DEFAULT 0, "
+            "locked_until TEXT, updated_at TEXT, "
+            "blocked_logged INTEGER NOT NULL DEFAULT 0)")
+        # 既存DB（blocked_logged 導入前）への追加。CREATE TABLE IF NOT EXISTS は
+        # 既存テーブルの列を増やさないため、ALTER で追う。
+        cols = {row["name"] for row in query_all("PRAGMA table_info(login_attempts)")}
+        if "blocked_logged" not in cols:
+            execute("ALTER TABLE login_attempts ADD COLUMN blocked_logged INTEGER NOT NULL DEFAULT 0")
+            print("[ensure_db] OK: login_attempts.blocked_logged added", flush=True)
+    except Exception as e:
+        print(f"[ensure_db] WARN: login_attempts setup failed (skipped): {e}", flush=True)
+
+
+def _verify_critical_tables():
+    """ensure_db() の後に、無いと機能が黙って壊れるテーブル・列の実在を検証する。
+
+    【なぜ起動を落とすのか】
+      login_attempts が無いと _check_login_lock の SELECT が失敗し、
+      未認証クライアントに 500（生の SQL エラー付き）が返る。つまり誰もログイン
+      できないのに /api/health は 200 を返し続け、Railway のヘルスチェックは通る。
+      「レート制限をフェイルオープンさせる」案はブルートフォース防御が静かに
+      無効化されるため採らない。起動時に落として再起動させる方が安全。
+
+      ensure_db() は途中の PRAGMA/ALTER で raise し得るため、そこで中断すると
+      login_attempts の CREATE に到達しない。また D1 モードの init_schema は
+      個別ステートメントの失敗を握り潰す。どちらの経路も「作られなかった」を
+      検知できるよう、CREATE の成否ではなく実在を最後に確認する。
+
+    【なぜテーブルだけでなく列まで見るのか】
+      login_attempts.blocked_logged は CREATE TABLE IF NOT EXISTS では追加され
+      ず、既存DBには ensure_db() 内の ALTER TABLE ADD COLUMN で追う。この
+      ALTER が（本番D1で実際に起きた migrations/0004 のスキーマ変更失敗のよ
+      うに）何らかの理由で失敗すると、テーブルは存在するのに列だけが欠けた
+      状態になる。「SELECT 1 FROM table」はテーブルの実在しか見ないため、この
+      状態を素通りさせてしまい、結局ロック中の /api/login が
+      「no such column: blocked_logged」の 500 を未認証クライアントに返す。
+      これは本関数を導入した動機（テーブル欠如の見逃し）と同じ失敗モードが
+      列単位で再発しているだけなので、各テーブルで実際に使う列を明示して
+      SELECT することで、テーブル・列どちらの欠落も検知する。
+    """
+    # テーブル名 -> そのテーブルで実際に使う列（一貫性のため audit_logs /
+    # sessions も同じ形で検証する）。
+    checks = {
+        "login_attempts": "blocked_logged",
+        "audit_logs": "action",
+        "sessions": "role",
+    }
+    for table, column in checks.items():
+        try:
+            query_all(f"SELECT {column} FROM {table} LIMIT 1")
+        except Exception as e:
+            raise RuntimeError(
+                f"必須テーブル {table} の列 {column} が見つかりません"
+                f"（テーブルが無いか、列だけが欠けています。DB初期化が完了していません）。"
+                f"この状態で起動を続けるとログインが機能しないため停止します: {e}")
 
 
 def _normalize_datetime_data():
@@ -4169,13 +4551,18 @@ def _normalize_datetime_data():
 # gunicorn 等でインポートされた場合もスキーマを整備（起動時に1回）
 try:
     ensure_db()
+    _verify_critical_tables()
 except Exception as _e:
-    # gunicorn 起動時に ImportError にしてすぐ分かるようにする
-    print(f"[startup] DB initialization failed: {_e}", flush=True)
+    # ログを出したうえで必ず伝播させる（gunicorn 起動時は ImportError になる）。
+    # ここで握り潰すと「/api/health は 200 なのに誰もログインできない」状態のまま
+    # 起動が完了してしまい、Railway のヘルスチェックが異常を検知できない。
+    print(f"[startup] FATAL: DB initialization failed: {_e}", flush=True)
+    raise
 
 
 if __name__ == "__main__":
     ensure_db()
+    _verify_critical_tables()
     # ポート5000はmacOSのAirPlay Receiverが使用するため、デフォルトは8000
     port = int(os.getenv("PORT", "8000"))
     # debug=True は開発時のみ。本番環境変数 FLASK_DEBUG=0 で明示的に無効化可能。

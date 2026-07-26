@@ -1335,3 +1335,112 @@ Phase 1 で未コミットの変更が残っていれば整理してコミット
 ```bash
 git status
 ```
+
+---
+
+### Task 10: 管理者パスワード変更 API（S2）
+
+ブランチ最終レビューで「設計書 §5.3 は S2 を Phase 1 に置いているのに実装計画から欠落
+している」と指摘された。S4 で初期パスワードをランダム化したため、変更手段が無いままだと
+発行されたランダムパスワードを二度と変更できない。ユーザー判断で Phase 1 に引き上げた。
+
+**UI は作らない**（Phase 2 の `adminSystem` 画面で作る）。API のみ。
+管理者アカウントの一覧/追加/削除は Phase 2 Task 5 のまま。
+
+**Files:**
+- Modify: `src/app.py`（`admin_notifs_readall` の直後にエンドポイント追加）
+- Modify: `public/app.js`（`AUDIT_ACTION_LABELS`）
+- Test: `tests/test_admin_accounts.py`（新規。`TestAdminPasswordChange` のみ）
+
+**Interfaces:**
+- Produces: `PUT /api/admin/password` body `{current_password, new_password}` → `{"ok": True}`
+
+- [x] **Step 1: 失敗するテストを書く**
+
+`tests/test_admin_accounts.py` に `TestAdminPasswordChange` を置く。Phase 2 Task 5 の
+テストコードをそのまま流用し、以下を追加した。
+
+- `test_requires_auth` — 未認証は 401
+- `test_change_is_audited` — `admin.password_change` が記録され、そこにパスワードが載らない
+
+- [x] **Step 2: テストを実行して失敗を確認**
+
+Run: `.venv/bin/python -m pytest tests/test_admin_accounts.py -q`
+Expected: 全件 FAIL（404 が返る）
+
+- [x] **Step 3: 実装する**
+
+`src/app.py` の `admin_notifs_readall`（`/api/admin/notifications/read-all`）の直後に追加。
+Phase 2 では `src/admin_api.py` へ切り出す前提なので、他の `/api/admin/*` と同じ場所に置く。
+
+```python
+@app.put("/api/admin/password")
+def admin_change_password():
+    require_auth(["admin"])
+    body = request.get_json(silent=True) or {}
+    current = body.get("current_password") or ""
+    new_pw = body.get("new_password") or ""
+    admin_id = (getattr(g, "user", None) or {}).get("id")
+    row = query_one("SELECT id, admin_id, password_hash FROM system_admins WHERE id=?",
+                    (admin_id,))
+    if row is None:
+        abort(404, description="管理者が見つかりません")
+    if not verify_password(current, row["password_hash"]):
+        raise ValueError("現在のパスワードが正しくありません")
+    msg = validate_password(new_pw)
+    if msg:
+        raise ValueError(msg)
+    execute("UPDATE system_admins SET password_hash=? WHERE id=?",
+            (hash_password(new_pw), admin_id))
+    # 他端末のセッションは失効させる。自分の今のセッションだけ残す
+    # （変更直後に再ログインを強いられるのは体験が悪いため）。
+    token = request.headers.get("Authorization", "")[7:]
+    execute("DELETE FROM sessions WHERE role='admin' AND user_id=? AND token<>?",
+            (admin_id, token))
+    audit("admin.password_change", target_type="system_admin", target_id=admin_id)
+    return jsonify({"ok": True})
+```
+
+- [x] **Step 4: 監査ログのラベルを追加**
+
+`public/app.js` の `AUDIT_ACTION_LABELS` に `'admin.password_change': '管理者PW変更',` を追加。
+
+- [x] **Step 5: テストを実行**
+
+Run: `.venv/bin/python -m pytest tests/test_admin_accounts.py -q`
+Expected: 全件 PASS
+
+- [x] **Step 6: 全テスト・E2E**
+
+Run: `.venv/bin/python -m pytest tests/ -q` / `npx playwright test`
+Expected: 既存の件数を下回らないこと
+
+- [x] **Step 7: ドキュメントの整合**
+
+- 設計書 §9: S2 を Phase 2 の項目から Phase 1 側へ移動
+- Phase 2 計画 Task 5: パスワード変更部分（Interfaces / テスト / 実装コード / コミットメッセージ）を削除し、
+  管理者アカウントの一覧/追加/削除のみにする
+
+---
+
+### Task 11: ブランチ最終レビューの指摘対応
+
+Task 9 の後にブランチ全体のレビューを受け、個別タスクでは見えなかった指摘が出た。
+Task 10（S2）以外の対応は以下。詳細は
+`.superpowers/sdd/2026-07-26-admin-console-phase1-security/task-10-fix-report.md`。
+
+| 指摘 | 対応 |
+|---|---|
+| I-1 | `login()` で `shop_code` / `user_code` を 64 文字上限にし、超過は記録せず 400（`_LOGIN_CODE_MAX`） |
+| M-2 | `_sanitize_login_code()` で `\r` `\n` を除去してから監査ログ・レート制限キーに載せる |
+| I-2 | `_verify_critical_tables()` を追加し、`ensure_db()` の後に必須テーブルの実在を検証。失敗時は起動時に raise |
+| M-3 | `/api/init` の 403 メッセージから `ALLOW_INIT` を落とし、運用者向けの案内は print へ |
+| M-5 | `require_auth` の admin / staff 分岐も、行が引けなければ 401（shop 分岐と対称に） |
+| M-6 | `_check_login_lock` の 429 直前に `auth.login_blocked` を記録。`login_attempts.blocked_logged` でロック期間中1件に制限 |
+| M-7 | `logout()` が `_session_actor_name()` で氏名を引いて `actor_name` に渡す |
+| M-9 | `tests/test_security.py` の古いコメントを現状に合わせて書き直し |
+| M-1 | README の初回セットアップ手順（`ALLOW_INIT` / ランダムパスワード / 後始末）を修正 |
+
+Phase 2 送りにしたもの: I-4（ICS の購読トークン体系）、M-4（`shop_wishes_parse` の 400）、
+M-8（`migrations/0005_admin_console.sql`）、`errorhandler(Exception)` の生エラー露出、
+`login_attempts` の一括掃除、ProxyFix の信頼プロキシ検証。

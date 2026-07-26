@@ -127,16 +127,23 @@ def query_one(sql, params=()):
 
 
 def execute(sql, params=()):
-    """INSERT/UPDATE/DELETEを実行し meta({last_row_id}) を返す。"""
+    """INSERT/UPDATE/DELETEを実行し meta({last_row_id, changes}) を返す。
+
+    changes は「実際に更新された行数」。条件付き UPDATE が当たったかどうかを
+    アプリ側で判定するために返す（例: WHERE flag=0 を使った「1回だけ処理する」
+    の実装。SELECT してから UPDATE すると並列時に二重実行されるため、
+    1文の UPDATE の結果で判断する）。
+    """
     if DB_MODE == "d1":
         result = _d1_execute_sql(sql, params)
         meta = result.get("meta", {})
-        return {"last_row_id": meta.get("last_row_id", 0)}
+        return {"last_row_id": meta.get("last_row_id", 0),
+                "changes": meta.get("changes", 0)}
     conn = _get_local_conn()
     try:
         cur = conn.execute(sql, params)
         conn.commit()
-        return {"last_row_id": cur.lastrowid}
+        return {"last_row_id": cur.lastrowid, "changes": cur.rowcount}
     finally:
         _local_maybe_close(conn)
 

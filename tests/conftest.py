@@ -28,6 +28,8 @@ SCHEMA_PATH = os.path.join(_BASE, "schema.sql")
 # 外部キー依存関係に従った子→親の削除順序
 _TABLES = [
     "audit_logs",
+    # 消し忘れると、あるテストのログイン失敗が次のテストにロック状態として漏れる
+    "login_attempts",
     "change_requests",
     "shifts",
     "wish_history",

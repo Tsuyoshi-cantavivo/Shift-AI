@@ -231,3 +231,20 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_shop ON audit_logs(shop_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at);
+
+-- -----------------------------------------------------------
+-- login_attempts: ログイン試行のレート制限
+-- attempt_key は "<remote_addr>|<shop_code>|<user_code>"。
+-- shop_code / user_code は login() 側で 64 文字までに制限しているため、
+-- 未認証クライアントが主キーを無制限に長くすることはできない。
+-- バックグラウンドジョブが無いため、期限切れ行はログイン処理のついでに掃除する。
+-- blocked_logged: このロック期間中に 429 ブロックを監査ログへ記録済みか。
+--   ロック中は何回リクエストが来ても監査ログを1件に抑えるためのフラグ。
+-- -----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS login_attempts (
+  attempt_key    TEXT PRIMARY KEY,
+  fail_count     INTEGER NOT NULL DEFAULT 0,
+  locked_until   TEXT,
+  updated_at     TEXT,
+  blocked_logged INTEGER NOT NULL DEFAULT 0
+);
