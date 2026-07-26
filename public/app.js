@@ -2628,16 +2628,16 @@ SCREENS.requests = async function (el) {
       <div class="mb-3"><button class="btn btn-light w-full" id="reqImportBtn"><i class="bi bi-clipboard-plus"></i> テキストから取り込む</button></div>
       <div id="reqList"><div class="text-secondary small">「表示」ボタンを押してください</div></div>`);
   document.getElementById('reqLoadBtn')?.addEventListener('click', () => loadReqList());
-  document.getElementById('reqImportBtn')?.addEventListener('click', () => openWishImportModal((importedYearMonth) => {
-    // M-9: 取り込んだ月が現在の一覧フィルタ範囲外だと、登録成功のトーストが出ても
-    // 一覧に何も表示されず「失敗した」ように見える。フィルタを取り込んだ月まで広げる
-    if (importedYearMonth) {
+  document.getElementById('reqImportBtn')?.addEventListener('click', () => openWishImportModal((range) => {
+    // M-9: 取り込んだ日付が現在の一覧フィルタ範囲外だと、登録成功のトーストが出ても
+    // 一覧に何も表示されず「失敗した」ように見える。フィルタを取り込んだ範囲まで広げる。
+    // range は実際に登録した項目の日付min〜max（対象月ではない。8/31〜9/2のように
+    // 対象月をまたぐ取り込みだと対象月だけでは9月分が一覧から漏れるため）。
+    if (range && range.start && range.end) {
       const sEl = document.getElementById('reqStart');
       const eEl = document.getElementById('reqEnd');
-      const first = `${importedYearMonth}-01`;
-      const last = `${importedYearMonth}-${String(_wtiLastDayOfMonth(importedYearMonth)).padStart(2, '0')}`;
-      if (sEl && (!sEl.value || sEl.value > first)) sEl.value = first;
-      if (eEl && (!eEl.value || eEl.value < last)) eEl.value = last;
+      if (sEl && (!sEl.value || sEl.value > range.start)) sEl.value = range.start;
+      if (eEl && (!eEl.value || eEl.value < range.end)) eEl.value = range.end;
     }
     loadReqList();
   }));
@@ -2942,8 +2942,12 @@ async function _wtiParse(wrap, state) {
     const start = [itemDates[0], `${state.yearMonth}-01`].sort()[0];
     const end = [itemDates[itemDates.length - 1], `${state.yearMonth}-${String(dim).padStart(2, '0')}`].sort().pop();
     const [wishesD, periodsD] = await Promise.all([
-      // 注意: /api/shop/wishes は LIMIT 500（src/app.py）。同一スタッフ・広範囲で
-      // 500件を超える大規模店では、印・上書き判定が取りこぼす可能性が残る。
+      // 注意: /api/shop/wishes は ORDER BY start_datetime DESC LIMIT 500・staff_id
+      // での絞り込み無し（src/app.py）。レンジを広げるほど切り捨てに当たりやすく、
+      // DESC順のため切り捨てられるのは古い日付側＝レンジを広げる原因になった対象月
+      // そのもの（8/31〜9/2をまたぐ解析なら対象月8月側が先に切り捨てられる）。
+      // src/ を触らずには絞れないため、大規模店（同一スタッフで500件超）では
+      // 印・上書き判定が取りこぼす可能性が既知の限界として残る。
       api(`/shop/wishes?start=${start}&end=${end}`).catch(() => ({ wishes: [] })),
       api('/shop/periods').catch(() => ({ periods: [] })),
     ]);
@@ -2979,26 +2983,37 @@ function _wtiUnparsedHtml(state) {
   return `<div class="wti-unparsed alert alert-warning py-2 mb-2"><i class="bi bi-question-circle"></i> 読み取れなかった文（${state.unparsed.length}件）。必要であれば手入力で補ってください。<ul class="small mb-0 mt-1">${rows}</ul></div>`;
 }
 
-/* C-1: 同一(スタッフ,日付)に複数の読み取りが残っている場合の警告。
+/* C-1: 同一(スタッフ,日付)に複数の読み取りが残っている状態を検出する。
    src/ai.py のプロンプトは「内容が違えばentriesを分ける」と明示しており、
-   同日に矛盾する2件が返るのは正常系。カレンダーは後勝ちで1件しか描けない
-   ため、店長が気づけるようここで必ず知らせる（未割り当ては対象外。
-   staff_id が定まって初めて「同じ枠の競合」になるため）。 */
-function _wtiDuplicateWarnHtml(state) {
+   同日に矛盾する2件が返るのは正常系。未割り当ては対象外（staff_id が
+   定まって初めて「同じ枠の競合」になるため）。表示にも送信ブロックにも使う
+   ため、判定ロジックはここに一本化する。 */
+function _wtiFindDuplicateGroups(state) {
   const groups = {};
   state.items.forEach((it) => {
     if (!it.staffId) return;
     const key = `${it.staffId}|${it.date}`;
     (groups[key] = groups[key] || []).push(it);
   });
-  const dupKeys = Object.keys(groups).filter((k) => groups[k].length > 1);
+  const dup = {};
+  Object.keys(groups).forEach((k) => { if (groups[k].length > 1) dup[k] = groups[k]; });
+  return dup;
+}
+
+/* カレンダーは後勝ちで1件しか描けないため、店長が気づけるようここで必ず知らせる。
+   期間外警告（_wtiPeriodWarnHtml）と同じく5件＋「他」で打ち切る（375pxでカレンダーが
+   画面外に押し出されるのを防ぐ）。 */
+function _wtiDuplicateWarnHtml(state) {
+  const dupGroups = _wtiFindDuplicateGroups(state);
+  const dupKeys = Object.keys(dupGroups);
   if (!dupKeys.length) return '';
   const parts = dupKeys.map((k) => {
     const [sid, date] = k.split('|');
     const s = state.staffs.find((x) => x.id === +sid);
     return `${esc(s ? s.name : '不明')} ${esc(date.slice(5))}`;
   });
-  return `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> 同じ日に複数の読み取りがあります（${parts.join('、')}）。日付を開いて、どちらを登録するか確認してください。</div>`;
+  const sample = parts.slice(0, 5).join('、') + (parts.length > 5 ? ' 他' : '');
+  return `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> 同じ日に複数の読み取りがあります（${sample}）。日付を開いて、どちらを登録するか確認してください。</div>`;
 }
 
 /* I-2: 「1人目だけ見て登録」を防ぐための内訳表示。未確認（一度もカレンダーを
@@ -3135,8 +3150,10 @@ function _wtiRenderCalendar(wrap, state) {
       mark = `<div class="wmark wti-conflict">競合${dayItems.length}</div>`;
     }
     const flag = hasExisting ? '<i class="bi bi-exclamation-circle-fill wti-existing-flag" title="既存の希望があります"></i>' : '';
-    // M-3: 項目のない日は押しても何も起きないので、期間外セルと同じ .disabled で見た目も抑える
-    const cellCls = dayItems.length ? 'wish-cell' : 'wish-cell disabled';
+    // M-3: 項目のない日は押しても何も起きないので、期間外セルと同じ .disabled で見た目も抑える。
+    // ただし既存希望の印（wti-existing-flag）がある日は disabled にしない
+    // （disabled の opacity:.35 が、意図的に目立たせたい警告アイコンまで薄めてしまうため）。
+    const cellCls = (dayItems.length || hasExisting) ? 'wish-cell' : 'wish-cell disabled';
     cells += `<div class="${cellCls}" data-day="${ds}"><div class="wd ${wdCls}">${d}</div>${mark}${flag}</div>`;
   }
   gridEl.innerHTML = cells;
@@ -3176,8 +3193,8 @@ function _wtiOpenDetail(wrap, state, date) {
         <option value="time"${it.availability === 'time' ? ' selected' : ''}>時間指定</option>
       </select>
       <div id="wtiDetailTimeRow-${idx}" class="row mb-2" style="${it.availability === 'time' ? '' : 'display:none'}">
-        <div class="col-6"><input type="time" id="wtiDetailStart-${idx}" class="form-control" value="${it.start || ''}"></div>
-        <div class="col-6"><input type="time" id="wtiDetailEnd-${idx}" class="form-control" value="${it.end || ''}"></div>
+        <div class="col-6"><input type="time" id="wtiDetailStart-${idx}" class="form-control" value="${esc(it.start || '')}"></div>
+        <div class="col-6"><input type="time" id="wtiDetailEnd-${idx}" class="form-control" value="${esc(it.end || '')}"></div>
       </div>
       <button type="button" class="btn btn-outline-danger btn-sm" data-del-idx="${idx}"><i class="bi bi-trash"></i> この項目を削除</button>
     </div>`;
@@ -3188,8 +3205,10 @@ function _wtiOpenDetail(wrap, state, date) {
     ${entryBlocks}
     ${hasExisting ? `<div class="alert alert-warning py-2 mt-2 mb-1"><i class="bi bi-exclamation-triangle"></i> この日は既に希望が登録されています。<label class="flex items-center gap-2 mt-1" style="font-weight:400"><input type="checkbox" id="wtiDetailOverwrite"${overwriteChecked ? ' checked' : ''}> 既存を上書きして登録する</label></div>` : ''}`;
   const dm = openModal(`<i class="bi bi-calendar-event"></i> ${esc(date)}の希望`, body, (w2, close) => {
-    // I-6: time なのに時刻未入力の項目があれば、保存せず・閉じずにエラーを出す
-    for (const idx of idxs) {
+    // I-6: time なのに時刻未入力の項目があれば、保存せず・閉じずにエラーを出す。
+    // 同日に複数項目があるときは、どれが問題かを「読み取り n/件数」で示す（Minor指摘対応）
+    for (let n = 0; n < idxs.length; n++) {
+      const idx = idxs[n];
       const selEl = w2.querySelector(`#wtiDetailAvail-${idx}`);
       if (!selEl) continue;
       if (selEl.value === 'time') {
@@ -3197,7 +3216,8 @@ function _wtiOpenDetail(wrap, state, date) {
         const et = w2.querySelector(`#wtiDetailEnd-${idx}`)?.value;
         if (!st || !et) {
           const errBox = w2.querySelector('#wtiDetailErr');
-          if (errBox) errBox.innerHTML = '<div class="alert alert-danger py-2 mb-2">時間指定の場合は開始・終了の両方を入力してください。</div>';
+          const posText = idxs.length > 1 ? `（読み取り ${n + 1}/${idxs.length}）` : '';
+          if (errBox) errBox.innerHTML = `<div class="alert alert-danger py-2 mb-2">時間指定の場合は開始・終了の両方を入力してください${posText}。</div>`;
           return;
         }
       }
@@ -3286,6 +3306,18 @@ async function _wtiSubmit(wrap, state) {
   const msgBox = wrap.querySelector('#wtiSubmitMsg');
   const assignable = state.items.filter((it) => it.staffId);
   if (!assignable.length) { toast('登録できる希望がありません（未割り当てのみです）', 'error'); return; }
+  // Important（再レビュー指摘）: 同一(スタッフ,日付)の競合が残ったまま overwrite を
+  // チェックすると、1つの overwriteConfirmed が両エントリに共有されて overwriteGroup に
+  // まとめて入る。サーバの DELETE は希望1件ごとのループの中で走るため、
+  // entry1をINSERT→entry2のDELETEがentry1を消す→entry2をINSERTとなり、
+  // 最終的に1行しか残らないのに created は2を返す（店長には「2件登録」と見える）。
+  // 競合が残っている限り、どちらのグループにも入れず送信をブロックして
+  // 店長に解消（片方を削除）させる方が、送信内容とプレビューの一致を保証できる。
+  const dupGroups = _wtiFindDuplicateGroups(state);
+  if (Object.keys(dupGroups).length) {
+    toast('同じ日に複数の読み取りが残っています。日付を開いて、どちらか一方にしてから登録してください。', 'error');
+    return;
+  }
   // I-6: time なのに時刻未入力のまま送信されるのを送信直前でも弾く（詳細モーダルの
   // バリデーションをすり抜けるケースは無いはずだが、最終防衛線として置く）
   const badTime = assignable.find((it) => it.availability === 'time' && (!it.start || !it.end));
@@ -3319,23 +3351,28 @@ async function _wtiSubmit(wrap, state) {
     } catch (e) { errors.push(`上書き分: ${e.message}`); }
   }
   setLoading(false);
-  const combinedMsg = serverMessages.join(' ');
 
   if (errors.length) {
-    // 部分失敗: 成功済みは取り除いて二重送信を防ぎ、件数を必ず示す。モーダルは開いたまま
+    // 部分失敗: 正常系では normalGroup/overwriteGroup の一方しか失敗しえないため、
+    // ここでの serverMessages は最大1件（連結による件数の水増しは起きない）。
+    // 成功済みは取り除いて二重送信を防ぎ、件数を必ず示す。モーダルは開いたまま
     const succeededUids = new Set(succeededItems.map((it) => it.uid));
     state.items = state.items.filter((it) => !succeededUids.has(it.uid));
-    const successPart = created > 0 ? `${combinedMsg || `${created}件は登録済みです。`} ` : '';
+    const successPart = created > 0 ? `${serverMessages.join(' ') || `${created}件は登録済みです。`} ` : '';
     if (msgBox) msgBox.innerHTML = `<div class="alert alert-danger py-2">${esc(successPart)}失敗: ${esc(errors.join(' / '))}</div>`;
     toast(created > 0 ? `一部登録できませんでした（${created}件は登録済み）` : '登録に失敗しました', 'error');
     _wtiRenderStep2(wrap, state);
     return;
   }
 
+  // Minor（再レビュー指摘）: normalGroup と overwriteGroup が両方成功すると
+  // serverMessages に2件たまる。両者を単純に連結すると「3件登録しました 1件登録しました」
+  // のように読め、合計4件であることが伝わらない。サーバ個別の message 文字列は使わず、
+  // 常に created/skipped の合算から自前で組み立てる（正確さを優先）。
   if (created === 0) {
     // M-2: 全件スキップ（重複等）は成功ではない。緑トーストにせず、モーダルも閉じずに
     // 内容を見直せるようにする
-    const msg = combinedMsg || `登録できる項目がありませんでした（${skipped}件は重複のためスキップ）`;
+    const msg = `登録できる項目がありませんでした（${skipped}件は重複のためスキップ）`;
     if (msgBox) msgBox.innerHTML = `<div class="alert alert-warning py-2">${esc(msg)}</div>`;
     toast(msg, 'warning');
     return;
@@ -3343,9 +3380,15 @@ async function _wtiSubmit(wrap, state) {
 
   // 全件成功
   wrap.remove();
-  toast(combinedMsg || `${created}件を登録しました${skipped ? `（${skipped}件はスキップ）` : ''}`, 'success');
-  // M-9: 取り込んだ月が一覧側の現在フィルタ範囲外でも見えるよう、対象月を渡す
-  if (typeof state.onImported === 'function') state.onImported(state.yearMonth);
+  toast(`${created}件を登録しました${skipped ? `（${skipped}件はスキップ）` : ''}`, 'success');
+  // M-9（再レビュー指摘）: I-5で月またぎ取り込みが可能になったため、フィルタ拡張は
+  // state.yearMonth（対象月）ではなく、実際に登録した項目の日付min〜maxを渡す
+  // （8/31〜9/2のように対象月をまたぐ場合、対象月だけでは9月分の日付が一覧に出ない）。
+  const submittedDates = succeededItems.map((it) => it.date).sort();
+  const range = submittedDates.length
+    ? { start: submittedDates[0], end: submittedDates[submittedDates.length - 1] }
+    : null;
+  if (typeof state.onImported === 'function') state.onImported(range);
 }
 
 /* ---------- Analytics (人件費分析) ---------- */
