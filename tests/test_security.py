@@ -660,3 +660,32 @@ class TestShiftStaffScope:
                              "start_datetime": "2026-08-03T09:00:00",
                              "end_datetime": "2026-08-03T17:00:00"})
         assert r.status_code == 404, "他店舗スタッフに付け替えできてしまう"
+
+
+# ============================================================
+# require_auth の後方互換フォールバック (CWE-639: IDOR / テナント越境)
+# ============================================================
+class TestSessionFallback:
+    def test_deleted_shop_session_does_not_land_on_other_tenant(self, client):
+        """セッションの shop_id が指す店舗が消えたとき、別テナントに着地しないこと。
+
+        manager セッションの user_id は staffs.id。フォールバックが残っていると
+        staffs.id と同値の shops.id を持つ無関係な店舗の権限を得てしまう。
+        """
+        import db as dbmod
+        # 店舗A(id=1) を作り、その manager でログイン
+        shop_a = insert_shop("SHOPA", "pw12345678")
+        insert_staff(shop_a, "mgrA", "店長A", role="manager", password="pw12345678")
+        r = client.post("/api/login", json={"shop_code": "SHOPA", "user_code": "mgrA",
+                                            "password": "pw12345678"})
+        assert r.status_code == 200
+        token = r.get_json()["token"]
+
+        # セッションの shop_id を存在しない店舗に differ させ、
+        # user_id を「別の実在店舗のid」に書き換える（フォールバックが発火する条件）
+        shop_b = insert_shop("SHOPB", "pw12345678")
+        dbmod.execute("UPDATE sessions SET shop_id=99999, user_id=? WHERE token=?",
+                      (shop_b, token))
+
+        r = client.get("/api/shop/staffs", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code != 200, "存在しない店舗のセッションで別テナントに着地している"

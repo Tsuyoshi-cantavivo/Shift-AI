@@ -105,12 +105,14 @@ def require_auth(allowed):
         user = query_one("SELECT id, admin_id, name FROM system_admins WHERE id=?", (session["user_id"],))
     elif role == "shop":
         # user_id は従来 shops.id（旧店主）または staffs.id（manager ロール）。
-        # shop_id を使って店舗情報を取得する方がロバスト。
-        shop = query_one("SELECT * FROM shops WHERE id=?", (session.get("shop_id"),))
-        if shop is None:
-            # フォールバック: user_id を shops.id とみなす（後方互換）
-            shop = query_one("SELECT * FROM shops WHERE id=?", (session["user_id"],))
-        user = shop
+        # shop_id を使って店舗情報を取得する。
+        # NOTE: かつて shop が引けないとき user_id を shops.id とみなすフォールバックが
+        # あったが、manager セッションでは user_id が staffs.id のため、staffs.id と同値の
+        # shops.id を持つ別テナントに着地し得た。旧店主ログインも _create_session で
+        # shop_id を正しく入れている（src/app.py:671）ため、フォールバックは削除した。
+        user = query_one("SELECT * FROM shops WHERE id=?", (session.get("shop_id"),))
+        if user is None:
+            abort(401, description="セッションの店舗が見つかりません")
     else:
         user = query_one("SELECT * FROM staffs WHERE id=?", (session["user_id"],))
     g.role = role
