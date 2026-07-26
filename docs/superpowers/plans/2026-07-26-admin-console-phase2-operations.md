@@ -737,97 +737,31 @@ app.js のグローバル関数をそのまま使う（index.html で app.js の
 
 ---
 
-### Task 5: 管理者アカウント管理 API（S2）
+### Task 5: 管理者アカウント管理 API
 
-システム管理者が自分のパスワードを変更する手段が無く、2人目の運営者を追加することもできない。
+2人目の運営者を追加する手段が無い。
+
+※ 自分のパスワード変更（S2 / `PUT /api/admin/password`）は **Phase 1 の Task 10 で実装済み**。
+`tests/test_admin_accounts.py` は既に存在し、`TestAdminPasswordChange` が入っている。
+このタスクでは同ファイルに `TestAdminAccounts` を追記する形になる。
+Task 3 で `src/admin_api.py` へ移設する際、`admin_change_password` も一緒に移すこと。
 
 **Files:**
 - Modify: `src/admin_api.py`
-- Test: `tests/test_admin_accounts.py`（新規）
+- Test: `tests/test_admin_accounts.py`（既存に追記）
 
 **Interfaces:**
 - Produces:
   - `GET /api/admin/admins` → `{"admins": [{"id", "admin_id", "name", "created_at"}]}`
   - `POST /api/admin/admins` body `{admin_id, name, password}` → `{"ok": True, "id": int}`
   - `DELETE /api/admin/admins/<int:aid>` → `{"ok": True}`
-  - `PUT /api/admin/password` body `{current_password, new_password}` → `{"ok": True}`
 
 - [ ] **Step 1: 失敗するテストを書く**
 
-新規ファイル `tests/test_admin_accounts.py`:
+`tests/test_admin_accounts.py` に追記する（ファイル冒頭の import と `_token` / `_hdr` は
+Phase 1 で定義済み）:
 
 ```python
-"""システム管理者アカウントの管理API。
-
-背景: system_admins への UPDATE がコード全体でゼロで、/api/init が作る
-初期パスワードを変更する正規の手段が存在しなかった。
-"""
-import db as dbmod
-from helpers import insert_admin, insert_shop, insert_staff
-
-
-def _token(client, admin_id="admin", pw="Admin123"):
-    r = client.post("/api/login", json={"user_code": admin_id, "password": pw})
-    assert r.status_code == 200, r.get_data(as_text=True)
-    return r.get_json()["token"]
-
-
-def _hdr(t):
-    return {"Authorization": f"Bearer {t}"}
-
-
-class TestAdminPasswordChange:
-    def test_change_password(self, client):
-        insert_admin("admin", "Admin123")
-        t = _token(client)
-        r = client.put("/api/admin/password", headers=_hdr(t),
-                       json={"current_password": "Admin123", "new_password": "NewPass456"})
-        assert r.status_code == 200
-        # 新パスワードでログインできる
-        assert client.post("/api/login", json={"user_code": "admin",
-                                               "password": "NewPass456"}).status_code == 200
-        # 旧パスワードでは不可
-        assert client.post("/api/login", json={"user_code": "admin",
-                                               "password": "Admin123"}).status_code == 400
-
-    def test_wrong_current_password_is_rejected(self, client):
-        insert_admin("admin", "Admin123")
-        t = _token(client)
-        r = client.put("/api/admin/password", headers=_hdr(t),
-                       json={"current_password": "wrong", "new_password": "NewPass456"})
-        assert r.status_code == 400
-        assert client.post("/api/login", json={"user_code": "admin",
-                                               "password": "Admin123"}).status_code == 200
-
-    def test_weak_password_is_rejected(self, client):
-        insert_admin("admin", "Admin123")
-        t = _token(client)
-        r = client.put("/api/admin/password", headers=_hdr(t),
-                       json={"current_password": "Admin123", "new_password": "short"})
-        assert r.status_code == 400
-
-    def test_other_sessions_are_revoked(self, client):
-        """変更後、自分の現在のセッションは生き、他のセッションは失効すること。"""
-        insert_admin("admin", "Admin123")
-        old = _token(client)
-        cur = _token(client)
-        r = client.put("/api/admin/password", headers=_hdr(cur),
-                       json={"current_password": "Admin123", "new_password": "NewPass456"})
-        assert r.status_code == 200
-        assert client.get("/api/me", headers=_hdr(cur)).status_code == 200
-        assert client.get("/api/me", headers=_hdr(old)).status_code == 401
-
-    def test_requires_admin_role(self, client):
-        sid = insert_shop("SHOP1", "pw12345678")
-        insert_staff(sid, "mgr", "店長", role="manager", password="pw12345678")
-        r = client.post("/api/login", json={"shop_code": "SHOP1", "user_code": "mgr",
-                                            "password": "pw12345678"})
-        t = r.get_json()["token"]
-        r = client.put("/api/admin/password", headers=_hdr(t),
-                       json={"current_password": "pw12345678", "new_password": "NewPass456"})
-        assert r.status_code == 403
-
-
 class TestAdminAccounts:
     def test_list_admins(self, client):
         insert_admin("admin", "Admin123")
@@ -895,43 +829,18 @@ class TestAdminAccounts:
 - [ ] **Step 2: テストを実行して失敗を確認**
 
 Run: `.venv/bin/python -m pytest tests/test_admin_accounts.py -v`
-Expected: 全件 FAIL（404 が返る）
+Expected: `TestAdminAccounts` が全件 FAIL（404 が返る）。
+`TestAdminPasswordChange` は Phase 1 実装済みなので PASS のままであること。
 
 - [ ] **Step 3: 実装する**
 
-`src/admin_api.py` の `register_admin_routes` の中に追加する。`gen_token` は不要。`hash_password` / `verify_password` / `validate_password` はファイル冒頭で import 済み。
+`src/admin_api.py` の `register_admin_routes` の中に追加する。`gen_token` は不要。`hash_password` / `validate_password` はファイル冒頭で import 済み。
 
 ```python
     def _current_admin_id():
         """require_auth(["admin"]) 済みの前提で、自分の system_admins.id を返す。"""
         from flask import g
         return (getattr(g, "user", None) or {}).get("id")
-
-    @app.put("/api/admin/password")
-    def admin_change_password():
-        require_auth(["admin"])
-        body = request.get_json(silent=True) or {}
-        current = body.get("current_password") or ""
-        new_pw = body.get("new_password") or ""
-        admin_id = _current_admin_id()
-        row = query_one("SELECT id, admin_id, password_hash FROM system_admins WHERE id=?",
-                        (admin_id,))
-        if row is None:
-            abort(404, description="管理者が見つかりません")
-        if not verify_password(current, row["password_hash"]):
-            raise ValueError("現在のパスワードが正しくありません")
-        msg = validate_password(new_pw)
-        if msg:
-            raise ValueError(msg)
-        execute("UPDATE system_admins SET password_hash=? WHERE id=?",
-                (hash_password(new_pw), admin_id))
-        # 他端末のセッションは失効させる。自分の今のセッションだけ残す
-        # （変更直後に再ログインを強いられるのは体験が悪いため）。
-        token = request.headers.get("Authorization", "")[7:]
-        execute("DELETE FROM sessions WHERE role='admin' AND user_id=? AND token<>?",
-                (admin_id, token))
-        audit("admin.password_change", target_type="system_admin", target_id=admin_id)
-        return jsonify({"ok": True})
 
     @app.get("/api/admin/admins")
     def admin_list_admins():
@@ -998,9 +907,8 @@ Expected: 全件 PASS
 git add src/admin_api.py tests/test_admin_accounts.py
 git commit -m "feat(admin): システム管理者アカウントの管理APIを追加
 
-自分のパスワード変更手段が存在せず、/api/init が作る初期パスワードのまま
-運用され続ける状態だった。あわせて2人目以降の運営者を追加・削除できるように
-した。最後の1人と自分自身は削除できない。"
+2人目以降の運営者を追加・削除できるようにした。
+最後の1人と自分自身は削除できない。"
 ```
 
 ---
@@ -1258,10 +1166,11 @@ def me():
 ```js
   'admin.impersonate_start': '代理閲覧開始',
   'admin.impersonate_end': '代理閲覧終了',
-  'admin.password_change': '管理者PW変更',
   'admin.create': '管理者追加',
   'admin.delete': '管理者削除',
 ```
+
+`admin.password_change` は Phase 1 で追加済みなので、Task 4 の移設でそのまま `admin.js` 側へ運ばれている。
 
 - [ ] **Step 7: テストを実行**
 

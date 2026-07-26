@@ -38,14 +38,23 @@ pip install -r requirements.txt
 cp .env.example .env
 # .env を編集して FLASK_SECRET と LLM_API_KEY を設定
 
-# 5. 起動
-python src/app.py
+# 5. 起動（初回だけ ALLOW_INIT=1 を付ける）
+#    /api/init は認証不要のため、既定では 403 で無効。有効化しないと初期管理者を作れない。
+ALLOW_INIT=1 python src/app.py
 # http://localhost:8000 を開く
 
-# 6. 初回ログイン
-# POST /api/init を実行（curl または画面から）
+# 6. 初期管理者の作成
 curl -X POST http://localhost:8000/api/init
-# → admin / admin123 でログイン → パスワードを変更
+# → {"logins": {"admin": {"id": "admin", "password": "<ランダム生成された値>"}}} が返る
+#    このパスワードはこのレスポンスで1回だけ返り、二度と再表示されない。必ず控えること。
+#    （控え損ねた場合は DB の system_admins を空にして /api/init をやり直す）
+
+# 7. 初回ログイン
+# 上で返った admin / <ランダムパスワード> でログイン
+# → PUT /api/admin/password で自分のパスワードを変更する
+
+# 8. セットアップ後は ALLOW_INIT を戻す（付けずに起動し直す）
+python src/app.py
 ```
 
 ## Cloudflare Pages + D1 デプロイ手順
@@ -95,11 +104,22 @@ npx wrangler d1 execute shift-db --remote --file=./seed.sql
    - **環境変数**: なし
 5.「保存してデプロイ」をクリック
 
-### ステップ5: 管理者ログイン
+### ステップ5: 初期管理者の作成とログイン
 
-1. デプロイ完了後、PagesのURLにアクセス
-2. `admin` / `admin123` でログイン
-3. **すぐにパスワードを変更**
+`POST /api/init` は認証不要のエンドポイントなので、既定では 403 で無効になっている
+（無効化しないと、DBリセット直後に第三者が初期管理者を作れてしまうため）。
+
+1. 環境変数に `ALLOW_INIT=1` を設定してデプロイ（または再起動）する
+2. `POST /api/init` を1回だけ実行する
+
+   ```bash
+   curl -X POST https://<あなたのデプロイURL>/api/init
+   ```
+
+3. レスポンスの `logins.admin.password` を控える。
+   **初期パスワードはランダム生成され、このレスポンスで1回だけ返る。保存も再表示もされない。**
+4. `admin` / 控えたパスワードでログインし、`PUT /api/admin/password` でパスワードを変更する
+5. **`ALLOW_INIT` を削除（または `0`）に戻して再デプロイする**。立てっぱなしにしない
 
 ## テスト実行
 
