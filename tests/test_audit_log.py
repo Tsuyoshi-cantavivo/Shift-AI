@@ -73,3 +73,37 @@ def test_audit_logs_requires_admin(client):
     tok = make_session("shop", shop_id, shop_id)
     r = client.get("/api/admin/audit-logs", headers=auth(tok))
     assert r.status_code == 403
+
+
+def test_login_success_is_audited(client):
+    insert_admin("admin", "Admin123")
+    r = client.post("/api/login", json={"user_code": "admin", "password": "Admin123"})
+    assert r.status_code == 200
+    row = dbmod.query_one("SELECT action, actor_role, actor_name FROM audit_logs "
+                          "WHERE action='auth.login' ORDER BY id DESC LIMIT 1")
+    assert row is not None, "ログイン成功が監査ログに残っていない"
+    assert row["actor_role"] == "admin"
+
+
+def test_login_failure_is_audited_without_password(client):
+    insert_admin("admin", "Admin123")
+    r = client.post("/api/login", json={"user_code": "admin", "password": "wrongpass"})
+    assert r.status_code == 400
+    row = dbmod.query_one("SELECT action, actor_role, actor_name, detail FROM audit_logs "
+                          "WHERE action='auth.login_failed' ORDER BY id DESC LIMIT 1")
+    assert row is not None, "ログイン失敗が監査ログに残っていない"
+    assert row["actor_role"] == "anonymous"
+    # 入力されたパスワードが記録されていないこと
+    joined = f"{row['actor_name']} {row['detail']}"
+    assert "wrongpass" not in joined, "パスワードが監査ログに漏れている"
+
+
+def test_logout_is_audited(client):
+    insert_admin("admin", "Admin123")
+    r = client.post("/api/login", json={"user_code": "admin", "password": "Admin123"})
+    token = r.get_json()["token"]
+    r = client.post("/api/logout", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    row = dbmod.query_one("SELECT action FROM audit_logs WHERE action='auth.logout' "
+                          "ORDER BY id DESC LIMIT 1")
+    assert row is not None, "ログアウトが監査ログに残っていない"

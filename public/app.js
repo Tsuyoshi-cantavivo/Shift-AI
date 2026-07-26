@@ -4672,6 +4672,9 @@ const AUDIT_ACTION_LABELS = {
   'staff.create': 'スタッフ作成',
   'shop.create': '店舗作成',
   'shop.update': '店舗更新',
+  'auth.login': 'ログイン',
+  'auth.login_failed': 'ログイン失敗',
+  'auth.logout': 'ログアウト',
 };
 function auditActionLabel(a) { return AUDIT_ACTION_LABELS[a] || a || '—'; }
 

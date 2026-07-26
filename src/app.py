@@ -229,17 +229,24 @@ def notify(shop_id, staff_id, ntype, title, body):
                                 "title": title, "body": body})
 
 
-def audit(action, target_type=None, target_id=None, shop_id=None, detail=None):
+def audit(action, target_type=None, target_id=None, shop_id=None, detail=None,
+          actor_role=None, actor_id=None, actor_name=None):
     """監査ログを1件記録。失敗しても業務処理を止めない。
 
-    actor は現在の認証コンテキスト(g.role / g.user)から解決する。
+    actor は既定で現在の認証コンテキスト(g.role / g.user)から解決する。
     shop の g.user は shops 行なので氏名は shop_name、それ以外は name。
+
+    ログイン失敗のように認証コンテキストが存在しない場面では、
+    actor_role / actor_name を明示的に渡す（g より優先される）。
     """
     try:
-        role = getattr(g, "role", None)
+        role = actor_role if actor_role is not None else getattr(g, "role", None)
         user = getattr(g, "user", None) or {}
-        actor_id = user.get("id")
-        actor_name = user.get("shop_name") if role == "shop" else user.get("name")
+        if actor_id is None:
+            actor_id = user.get("id")
+        if actor_name is None:
+            g_role = getattr(g, "role", None)
+            actor_name = user.get("shop_name") if g_role == "shop" else user.get("name")
         insert_row("audit_logs", {
             "actor_role": role, "actor_id": actor_id, "actor_name": actor_name,
             "action": action, "target_type": target_type, "target_id": target_id,
@@ -759,8 +766,13 @@ def login():
             admin = query_one("SELECT * FROM system_admins WHERE admin_id=?", ("admin",))
         if admin and verify_password(pw, admin["password_hash"]):
             _clear_login_failures(attempt_key)
+            audit("auth.login", target_type="system_admin", target_id=admin["id"],
+                  actor_role="admin", actor_id=admin["id"], actor_name=admin.get("name"),
+                  detail=f"admin_id={admin['admin_id']}")
             return jsonify(_create_session("admin", admin["id"], None, admin))
         _record_login_failure(attempt_key)
+        audit("auth.login_failed", actor_role="anonymous",
+              actor_name=admin_id_guess, detail="管理者ログイン失敗")
         raise ValueError("管理者IDまたはパスワードが正しくありません")
 
     # 入力不備は認証の試行ではないので失敗としては数えない
@@ -774,6 +786,10 @@ def login():
         (shop_code, user_code))
     if staff and verify_password(pw, staff["password_hash"]):
         _clear_login_failures(attempt_key)
+        audit("auth.login", target_type="staff", target_id=staff["id"], shop_id=staff["shop_id"],
+              actor_role="shop" if staff["role"] == "manager" else "staff",
+              actor_id=staff["id"], actor_name=staff.get("name"),
+              detail=f"role={staff['role']}")
         if staff["role"] == "manager":
             # manager は店舗権限(shopping) → user オブジェクトは shops 行を返す
             shop = query_one("SELECT * FROM shops WHERE id=?", (staff["shop_id"],))
@@ -786,9 +802,14 @@ def login():
         shop = query_one("SELECT * FROM shops WHERE shop_code=? AND is_active=1", (shop_code,))
         if shop and verify_password(pw, shop["password_hash"]):
             _clear_login_failures(attempt_key)
+            audit("auth.login", target_type="shop", target_id=shop["id"], shop_id=shop["id"],
+                  actor_role="shop", actor_id=shop["id"], actor_name=shop.get("shop_name"),
+                  detail="旧仕様の店主ログイン")
             return jsonify(_create_session("shop", shop["id"], shop["id"], shop))
 
     _record_login_failure(attempt_key)
+    audit("auth.login_failed", actor_role="anonymous",
+          actor_name=f"{shop_code}/{user_code}", detail="店舗またはスタッフのログイン失敗")
     raise ValueError("店舗コード・ユーザーコードまたはパスワードが正しくありません")
 
 
@@ -809,6 +830,11 @@ def logout():
     auth = request.headers.get("Authorization", "")
     token = auth[7:] if auth.startswith("Bearer ") else ""
     if token:
+        session = query_one("SELECT role, user_id, shop_id FROM sessions WHERE token=?", (token,))
+        if session:
+            # トークン削除の前に監査する（削除後だと誰がログアウトしたか分からなくなるため）
+            audit("auth.logout", shop_id=session.get("shop_id"),
+                  actor_role=session["role"], actor_id=session["user_id"])
         execute("DELETE FROM sessions WHERE token=?", (token,))
     return jsonify({"ok": True})
 
