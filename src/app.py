@@ -3560,8 +3560,10 @@ def _index_html_with_asset_version():
         html = f.read()
     try:
         js_mtime = int(os.path.getmtime(os.path.join(PUBLIC_DIR, "app.js")))
+        admin_mtime = int(os.path.getmtime(os.path.join(PUBLIC_DIR, "admin.js")))
         css_mtime = int(os.path.getmtime(os.path.join(PUBLIC_DIR, "style.css")))
         html = html.replace('src="app.js"', f'src="app.js?v={js_mtime}"')
+        html = html.replace('src="admin.js"', f'src="admin.js?v={admin_mtime}"')
         html = html.replace('href="style.css"', f'href="style.css?v={css_mtime}"')
     except Exception:
         pass
@@ -3585,8 +3587,8 @@ def static_files(path):
     if full is None:
         abort(404, description="Not Found")
     if os.path.isfile(full):
-        # app.js / style.css は短時間キャッシュ（常に最新を取得させる）
-        if path in ("app.js", "style.css"):
+        # app.js / admin.js / style.css は短時間キャッシュ（常に最新を取得させる）
+        if path in ("app.js", "admin.js", "style.css"):
             resp = send_file(full)
             resp.headers["Cache-Control"] = "no-cache, must-revalidate"
             return resp
