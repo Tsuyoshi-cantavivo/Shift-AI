@@ -2931,11 +2931,19 @@ async function _wtiParse(wrap, state) {
       setLoading(false);
       return;
     }
-    // 対象月の範囲で既存希望・募集期間を取得（プレビューの印・警告用）
+    // I-5: 既存希望の取得範囲は「対象月」固定ではなく、実際に解析で出た日付の
+    // min〜maxで取る。カレンダーは月送りで対象月の外（例:8/31〜9/2をまたぐ解析
+    // 結果の9月側）にも移動できるため、対象月だけに限定すると、その月の印・
+    // 上書きチェックボックスが出ず、サーバ側は黙って重複skipするだけの三重の
+    // 齟齬が起きる。対象月レンジは常に含めておく（相対表現の解決基準のため
+    // items が万一空でも対象月自体は見えるようにする）。
     const dim = _wtiLastDayOfMonth(state.yearMonth);
-    const start = `${state.yearMonth}-01`;
-    const end = `${state.yearMonth}-${String(dim).padStart(2, '0')}`;
+    const itemDates = state.items.map((it) => it.date).sort();
+    const start = [itemDates[0], `${state.yearMonth}-01`].sort()[0];
+    const end = [itemDates[itemDates.length - 1], `${state.yearMonth}-${String(dim).padStart(2, '0')}`].sort().pop();
     const [wishesD, periodsD] = await Promise.all([
+      // 注意: /api/shop/wishes は LIMIT 500（src/app.py）。同一スタッフ・広範囲で
+      // 500件を超える大規模店では、印・上書き判定が取りこぼす可能性が残る。
       api(`/shop/wishes?start=${start}&end=${end}`).catch(() => ({ wishes: [] })),
       api('/shop/periods').catch(() => ({ periods: [] })),
     ]);
