@@ -11,6 +11,7 @@ import unicodedata
 from datetime import datetime, timedelta
 from flask import (Flask, request, jsonify, abort, Response, send_file, g)
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import safe_join
 from dotenv import load_dotenv
 
@@ -38,6 +39,15 @@ SCHEMA_PATH = os.path.join(BASE_DIR, "schema.sql")
 
 app = Flask(__name__, static_folder=None)
 app.config["JSON_AS_ASCII"] = False  # 日本語をそのまま返す
+
+# Railway 等のエッジプロキシ配下では REMOTE_ADDR がプロキシのIPに潰れ、
+# 全利用者が同一クライアント扱いになる。そのままだとログインのレート制限
+# （_login_attempt_key）が機能せず、第三者が10回失敗を送るだけで正規の
+# 管理者を締め出せるアカウントロックアウトDoSが成立する。
+# x_for=1 は X-Forwarded-For の「最右」＝直近のプロキシが記録した実クライアントIP
+# のみを採用するため、クライアントが自分でヘッダを付けても偽装にはならない。
+# 前提: 信頼できるプロキシ1段の背後で動かすこと（多段構成なら x_for を増やす）。
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
 
 
 # ===========================================================
@@ -94,6 +104,14 @@ def _login_attempt_key(shop_code, user_code):
     管理者は「店舗コード欄・ユーザーコード欄のどちらかに admin」で試行できる
     （login() 参照）ため、正規化しないと同じ管理者アカウントに対して
     2つの別キーが立ち、許される試行回数が2倍になってしまう。
+
+    【トレードオフ】
+      正規化の結果、同一IPからの管理者ログインは admin_id の違いに関わらず
+      1つのバケツを共有する。system_admins は複数行を許すテーブルなので、
+      管理者が複数いる環境では、ある管理者への総当たりが他の管理者まで
+      巻き添えでロックする。試行回数を2倍にしないことを優先した判断。
+      admin_id 単位に分けるには login() 側の「どちらかの欄に admin」という
+      マジックワード仕様そのものを見直す必要がある（Phase 2 で再検討）。
     """
     ip = request.remote_addr or "-"
     if shop_code == "admin" or user_code == "admin":
@@ -134,20 +152,30 @@ def _check_login_lock(key):
 
 
 def _record_login_failure(key):
-    """失敗を1回数える。上限に達したらロック時刻を設定する。"""
+    """失敗を1回数える。上限に達したらロック時刻を設定する。
+
+    【なぜ UPSERT か】
+      SELECT でカウントを読んでから UPDATE/INSERT する2段構えだと、その間に
+      到達した並列リクエストが同じ古い値を読み、失敗が取りこぼされる。
+      さらに行がまだ無い状態で同時到達すると INSERT が主キー衝突し、
+      未認証クライアントに 500 と生の SQL エラーを返してしまう。
+      本番は DB_MODE=d1（REST API 経由）で1文ごとにネットワーク往復が挟まり、
+      ローカル SQLite より競合ウィンドウが桁違いに広いため実害が出る。
+      加算を1文の UPSERT にまとめて DB 側で原子的に行う。
+    """
     now = jst_now()
     now_s = now.strftime("%Y-%m-%d %H:%M:%S")
-    row = query_one("SELECT fail_count FROM login_attempts WHERE attempt_key=?", (key,))
-    count = (row["fail_count"] if row else 0) + 1
-    locked_until = None
-    if count >= _LOGIN_MAX_FAILS:
-        locked_until = (now + timedelta(minutes=_LOGIN_LOCK_MIN)).strftime("%Y-%m-%d %H:%M:%S")
-    if row:
-        execute("UPDATE login_attempts SET fail_count=?, locked_until=?, updated_at=? WHERE attempt_key=?",
-                (count, locked_until, now_s, key))
-    else:
-        execute("INSERT INTO login_attempts (attempt_key, fail_count, locked_until, updated_at) VALUES (?,?,?,?)",
-                (key, count, locked_until, now_s))
+    execute(
+        "INSERT INTO login_attempts (attempt_key, fail_count, updated_at) VALUES (?,1,?) "
+        "ON CONFLICT(attempt_key) DO UPDATE SET "
+        "fail_count=login_attempts.fail_count+1, updated_at=excluded.updated_at",
+        (key, now_s))
+    # 上限到達時のみロック時刻を立てる。locked_until IS NULL を条件にすることで、
+    # ロック中にさらに失敗してもロック期限が延び続けること（無期限ロック）を防ぐ。
+    lock_until_s = (now + timedelta(minutes=_LOGIN_LOCK_MIN)).strftime("%Y-%m-%d %H:%M:%S")
+    execute("UPDATE login_attempts SET locked_until=? "
+            "WHERE attempt_key=? AND fail_count>=? AND locked_until IS NULL",
+            (lock_until_s, key, _LOGIN_MAX_FAILS))
 
 
 def _clear_login_failures(key):

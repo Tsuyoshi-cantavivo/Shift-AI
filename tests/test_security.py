@@ -17,9 +17,11 @@
 """
 import json
 import time
+from datetime import timedelta
 
 import pytest
 
+import app as appmod
 import db as dbmod
 from auth import hash_password
 from helpers import (
@@ -219,6 +221,74 @@ class TestAuthSecurity:
         r = client.post("/api/login", json={"shop_code": "SHOP1", "user_code": "mgr",
                                             "password": "pw12345678"})
         assert r.status_code == 200, "別アカウントまで巻き添えでロックされている"
+
+    def test_login_lock_is_per_client_ip(self, client):
+        """X-Forwarded-For が異なるクライアントは独立にカウントされること。
+
+        ProxyFix が無いとエッジプロキシ配下で全員の remote_addr が同じ値に潰れ、
+        第三者が10回失敗を送るだけで正規の管理者を締め出せてしまう
+        （アカウントロックアウトDoS）。その回帰テスト。
+        """
+        insert_admin("admin", "Admin123")
+        attacker = {"X-Forwarded-For": "203.0.113.10"}
+        victim = {"X-Forwarded-For": "198.51.100.20"}
+        for _ in range(11):
+            client.post("/api/login", json={"id": "admin", "password": "wrong"},
+                        headers=attacker)
+        # 攻撃者側の送信元はロックされる
+        r = client.post("/api/login", json={"id": "admin", "password": "wrong"},
+                        headers=attacker)
+        assert r.status_code == 429
+        # 別IPの正規管理者は影響を受けない
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"},
+                        headers=victim)
+        assert r.status_code == 200, "別IPの正規管理者が巻き添えロックされている"
+
+    def test_incomplete_input_is_not_counted_as_failure(self, client):
+        """入力不備は認証試行ではないので失敗として数えないこと。
+
+        「店舗コードとユーザーコードを入力してください」「パスワードを入力してください」
+        の分岐で _record_login_failure を呼ばないことの回帰テスト。
+        """
+        insert_admin("admin", "Admin123")
+        for _ in range(15):
+            client.post("/api/login", json={"id": "admin"})                # パスワード欠落
+            client.post("/api/login", json={"password": "x"})              # コード欠落
+            client.post("/api/login", json={"shop_code": "SHOP1", "password": "x"})  # user_code 欠落
+        rows = dbmod.query_all("SELECT * FROM login_attempts")
+        assert rows == [], f"入力不備が失敗として記録されている: {rows}"
+        # 45回の入力不備のあとでも正しいログインは通る
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 200
+
+    def test_login_lock_expires_after_lock_minutes(self, client, monkeypatch):
+        """_LOGIN_LOCK_MIN 経過するとロックが解除されること。"""
+        insert_admin("admin", "Admin123")
+        for _ in range(10):
+            client.post("/api/login", json={"id": "admin", "password": "wrong"})
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 429
+        # ロック時間ぶん時間を進める（時間旅行）
+        future = appmod.jst_now() + timedelta(minutes=appmod._LOGIN_LOCK_MIN + 1)
+        monkeypatch.setattr(appmod, "jst_now", lambda: future)
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 200, "ロック期限を過ぎても解除されない"
+
+    def test_failure_count_resets_after_window(self, client, monkeypatch):
+        """_LOGIN_WINDOW_MIN を超えて間隔が空くと失敗カウントがリセットされること。"""
+        insert_admin("admin", "Admin123")
+        for _ in range(9):
+            r = client.post("/api/login", json={"id": "admin", "password": "wrong"})
+            assert r.status_code == 400
+        # ウィンドウを超えて間隔を空ける
+        future = appmod.jst_now() + timedelta(minutes=appmod._LOGIN_WINDOW_MIN + 1)
+        monkeypatch.setattr(appmod, "jst_now", lambda: future)
+        # カウントがリセットされていれば、さらに9回失敗してもロックされない
+        for i in range(9):
+            r = client.post("/api/login", json={"id": "admin", "password": "wrong"})
+            assert r.status_code == 400, f"{i+1}回目でロック済み（カウントが持ち越されている）"
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 200
 
     def test_login_timing_attack_resistance(self, client):
         """存在しないIDと存在するIDの応答時間が近いこと（タイミング攻撃耐性）。"""
