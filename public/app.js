@@ -2628,7 +2628,19 @@ SCREENS.requests = async function (el) {
       <div class="mb-3"><button class="btn btn-light w-full" id="reqImportBtn"><i class="bi bi-clipboard-plus"></i> テキストから取り込む</button></div>
       <div id="reqList"><div class="text-secondary small">「表示」ボタンを押してください</div></div>`);
   document.getElementById('reqLoadBtn')?.addEventListener('click', () => loadReqList());
-  document.getElementById('reqImportBtn')?.addEventListener('click', () => openWishImportModal(loadReqList));
+  document.getElementById('reqImportBtn')?.addEventListener('click', () => openWishImportModal((importedYearMonth) => {
+    // M-9: 取り込んだ月が現在の一覧フィルタ範囲外だと、登録成功のトーストが出ても
+    // 一覧に何も表示されず「失敗した」ように見える。フィルタを取り込んだ月まで広げる
+    if (importedYearMonth) {
+      const sEl = document.getElementById('reqStart');
+      const eEl = document.getElementById('reqEnd');
+      const first = `${importedYearMonth}-01`;
+      const last = `${importedYearMonth}-${String(_wtiLastDayOfMonth(importedYearMonth)).padStart(2, '0')}`;
+      if (sEl && (!sEl.value || sEl.value > first)) sEl.value = first;
+      if (eEl && (!eEl.value || eEl.value < last)) eEl.value = last;
+    }
+    loadReqList();
+  }));
   await loadReqList();
 
   async function loadReqList() {
@@ -2855,6 +2867,9 @@ async function openWishImportModal(onImported) {
     staffs, items: [], unparsed: [], source: null, existing: new Set(), periods: [],
     yearMonth: todayStr().slice(0, 7), explicitStaffId: null, rawText: '',
     calStaffId: null, calMonth: null, onImported,
+    // I-2: どのスタッフのカレンダーを一度でも表示したかを記録し、
+    // 未確認のまま登録しようとした店長に注意を出すために使う。
+    viewedStaffIds: new Set(),
   };
   const wrap = openModal('<i class="bi bi-clipboard-plus"></i> テキストから取り込む',
     '<div class="text-secondary small">読み込み中...</div>', null, { width: 640 });
@@ -2904,8 +2919,15 @@ async function _wtiParse(wrap, state) {
     state.source = r.source;
     state.unparsed = r.unparsed || [];
     state.items = _wtiFlatten(r.entries || []);
+    state.viewedStaffIds = new Set();
     if (!state.items.length) {
-      if (msgBox) msgBox.innerHTML = '<div class="alert alert-warning py-2">日付や希望内容を読み取れませんでした。文面を見直してください。</div>';
+      // I-4: entries が0件（＝解析が最も失敗しているケース）でも、fallback注記と
+      // unparsed は情報価値が最大なので必ず表示する（設計書§4「unparsedは捨てない」）。
+      const fallbackNote = state.source === 'fallback'
+        ? '<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> 簡易解析で読み取りました。内容をよく確認してください。</div>' : '';
+      if (msgBox) msgBox.innerHTML = fallbackNote +
+        '<div class="alert alert-warning py-2 mb-2">日付や希望内容を読み取れませんでした。文面を見直してください。</div>' +
+        _wtiUnparsedHtml(state);
       setLoading(false);
       return;
     }
@@ -2941,10 +2963,56 @@ function _wtiPeriodWarnHtml(state) {
   return `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> ${outDates.length}件の日付が募集期間外です（${esc(sample)}）。登録は可能ですが、日付を確認してください。</div>`;
 }
 
+/* I-1: 未割り当て・期間外警告と同格の目立ち方にする（従来は灰色小文字で
+   埋もれていた）。 */
 function _wtiUnparsedHtml(state) {
   if (!state.unparsed || !state.unparsed.length) return '';
   const rows = state.unparsed.map((u) => `<li>${esc(u)}</li>`).join('');
-  return `<div class="wti-unparsed"><div class="small text-secondary mb-1"><i class="bi bi-question-circle"></i> 読み取れなかった文（${state.unparsed.length}件）。必要であれば手入力で補ってください。</div><ul class="small text-secondary">${rows}</ul></div>`;
+  return `<div class="wti-unparsed alert alert-warning py-2 mb-2"><i class="bi bi-question-circle"></i> 読み取れなかった文（${state.unparsed.length}件）。必要であれば手入力で補ってください。<ul class="small mb-0 mt-1">${rows}</ul></div>`;
+}
+
+/* C-1: 同一(スタッフ,日付)に複数の読み取りが残っている場合の警告。
+   src/ai.py のプロンプトは「内容が違えばentriesを分ける」と明示しており、
+   同日に矛盾する2件が返るのは正常系。カレンダーは後勝ちで1件しか描けない
+   ため、店長が気づけるようここで必ず知らせる（未割り当ては対象外。
+   staff_id が定まって初めて「同じ枠の競合」になるため）。 */
+function _wtiDuplicateWarnHtml(state) {
+  const groups = {};
+  state.items.forEach((it) => {
+    if (!it.staffId) return;
+    const key = `${it.staffId}|${it.date}`;
+    (groups[key] = groups[key] || []).push(it);
+  });
+  const dupKeys = Object.keys(groups).filter((k) => groups[k].length > 1);
+  if (!dupKeys.length) return '';
+  const parts = dupKeys.map((k) => {
+    const [sid, date] = k.split('|');
+    const s = state.staffs.find((x) => x.id === +sid);
+    return `${esc(s ? s.name : '不明')} ${esc(date.slice(5))}`;
+  });
+  return `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> 同じ日に複数の読み取りがあります（${parts.join('、')}）。日付を開いて、どちらを登録するか確認してください。</div>`;
+}
+
+/* I-2: 「1人目だけ見て登録」を防ぐための内訳表示。未確認（一度もカレンダーを
+   開いていない）スタッフがいれば個別に示す。 */
+function _wtiSummaryInfo(state) {
+  const assignedStaffIds = [...new Set(state.items.filter((it) => it.staffId).map((it) => it.staffId))];
+  const chips = assignedStaffIds.map((sid) => {
+    const s = state.staffs.find((x) => x.id === sid);
+    const cnt = state.items.filter((it) => it.staffId === sid).length;
+    const unseen = !state.viewedStaffIds.has(sid);
+    return badge(`${s ? s.name : '不明#' + sid} ${cnt}件${unseen ? '・未確認' : ''}`, unseen ? 'warning' : 'muted');
+  });
+  const total = state.items.filter((it) => it.staffId).length;
+  return { chipsHtml: chips.join(' '), total };
+}
+
+/* H:MM → 「17-22」のような短縮表記（M-1）。分が :00 なら省略する。 */
+function _wtiShortTime(t) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(t || '');
+  if (!m) return '?';
+  const h = String(Number(m[1]));
+  return m[2] === '00' ? h : `${h}:${m[2]}`;
 }
 
 /* ステップ2: スタッフ切り替え + 月間カレンダー + 未割り当て一覧 + 登録ボタン。
@@ -2965,6 +3033,9 @@ function _wtiRenderStep2(wrap, state) {
   if (!state.calStaffId || !assignedStaffIds.includes(state.calStaffId)) {
     state.calStaffId = assignedStaffIds[0] || null;
   }
+  // I-2: 表示した瞬間に「確認済み」として記録する（未確認スタッフの注意表示に使う）
+  if (state.calStaffId) state.viewedStaffIds.add(state.calStaffId);
+
   const staffSelectHtml = assignedStaffIds.length
     ? `<select id="wtiCalStaff" class="form-select mb-2">${assignedStaffIds.map((sid) => {
         const s = state.staffs.find((x) => x.id === sid);
@@ -2973,8 +3044,14 @@ function _wtiRenderStep2(wrap, state) {
       }).join('')}</select>`
     : `<div class="info-box mb-2"><i class="bi bi-info-circle"></i> 割り当て済みのスタッフがいません。下の「未割り当て」から振り分けてください。</div>`;
 
+  const summary = _wtiSummaryInfo(state);
+
+  // I-1: unparsed はカレンダーより上（sourceWarn直後）に格上げして配置。
+  // C-1: 同一(スタッフ,日付)の競合警告もカレンダーより上で必ず目に入るようにする。
   safeSetHTML(body, `
     ${sourceWarn}
+    ${_wtiUnparsedHtml(state)}
+    ${_wtiDuplicateWarnHtml(state)}
     ${staffSelectHtml}
     ${assignedStaffIds.length ? `<div class="cal-toolbar">
       <button class="cal-nav-btn" id="wtiCalPrev" type="button"><i class="bi bi-chevron-left"></i></button>
@@ -2985,10 +3062,10 @@ function _wtiRenderStep2(wrap, state) {
     <div id="wtiCalGrid" class="wish-cal wti-cal"></div>` : ''}
     <div id="wtiPeriodWarn">${_wtiPeriodWarnHtml(state)}</div>
     <div id="wtiUnassigned"></div>
-    <div id="wtiUnparsed">${_wtiUnparsedHtml(state)}</div>
-    <div class="flex gap-2 mt-3">
+    ${summary.chipsHtml ? `<div class="wti-summary-chips mb-2">${summary.chipsHtml}</div>` : ''}
+    <div class="flex gap-2 mt-1">
       <button class="btn btn-light" id="wtiBackBtn" type="button"><i class="bi bi-arrow-left"></i> やり直す</button>
-      <button class="btn btn-primary flex-grow" id="wtiSubmitBtn" type="button"><i class="bi bi-check2-circle"></i> 登録する</button>
+      <button class="btn btn-primary flex-grow" id="wtiSubmitBtn" type="button"><i class="bi bi-check2-circle"></i> 合計 ${summary.total}件を登録する</button>
     </div>
     <div id="wtiSubmitMsg" class="mt-2"></div>`);
 
@@ -3014,7 +3091,11 @@ function _wtiRenderStep2(wrap, state) {
 }
 
 /* カレンダー本体の描画。SCREENS.request の drawWish() と同じ .wish-cal/.wish-cell/.wmark
-   を使い、見た目・操作感を揃える。既存希望がある日には印（アイコン）を付ける。 */
+   を使い、見た目・操作感を揃える。既存希望がある日には印（アイコン）を付ける。
+   C-1: 同一(スタッフ,日付)に複数項目がありうる（src/ai.py のプロンプトが
+   「内容が違えばentriesを分ける」よう指示しているため、正常系として起こる）。
+   後勝ちで1件だけ描いて矛盾を隠すと、店長が見た画面と送信内容がずれる
+   （プレビューは店長が誤りを捕まえる最後の関門）ため、日付ごとに配列で持つ。 */
 function _wtiRenderCalendar(wrap, state) {
   const titleEl = wrap.querySelector('#wtiCalTitle');
   const gridEl = wrap.querySelector('#wtiCalGrid');
@@ -3026,19 +3107,29 @@ function _wtiRenderCalendar(wrap, state) {
   const dim = new Date(y, m + 1, 0).getDate();
   const label = { any: '終日', morning: '早', evening: '遅', rest: '休' };
   const byDate = {};
-  state.items.filter((it) => it.staffId === state.calStaffId).forEach((it) => { byDate[it.date] = it; });
+  state.items.filter((it) => it.staffId === state.calStaffId).forEach((it) => {
+    (byDate[it.date] = byDate[it.date] || []).push(it);
+  });
   let cells = '';
   for (let i = 0; i < startWd; i++) cells += '<div class="wish-cell empty"></div>';
   for (let d = 1; d <= dim; d++) {
     const ds = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-    const it = byDate[ds];
+    const dayItems = byDate[ds] || [];
     const wd = new Date(ds + 'T00:00:00').getDay();
     const wdCls = wd === 0 ? 'sun' : (wd === 6 ? 'sat' : '');
     const hasExisting = state.existing.has(`${state.calStaffId}|${ds}`);
-    const markText = it ? (it.availability === 'time' ? `${it.start || '?'}-${it.end || '?'}` : (label[it.availability] || it.availability)) : '';
-    const mark = it ? `<div class="wmark ${it.availability}">${esc(markText)}</div>` : '';
+    let mark = '';
+    if (dayItems.length === 1) {
+      const it = dayItems[0];
+      const markText = it.availability === 'time' ? `${_wtiShortTime(it.start)}-${_wtiShortTime(it.end)}` : (label[it.availability] || it.availability);
+      mark = `<div class="wmark ${it.availability}">${esc(markText)}</div>`;
+    } else if (dayItems.length > 1) {
+      mark = `<div class="wmark wti-conflict">競合${dayItems.length}</div>`;
+    }
     const flag = hasExisting ? '<i class="bi bi-exclamation-circle-fill wti-existing-flag" title="既存の希望があります"></i>' : '';
-    cells += `<div class="wish-cell" data-day="${ds}"><div class="wd ${wdCls}">${d}</div>${mark}${flag}</div>`;
+    // M-3: 項目のない日は押しても何も起きないので、期間外セルと同じ .disabled で見た目も抑える
+    const cellCls = dayItems.length ? 'wish-cell' : 'wish-cell disabled';
+    cells += `<div class="${cellCls}" data-day="${ds}"><div class="wd ${wdCls}">${d}</div>${mark}${flag}</div>`;
   }
   gridEl.innerHTML = cells;
   gridEl.querySelectorAll('.wish-cell[data-day]').forEach((c) => {
@@ -3049,61 +3140,93 @@ function _wtiRenderCalendar(wrap, state) {
   });
 }
 
-/* 日付クリックで開く詳細: 読み取り内容・【元の文】の対比表示（必須）・修正・削除。
-   既存希望がある日は「上書きする」チェックを出す（既定オフ＝スキップ側）。 */
+/* 日付クリックで開く詳細: 読み取り内容・【元の文】の対比表示(必須)・修正・削除。
+   既存希望がある日は「上書きする」チェックを出す（既定オフ＝スキップ側）。
+   C-1: 同日に複数の読み取りが残っている場合は全件を列挙し、個別に編集・削除
+   できるようにする（1件だけ見せて他方を隠すとプレビューと送信内容がずれる）。 */
 function _wtiOpenDetail(wrap, state, date) {
-  const idx = state.items.findIndex((it) => it.staffId === state.calStaffId && it.date === date);
-  if (idx === -1) return;
-  const it = state.items[idx];
+  const idxs = [];
+  state.items.forEach((it, i) => { if (it.staffId === state.calStaffId && it.date === date) idxs.push(i); });
+  if (!idxs.length) return;
   const hasExisting = state.existing.has(`${state.calStaffId}|${date}`);
-  const availLabel = { rest: '休み希望', any: '終日OK', morning: '早番希望', evening: '遅番希望', time: '時間指定' }[it.availability] || it.availability;
+  const availLabelMap = { rest: '休み希望', any: '終日OK', morning: '早番希望', evening: '遅番希望', time: '時間指定' };
+  const overwriteChecked = idxs.some((i) => state.items[i].overwriteConfirmed);
+  const entryBlocks = idxs.map((idx, n) => {
+    const it = state.items[idx];
+    const availLabel = availLabelMap[it.availability] || it.availability;
+    return `<div class="wti-detail-entry" data-idx="${idx}">
+      ${idxs.length > 1 ? `<div class="small text-secondary mb-1">読み取り ${n + 1}/${idxs.length}</div>` : ''}
+      <div class="mb-2">${badge('読み取り: ' + availLabel, it.availability === 'rest' ? 'danger' : 'info')}</div>
+      <div class="small text-secondary mb-1">元の文</div>
+      <div class="wti-raw-quote mb-2">${esc(it.raw || '（元の文なし）')}</div>
+      <label class="form-label" for="wtiDetailAvail-${idx}">内容を修正</label>
+      <select id="wtiDetailAvail-${idx}" class="form-select mb-2" data-role="avail">
+        <option value="rest"${it.availability === 'rest' ? ' selected' : ''}>休み</option>
+        <option value="any"${it.availability === 'any' ? ' selected' : ''}>いつでも可</option>
+        <option value="morning"${it.availability === 'morning' ? ' selected' : ''}>早番</option>
+        <option value="evening"${it.availability === 'evening' ? ' selected' : ''}>遅番</option>
+        <option value="time"${it.availability === 'time' ? ' selected' : ''}>時間指定</option>
+      </select>
+      <div id="wtiDetailTimeRow-${idx}" class="row mb-2" style="${it.availability === 'time' ? '' : 'display:none'}">
+        <div class="col-6"><input type="time" id="wtiDetailStart-${idx}" class="form-control" value="${it.start || ''}"></div>
+        <div class="col-6"><input type="time" id="wtiDetailEnd-${idx}" class="form-control" value="${it.end || ''}"></div>
+      </div>
+      <button type="button" class="btn btn-outline-danger btn-sm" data-del-idx="${idx}"><i class="bi bi-trash"></i> この項目を削除</button>
+    </div>`;
+  }).join('');
   const body = `
     <div class="mb-2"><strong class="num">${esc(date)}</strong>（${wdName(date)}）</div>
-    <div class="mb-2">${badge('読み取り: ' + availLabel, it.availability === 'rest' ? 'danger' : 'info')}</div>
-    <div class="small text-secondary mb-1">元の文</div>
-    <div class="wti-raw-quote mb-2">${esc(it.raw || '（元の文なし）')}</div>
-    <label class="form-label" for="wtiDetailAvail">内容を修正</label>
-    <select id="wtiDetailAvail" class="form-select mb-2">
-      <option value="rest"${it.availability === 'rest' ? ' selected' : ''}>休み</option>
-      <option value="any"${it.availability === 'any' ? ' selected' : ''}>いつでも可</option>
-      <option value="morning"${it.availability === 'morning' ? ' selected' : ''}>早番</option>
-      <option value="evening"${it.availability === 'evening' ? ' selected' : ''}>遅番</option>
-      <option value="time"${it.availability === 'time' ? ' selected' : ''}>時間指定</option>
-    </select>
-    <div id="wtiDetailTimeRow" class="row mb-2" style="${it.availability === 'time' ? '' : 'display:none'}">
-      <div class="col-6"><input type="time" id="wtiDetailStart" class="form-control" value="${it.start || ''}"></div>
-      <div class="col-6"><input type="time" id="wtiDetailEnd" class="form-control" value="${it.end || ''}"></div>
-    </div>
-    ${hasExisting ? `<div class="alert alert-warning py-2 mb-1"><i class="bi bi-exclamation-triangle"></i> この日は既に希望が登録されています。<label class="flex items-center gap-2 mt-1" style="font-weight:400"><input type="checkbox" id="wtiDetailOverwrite"${it.overwriteConfirmed ? ' checked' : ''}> 既存を上書きして登録する</label></div>` : ''}`;
+    <div id="wtiDetailErr"></div>
+    ${entryBlocks}
+    ${hasExisting ? `<div class="alert alert-warning py-2 mt-2 mb-1"><i class="bi bi-exclamation-triangle"></i> この日は既に希望が登録されています。<label class="flex items-center gap-2 mt-1" style="font-weight:400"><input type="checkbox" id="wtiDetailOverwrite"${overwriteChecked ? ' checked' : ''}> 既存を上書きして登録する</label></div>` : ''}`;
   const dm = openModal(`<i class="bi bi-calendar-event"></i> ${esc(date)}の希望`, body, (w2, close) => {
-    it.availability = w2.querySelector('#wtiDetailAvail').value;
-    if (it.availability === 'time') {
-      it.start = w2.querySelector('#wtiDetailStart').value || null;
-      it.end = w2.querySelector('#wtiDetailEnd').value || null;
-    } else {
-      it.start = null; it.end = null;
+    // I-6: time なのに時刻未入力の項目があれば、保存せず・閉じずにエラーを出す
+    for (const idx of idxs) {
+      const selEl = w2.querySelector(`#wtiDetailAvail-${idx}`);
+      if (!selEl) continue;
+      if (selEl.value === 'time') {
+        const st = w2.querySelector(`#wtiDetailStart-${idx}`)?.value;
+        const et = w2.querySelector(`#wtiDetailEnd-${idx}`)?.value;
+        if (!st || !et) {
+          const errBox = w2.querySelector('#wtiDetailErr');
+          if (errBox) errBox.innerHTML = '<div class="alert alert-danger py-2 mb-2">時間指定の場合は開始・終了の両方を入力してください。</div>';
+          return;
+        }
+      }
     }
-    if (hasExisting) it.overwriteConfirmed = !!w2.querySelector('#wtiDetailOverwrite')?.checked;
+    idxs.forEach((idx) => {
+      const selEl = w2.querySelector(`#wtiDetailAvail-${idx}`);
+      if (!selEl) return;
+      const it = state.items[idx];
+      it.availability = selEl.value;
+      if (it.availability === 'time') {
+        it.start = w2.querySelector(`#wtiDetailStart-${idx}`)?.value || null;
+        it.end = w2.querySelector(`#wtiDetailEnd-${idx}`)?.value || null;
+      } else {
+        it.start = null; it.end = null;
+      }
+    });
+    if (hasExisting) {
+      const confirmed = !!w2.querySelector('#wtiDetailOverwrite')?.checked;
+      idxs.forEach((idx) => { if (state.items[idx]) state.items[idx].overwriteConfirmed = confirmed; });
+    }
     close();
     _wtiRenderStep2(wrap, state);
   }, { saveLabel: '保存' });
-  dm.querySelector('#wtiDetailAvail')?.addEventListener('change', (e) => {
-    const row = dm.querySelector('#wtiDetailTimeRow');
-    if (row) row.style.display = e.target.value === 'time' ? 'flex' : 'none';
-  });
-  const footer = dm.querySelector('.modal-footer');
-  if (footer) {
-    const delBtn = document.createElement('button');
-    delBtn.type = 'button';
-    delBtn.className = 'btn btn-outline-danger';
-    delBtn.innerHTML = '<i class="bi bi-trash"></i> 削除';
-    footer.insertBefore(delBtn, footer.lastElementChild);
-    delBtn.addEventListener('click', () => {
-      state.items.splice(idx, 1);
-      dm.remove();
-      _wtiRenderStep2(wrap, state);
+  idxs.forEach((idx) => {
+    dm.querySelector(`#wtiDetailAvail-${idx}`)?.addEventListener('change', (e) => {
+      const row = dm.querySelector(`#wtiDetailTimeRow-${idx}`);
+      if (row) row.style.display = e.target.value === 'time' ? 'flex' : 'none';
     });
-  }
+  });
+  // 削除は即座に確定（複数件を一括で消す操作は想定しないため、1件消したら
+  // モーダルを閉じて再描画する。他の項目を消したい場合は開き直せばよい）
+  dm.querySelectorAll('[data-del-idx]').forEach((btn) => btn?.addEventListener('click', () => {
+    const delIdx = +btn.dataset.delIdx;
+    state.items.splice(delIdx, 1);
+    dm.remove();
+    _wtiRenderStep2(wrap, state);
+  }));
 }
 
 /* 未割り当て一覧: staff_id が null のエントリを、元の1文（entryIdx）単位でまとめて
@@ -3147,32 +3270,74 @@ function _wtiRenderUnassigned(wrap, state) {
 
 /* 登録: staff_id が付いた項目のみ対象。overwrite は API 全体に一括で効くフラグの
    ため、明示的に「上書きする」を選んだ日だけを分けて別リクエストで送る
-   （選んでいない日を巻き込んで消してしまわないようにするため）。 */
+   （選んでいない日を巻き込んで消してしまわないようにするため）。
+   I-3: 2回に分けて送る以上、片方だけ失敗する部分失敗が起こりうる。その場合
+   「成功した分は何件か」を必ず示し、成功済み項目は state.items から取り除いて
+   二重送信を防ぐ（uid で照合。配列の index は再描画のたびにずれるため使わない）。 */
 async function _wtiSubmit(wrap, state) {
   const msgBox = wrap.querySelector('#wtiSubmitMsg');
   const assignable = state.items.filter((it) => it.staffId);
   if (!assignable.length) { toast('登録できる希望がありません（未割り当てのみです）', 'error'); return; }
+  // I-6: time なのに時刻未入力のまま送信されるのを送信直前でも弾く（詳細モーダルの
+  // バリデーションをすり抜けるケースは無いはずだが、最終防衛線として置く）
+  const badTime = assignable.find((it) => it.availability === 'time' && (!it.start || !it.end));
+  if (badTime) {
+    toast(`時刻が未入力の項目があります（${badTime.date.slice(5)}）。日付を開いて時刻を入力してください。`, 'error');
+    return;
+  }
   const toWish = (it) => ({ staff_id: it.staffId, date: it.date, availability: it.availability, start: it.start, end: it.end, raw: it.raw });
   const overwriteGroup = assignable.filter((it) => state.existing.has(`${it.staffId}|${it.date}`) && it.overwriteConfirmed);
   const normalGroup = assignable.filter((it) => !(state.existing.has(`${it.staffId}|${it.date}`) && it.overwriteConfirmed));
   setLoading(true);
   if (msgBox) msgBox.innerHTML = '<div class="text-secondary small">登録中...</div>';
-  try {
-    let created = 0, skipped = 0;
-    if (normalGroup.length) {
+  let created = 0, skipped = 0;
+  const succeededItems = [];
+  const serverMessages = [];
+  const errors = [];
+  if (normalGroup.length) {
+    try {
       const r1 = await api('/shop/wishes/bulk', { method: 'POST', body: JSON.stringify({ wishes: normalGroup.map(toWish), overwrite: false }) });
       created += r1.created || 0; skipped += r1.skipped || 0;
-    }
-    if (overwriteGroup.length) {
+      succeededItems.push(...normalGroup);
+      if (r1.message) serverMessages.push(r1.message);
+    } catch (e) { errors.push(`新規分: ${e.message}`); }
+  }
+  if (overwriteGroup.length) {
+    try {
       const r2 = await api('/shop/wishes/bulk', { method: 'POST', body: JSON.stringify({ wishes: overwriteGroup.map(toWish), overwrite: true }) });
       created += r2.created || 0; skipped += r2.skipped || 0;
-    }
-    wrap.remove();
-    toast(`${created}件を登録しました${skipped ? `（${skipped}件はスキップ）` : ''}`, 'success');
-    if (typeof state.onImported === 'function') state.onImported();
-  } catch (e) {
-    if (msgBox) msgBox.innerHTML = `<div class="alert alert-danger py-2">${esc(e.message)}</div>`;
-  } finally { setLoading(false); }
+      succeededItems.push(...overwriteGroup);
+      if (r2.message) serverMessages.push(r2.message);
+    } catch (e) { errors.push(`上書き分: ${e.message}`); }
+  }
+  setLoading(false);
+  const combinedMsg = serverMessages.join(' ');
+
+  if (errors.length) {
+    // 部分失敗: 成功済みは取り除いて二重送信を防ぎ、件数を必ず示す。モーダルは開いたまま
+    const succeededUids = new Set(succeededItems.map((it) => it.uid));
+    state.items = state.items.filter((it) => !succeededUids.has(it.uid));
+    const successPart = created > 0 ? `${combinedMsg || `${created}件は登録済みです。`} ` : '';
+    if (msgBox) msgBox.innerHTML = `<div class="alert alert-danger py-2">${esc(successPart)}失敗: ${esc(errors.join(' / '))}</div>`;
+    toast(created > 0 ? `一部登録できませんでした（${created}件は登録済み）` : '登録に失敗しました', 'error');
+    _wtiRenderStep2(wrap, state);
+    return;
+  }
+
+  if (created === 0) {
+    // M-2: 全件スキップ（重複等）は成功ではない。緑トーストにせず、モーダルも閉じずに
+    // 内容を見直せるようにする
+    const msg = combinedMsg || `登録できる項目がありませんでした（${skipped}件は重複のためスキップ）`;
+    if (msgBox) msgBox.innerHTML = `<div class="alert alert-warning py-2">${esc(msg)}</div>`;
+    toast(msg, 'warning');
+    return;
+  }
+
+  // 全件成功
+  wrap.remove();
+  toast(combinedMsg || `${created}件を登録しました${skipped ? `（${skipped}件はスキップ）` : ''}`, 'success');
+  // M-9: 取り込んだ月が一覧側の現在フィルタ範囲外でも見えるよう、対象月を渡す
+  if (typeof state.onImported === 'function') state.onImported(state.yearMonth);
 }
 
 /* ---------- Analytics (人件費分析) ---------- */

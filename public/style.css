@@ -1453,11 +1453,18 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 /* カレンダー本体は .wish-cal/.wish-cell/.wmark（セクション26）をそのまま流用。
    ここでは「既存希望あり」の印と、元の文の対比表示に必要な分だけ追加する。 */
 .wti-cal .wish-cell { position: relative; }
+.wti-cal .wish-cell.disabled { opacity: .35; cursor: not-allowed; }
 .wti-existing-flag {
   position: absolute; top: 3px; right: 3px; font-size: .62rem; color: var(--warning);
 }
+/* 同一(スタッフ,日付)に複数の読み取りが残っている日のマーク（レビュー C-1）。
+   .wmark.morning と同じ配色（--warning地に--paper文字）を流用し、コントラストは
+   既に検証済みの組み合わせのまま新規トークンを増やさない。 */
+.wti-cal .wmark.wti-conflict { background: var(--warning); }
+/* 引用（--paper）が親の未割り当て行（--paper）と同化しないよう、地を一段変える。
+   ink-2 on surface のコントラストは光量子測定済み（レビュー M-5）。 */
 .wti-raw-quote {
-  background: var(--paper); border-left: 3px solid var(--info); border-radius: var(--radius-sm);
+  background: var(--surface); border-left: 3px solid var(--info); border-radius: var(--radius-sm);
   padding: 6px 10px; font-size: .82rem; line-height: 1.5; color: var(--ink-2);
   white-space: pre-wrap; word-break: break-word;
 }
@@ -1469,3 +1476,6 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 .wti-unassigned-info { flex: 1 1 220px; min-width: 0; }
 .wti-unassigned-select { flex: 0 0 auto; width: auto; min-width: 160px; }
 .wti-unparsed ul { padding-left: 18px; margin: 0; }
+/* 日付詳細モーダル: 同日に複数の読み取りが並ぶ場合の区切り */
+.wti-detail-entry + .wti-detail-entry { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--rule); }
+.wti-summary-chips { display: flex; flex-wrap: wrap; gap: 4px; }
