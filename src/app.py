@@ -3461,6 +3461,29 @@ def shop_wishes():
     return jsonify({"wishes": rows})
 
 
+@app.post("/api/shop/wishes/parse")
+def shop_wishes_parse():
+    """希望テキストを解析する。保存はしない（何度でも試せる）。"""
+    shop, shop_id, _ = _shop_ctx()
+    body = request.get_json(silent=True) or {}
+    text = (body.get("text") or "").strip()
+    if not text:
+        abort(400, description="text が必要です")
+    year_month = body.get("year_month") or jst_today().strftime("%Y-%m")
+    staff_id = body.get("staff_id")
+    staffs = query_all("SELECT id, name FROM staffs WHERE shop_id=? AND is_resigned=0", (shop_id,))
+    result = ai.parse_wish_text(text, year_month, [s["name"] for s in staffs])
+    # staff_hint をスタッフIDに解決する（一致しなければ None のまま＝未割り当て。推測はしない）
+    by_name = {s["name"]: s["id"] for s in staffs}
+    for e in result.get("entries", []):
+        if staff_id:
+            e["staff_id"] = staff_id  # 明示指定が最優先。staff_hint は無視する
+        else:
+            hint = e.get("staff_hint")
+            e["staff_id"] = by_name.get(hint) if hint else None
+    return jsonify(result)
+
+
 @app.get("/api/shop/staff-tendencies")
 def shop_staff_tendencies():
     """スタッフ別の勤務傾向スコアを取得（AI学習データの透明化）。
