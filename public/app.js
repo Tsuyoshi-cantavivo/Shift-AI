@@ -4674,6 +4674,7 @@ const AUDIT_ACTION_LABELS = {
   'shop.update': '店舗更新',
   'auth.login': 'ログイン',
   'auth.login_failed': 'ログイン失敗',
+  'auth.login_blocked': 'ログインブロック',
   'auth.logout': 'ログアウト',
 };
 function auditActionLabel(a) { return AUDIT_ACTION_LABELS[a] || a || '—'; }

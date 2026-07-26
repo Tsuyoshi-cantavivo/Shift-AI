@@ -615,8 +615,10 @@ class TestPublicInit:
         monkeypatch.setenv("ALLOW_INIT", "1")
         r = client.post("/api/init")
         assert r.status_code == 200
-        # 危険性: 本番環境でこのエンドポイントが有効だと、第三者が初期化可能
-        # （ただし既存データがあれば "既に存在します" と返す設計）
+        # ALLOW_INIT=1 は初回セットアップ時だけ立てて、済んだら戻す運用にする。
+        # 立てっぱなしでも、既に管理者がいれば "既に存在します" を返すだけで
+        # 上書きはされない（多層防御）。初期パスワードはランダム生成され、
+        # このレスポンスで1回だけ返る（保存も再表示もしない）。
 
 
 # ============================================================
@@ -816,3 +818,153 @@ class TestAdminNotificationsAuth:
         t = r.get_json()["token"]
         r = client.get("/api/admin/notifications", headers={"Authorization": f"Bearer {t}"})
         assert r.status_code == 403
+
+
+# ============================================================
+# ログイン入力の長さ・制御文字（未認証での無制限書き込み対策）
+# ============================================================
+class TestLoginInputLimits:
+    """未認証クライアントが login_attempts / audit_logs を無制限に膨らませられない。
+
+    背景: shop_code / user_code が無制限だと、毎回違う値を送るだけで
+    「ロックが一度も発動しないまま行だけが増え続ける」状態が作れた。
+    本番は Cloudflare D1（書き込み課金・ストレージ上限）なので実害がある。
+    """
+
+    def test_overlong_shop_code_is_rejected_without_writing_rows(self, client):
+        insert_admin("admin", "Admin123")
+        r = client.post("/api/login", json={"shop_code": "S" * 65, "user_code": "u",
+                                            "password": "x"})
+        assert r.status_code == 400
+        assert dbmod.query_all("SELECT * FROM login_attempts") == [], \
+            "長すぎる入力が login_attempts に書き込まれている"
+        assert dbmod.query_all("SELECT * FROM audit_logs") == [], \
+            "長すぎる入力が audit_logs に書き込まれている"
+
+    def test_overlong_user_code_is_rejected_without_writing_rows(self, client):
+        insert_admin("admin", "Admin123")
+        r = client.post("/api/login", json={"shop_code": "SHOP1", "user_code": "u" * 65,
+                                            "password": "x"})
+        assert r.status_code == 400
+        assert dbmod.query_all("SELECT * FROM login_attempts") == []
+        assert dbmod.query_all("SELECT * FROM audit_logs") == []
+
+    def test_huge_payload_is_rejected_without_writing_rows(self, client):
+        """レビュアー実測の 20,000 文字ケース。"""
+        r = client.post("/api/login", json={"shop_code": "A" * 20000, "user_code": "admin",
+                                            "password": "x"})
+        assert r.status_code == 400
+        assert dbmod.query_all("SELECT * FROM login_attempts") == []
+        assert dbmod.query_all("SELECT * FROM audit_logs") == []
+
+    def test_repeated_overlong_attempts_never_grow_tables(self, client):
+        """毎回別の長い値を送っても行が増えないこと（60回のレビュアー再現）。"""
+        for i in range(60):
+            client.post("/api/login", json={"shop_code": f"{i}" + "X" * 100,
+                                            "user_code": "u", "password": "x"})
+        assert dbmod.query_all("SELECT * FROM login_attempts") == []
+        assert dbmod.query_all("SELECT * FROM audit_logs") == []
+
+    def test_boundary_64_chars_is_still_a_normal_attempt(self, client):
+        """64文字ちょうどは正常な認証試行として扱う（上限は 64 文字まで許可）。"""
+        r = client.post("/api/login", json={"shop_code": "S" * 64, "user_code": "u" * 64,
+                                            "password": "x"})
+        assert r.status_code == 400
+        rows = dbmod.query_all("SELECT * FROM login_attempts")
+        assert len(rows) == 1, "64文字は認証試行として数えられるべき"
+
+    def test_rejection_is_not_counted_as_login_failure(self, client):
+        """長さ超過は入力不備であって認証試行ではないので、失敗カウントに影響しない。"""
+        insert_admin("admin", "Admin123")
+        for _ in range(30):
+            client.post("/api/login", json={"shop_code": "S" * 200, "user_code": "u",
+                                            "password": "x"})
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 200, "長さ超過でロックされてしまっている"
+
+    def test_newlines_are_removed_from_audit_and_attempt_key(self, client):
+        """改行入りコードでも監査ログ・レート制限キーに生の改行が残らない（ログ偽装対策）。"""
+        r = client.post("/api/login", json={"shop_code": "a\nFAKE/<img src=x onerror=1>",
+                                            "user_code": "b\rX", "password": "x"})
+        assert r.status_code == 400
+        row = dbmod.query_one("SELECT actor_name FROM audit_logs "
+                              "WHERE action='auth.login_failed' ORDER BY id DESC LIMIT 1")
+        assert row is not None
+        assert "\n" not in (row["actor_name"] or ""), "監査ログに生の改行が入っている"
+        assert "\r" not in (row["actor_name"] or "")
+        keys = [x["attempt_key"] for x in dbmod.query_all("SELECT attempt_key FROM login_attempts")]
+        assert keys and all("\n" not in k and "\r" not in k for k in keys)
+
+
+# ============================================================
+# 起動時の整合性検証（login_attempts が無いと全ログインが 500 になる）
+# ============================================================
+class TestStartupIntegrity:
+    def test_verification_passes_on_a_healthy_db(self, client):
+        appmod._verify_critical_tables()  # 例外が出なければOK
+
+    def test_verification_raises_when_login_attempts_missing(self, client):
+        """テーブルが無いまま起動を続けると、未認証クライアントに 500 が返り、
+        かつブルートフォース防御が黙って無効化される。起動時に落とす。"""
+        dbmod.execute("DROP TABLE login_attempts")
+        with pytest.raises(Exception):
+            appmod._verify_critical_tables()
+
+    def test_ensure_db_recreates_login_attempts(self, client):
+        dbmod.execute("DROP TABLE login_attempts")
+        appmod.ensure_db()
+        appmod._verify_critical_tables()
+
+
+# ============================================================
+# /api/init の 403 メッセージ（情報漏洩）
+# ============================================================
+class TestInitErrorMessage:
+    def test_403_message_does_not_leak_env_var_name(self, client, monkeypatch):
+        monkeypatch.delenv("ALLOW_INIT", raising=False)
+        r = client.post("/api/init")
+        assert r.status_code == 403
+        msg = r.get_json()["error"]
+        assert "ALLOW_INIT" not in msg, f"環境変数名が未認証クライアントに漏れている: {msg}"
+
+
+# ============================================================
+# require_auth: 参照先の行が消えているセッション
+# ============================================================
+class TestRequireAuthOrphanSession:
+    """削除済みのスタッフ／管理者のセッションは 401。
+
+    shop 分岐だけが 401 で、admin / staff は g.user=None のまま後段に進み
+    staff["id"] で TypeError → 500 になっていた。
+    """
+
+    def test_deleted_admin_session_is_401(self, client):
+        admin_id = insert_admin()
+        tok = make_session("admin", admin_id)
+        dbmod.execute("DELETE FROM system_admins WHERE id=?", (admin_id,))
+        r = client.get("/api/me", headers=auth(tok))
+        assert r.status_code == 401, f"削除済み管理者のセッションが通っている: {r.status_code}"
+
+    def test_deleted_staff_session_is_401(self, client):
+        shop_id = insert_shop("SHOP1")
+        staff_id = insert_staff(shop_id, "p1", "太郎")
+        tok = make_session("staff", staff_id, shop_id)
+        dbmod.execute("DELETE FROM staffs WHERE id=?", (staff_id,))
+        r = client.get("/api/me", headers=auth(tok))
+        assert r.status_code == 401, f"削除済みスタッフのセッションが通っている: {r.status_code}"
+
+    def test_deleted_staff_does_not_cause_500(self, client):
+        """後段で staff["id"] を触るエンドポイントが 500 にならないこと。"""
+        shop_id = insert_shop("SHOP1")
+        staff_id = insert_staff(shop_id, "p1", "太郎")
+        tok = make_session("staff", staff_id, shop_id)
+        dbmod.execute("DELETE FROM staffs WHERE id=?", (staff_id,))
+        r = client.get("/api/staff/shifts", headers=auth(tok))
+        assert r.status_code == 401, f"500 になっている: {r.status_code}"
+
+    def test_non_string_codes_do_not_cause_500(self, client):
+        """文字列以外を送られても 500（未認証への内部エラー露出）にならないこと。"""
+        for payload in ({"shop_code": 12345, "user_code": ["a"], "password": "x"},
+                        {"shop_code": {"a": 1}, "user_code": None, "password": "x"}):
+            r = client.post("/api/login", json=payload)
+            assert r.status_code == 400, f"{payload} で {r.status_code}"

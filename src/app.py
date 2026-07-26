@@ -96,6 +96,26 @@ def handle_exc(e):
 _LOGIN_MAX_FAILS = 10        # この回数失敗したらロック
 _LOGIN_WINDOW_MIN = 15       # 失敗カウントを保持する時間（分）
 _LOGIN_LOCK_MIN = 15         # ロックする時間（分）
+_LOGIN_CODE_MAX = 64         # 店舗コード／ユーザーコードの最大長
+
+
+def _sanitize_login_code(value):
+    """ログイン入力のコードを正規化する（前後の空白除去 ＋ 改行の除去）。
+
+    【なぜ改行を落とすか】
+      失敗したコードは監査ログの actor_name とレート制限キーにそのまま入る。
+      改行が生で残ると、監査ログを1行1レコードとして読む運用（将来のCSV出力を含む）で
+      攻撃者が偽の行を差し込めてしまう。UI 側は esc() を通すので XSS にはならないが、
+      ログ偽装は残るため入口で落とす。
+
+    str() を挟むのは、JSON で文字列以外（数値・配列・オブジェクト）を送られたときに
+    .strip() が AttributeError になり、未認証クライアントに 500 が返るのを避けるため。
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    return value.replace("\r", "").replace("\n", "").strip()
 
 
 def _login_attempt_key(shop_code, user_code):
@@ -138,6 +158,17 @@ def _check_login_lock(key):
         except (ValueError, TypeError):
             lock_dt = None
         if lock_dt and now < lock_dt:
+            # ブロックした試行も監査に残す（残さないと、攻撃はちょうど _LOGIN_MAX_FAILS 件で
+            # 途切れて見え、その後の継続や規模が後から一切分からない）。
+            # ただしロック中は何百回でもリクエストが来るため、記録は「そのロック期間中に1回だけ」。
+            # SELECT してから UPDATE すると並列時に複数回記録され得るので、
+            # blocked_logged=0 を条件にした1文の UPDATE が当たったときだけ記録する。
+            claimed = execute(
+                "UPDATE login_attempts SET blocked_logged=1 "
+                "WHERE attempt_key=? AND blocked_logged=0", (key,))
+            if claimed.get("changes"):
+                audit("auth.login_blocked", actor_role="anonymous", actor_name=key,
+                      detail=f"ロック中のログイン試行をブロック（{_LOGIN_LOCK_MIN}分）")
             abort(429, description="ログイン試行が多すぎます。しばらく待ってからお試しください")
     # ロック期限切れ、または最終試行がウィンドウ外なら行を捨てる
     updated = row.get("updated_at")
@@ -173,7 +204,8 @@ def _record_login_failure(key):
     # 上限到達時のみロック時刻を立てる。locked_until IS NULL を条件にすることで、
     # ロック中にさらに失敗してもロック期限が延び続けること（無期限ロック）を防ぐ。
     lock_until_s = (now + timedelta(minutes=_LOGIN_LOCK_MIN)).strftime("%Y-%m-%d %H:%M:%S")
-    execute("UPDATE login_attempts SET locked_until=? "
+    # blocked_logged=0 も同時に戻す。新しいロック期間ごとに監査へ1件だけ残すため。
+    execute("UPDATE login_attempts SET locked_until=?, blocked_logged=0 "
             "WHERE attempt_key=? AND fail_count>=? AND locked_until IS NULL",
             (lock_until_s, key, _LOGIN_MAX_FAILS))
 
@@ -203,8 +235,13 @@ def require_auth(allowed):
     role = session["role"]
     if role not in allowed:
         abort(403, description="権限がありません")
+    # 参照先の行が引けないセッションは 401 にする（role 3種で対称にすること）。
+    # g.user = strip_password(None) = None のまま先へ進むと、後段の staff["id"] 等が
+    # TypeError になり、削除済みスタッフ／管理者のトークンで 500 が返っていた。
     if role == "admin":
         user = query_one("SELECT id, admin_id, name FROM system_admins WHERE id=?", (session["user_id"],))
+        if user is None:
+            abort(401, description="セッションの管理者が見つかりません")
     elif role == "shop":
         # user_id は従来 shops.id（旧店主）または staffs.id（manager ロール）。
         # shop_id を使って店舗情報を取得する。
@@ -217,6 +254,8 @@ def require_auth(allowed):
             abort(401, description="セッションの店舗が見つかりません")
     else:
         user = query_one("SELECT * FROM staffs WHERE id=?", (session["user_id"],))
+        if user is None:
+            abort(401, description="セッションのスタッフが見つかりません")
     g.role = role
     g.user = strip_password(user)
     g.shop_id = session.get("shop_id")
@@ -711,7 +750,11 @@ def handle_init():
     ※ 初期パスワードはランダム生成し、このレスポンスで1回だけ返す（保存も再表示もしない）。
     """
     if os.getenv("ALLOW_INIT") != "1":
-        abort(403, description="初期セットアップは無効です（ALLOW_INIT=1 で有効化してください）")
+        # 未認証で叩けるエンドポイントなので、有効化条件（環境変数名）はレスポンスに出さない。
+        # 運用者向けの案内はサーバログにだけ出す。
+        print("[init] blocked: 初期セットアップは無効。有効化するには環境変数 ALLOW_INIT=1 "
+              "を設定してから再起動し、セットアップ後に必ず戻すこと。", flush=True)
+        abort(403, description="初期セットアップは無効です")
     msg = {"admin": "", "shop": "", "logins": {}}
     if not query_one("SELECT id FROM system_admins LIMIT 1"):
         initial_pw = secrets.token_urlsafe(12)
@@ -745,9 +788,20 @@ def login():
       さらに 'manager' ロールで店舗権限も一本化する。
     """
     body = request.get_json(silent=True) or {}
-    shop_code = (body.get("shop_code") or body.get("id") or "").strip()
-    user_code = (body.get("user_code") or body.get("staff_code") or "").strip()
+    shop_code = _sanitize_login_code(body.get("shop_code") or body.get("id"))
+    user_code = _sanitize_login_code(body.get("user_code") or body.get("staff_code"))
     pw = body.get("password") or ""
+
+    # 【なぜ長さ上限か】
+    #   shop_code / user_code は無制限だと、そのまま attempt_key（login_attempts の
+    #   主キー）と audit_logs.actor_name に入る。毎回違う値を送るだけでキーが分散し、
+    #   ロックが一度も発動しないまま未認証クライアントが行を無限に増やせてしまう
+    #   （本番は Cloudflare D1 で書き込み課金・ストレージ上限がある）。
+    #   正当な店舗コード・ユーザーコードが64文字を超えることは無いので、
+    #   切り詰めず 400 で弾く（＝1行も書かずに帰す）。
+    #   入力不備であって認証試行ではないため、_record_login_failure は呼ばない。
+    if len(shop_code) > _LOGIN_CODE_MAX or len(user_code) > _LOGIN_CODE_MAX:
+        raise ValueError(f"店舗コード・ユーザーコードは{_LOGIN_CODE_MAX}文字以内で入力してください")
     if not pw:
         raise ValueError("パスワードを入力してください")
 
@@ -825,6 +879,26 @@ def _create_session(role, user_id, shop_id, user):
     return {"token": token, "role": role, "user": strip_password(user)}
 
 
+def _session_actor_name(session):
+    """セッション行から操作者の表示名を引く（引けなければ None）。
+
+    shop ロールの user_id は staffs.id（manager）と shops.id（旧店主）が混在するため、
+    require_auth と同じく shop_id を使って店舗名を引く。
+    """
+    try:
+        role = session.get("role")
+        if role == "admin":
+            row = query_one("SELECT name FROM system_admins WHERE id=?", (session.get("user_id"),))
+            return row.get("name") if row else None
+        if role == "shop":
+            row = query_one("SELECT shop_name FROM shops WHERE id=?", (session.get("shop_id"),))
+            return row.get("shop_name") if row else None
+        row = query_one("SELECT name FROM staffs WHERE id=?", (session.get("user_id"),))
+        return row.get("name") if row else None
+    except Exception:
+        return None  # 監査のための付加情報なので、引けなくてもログアウト自体は通す
+
+
 @app.post("/api/logout")
 def logout():
     auth = request.headers.get("Authorization", "")
@@ -833,8 +907,11 @@ def logout():
         session = query_one("SELECT role, user_id, shop_id FROM sessions WHERE token=?", (token,))
         if session:
             # トークン削除の前に監査する（削除後だと誰がログアウトしたか分からなくなるため）
+            # logout は require_auth を通らないので g.user が無い。auth.login と同じ画面で
+            # 表示が揃うよう、セッションの role / user_id から氏名を引いて明示的に渡す。
             audit("auth.logout", shop_id=session.get("shop_id"),
-                  actor_role=session["role"], actor_id=session["user_id"])
+                  actor_role=session["role"], actor_id=session["user_id"],
+                  actor_name=_session_actor_name(session))
         execute("DELETE FROM sessions WHERE token=?", (token,))
     return jsonify({"ok": True})
 
@@ -4314,14 +4391,47 @@ def ensure_db():
         execute("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at)")
     except Exception as e:
         print(f"[ensure_db] WARN: audit_logs setup failed (skipped): {e}", flush=True)
-    # ログイン試行のレート制限テーブル（作成失敗しても業務は止めない）
+    # ログイン試行のレート制限テーブル。
+    # ここで握り潰しても _verify_critical_tables() が起動を止めるので、
+    # 「テーブルが無いのに healthy」という状態にはならない。
     try:
         execute(
             "CREATE TABLE IF NOT EXISTS login_attempts ("
             "attempt_key TEXT PRIMARY KEY, fail_count INTEGER NOT NULL DEFAULT 0, "
-            "locked_until TEXT, updated_at TEXT)")
+            "locked_until TEXT, updated_at TEXT, "
+            "blocked_logged INTEGER NOT NULL DEFAULT 0)")
+        # 既存DB（blocked_logged 導入前）への追加。CREATE TABLE IF NOT EXISTS は
+        # 既存テーブルの列を増やさないため、ALTER で追う。
+        cols = {row["name"] for row in query_all("PRAGMA table_info(login_attempts)")}
+        if "blocked_logged" not in cols:
+            execute("ALTER TABLE login_attempts ADD COLUMN blocked_logged INTEGER NOT NULL DEFAULT 0")
+            print("[ensure_db] OK: login_attempts.blocked_logged added", flush=True)
     except Exception as e:
         print(f"[ensure_db] WARN: login_attempts setup failed (skipped): {e}", flush=True)
+
+
+def _verify_critical_tables():
+    """ensure_db() の後に、無いと機能が黙って壊れるテーブルの実在を検証する。
+
+    【なぜ起動を落とすのか】
+      login_attempts が無いと _check_login_lock の SELECT が失敗し、
+      未認証クライアントに 500（生の SQL エラー付き）が返る。つまり誰もログイン
+      できないのに /api/health は 200 を返し続け、Railway のヘルスチェックは通る。
+      「レート制限をフェイルオープンさせる」案はブルートフォース防御が静かに
+      無効化されるため採らない。起動時に落として再起動させる方が安全。
+
+      ensure_db() は途中の PRAGMA/ALTER で raise し得るため、そこで中断すると
+      login_attempts の CREATE に到達しない。また D1 モードの init_schema は
+      個別ステートメントの失敗を握り潰す。どちらの経路も「作られなかった」を
+      検知できるよう、CREATE の成否ではなく実在を最後に確認する。
+    """
+    for table in ("login_attempts", "audit_logs", "sessions"):
+        try:
+            query_all(f"SELECT 1 FROM {table} LIMIT 1")
+        except Exception as e:
+            raise RuntimeError(
+                f"必須テーブル {table} がありません（DB初期化が完了していません）。"
+                f"この状態で起動を続けるとログインが機能しないため停止します: {e}")
 
 
 def _normalize_datetime_data():
@@ -4387,13 +4497,18 @@ def _normalize_datetime_data():
 # gunicorn 等でインポートされた場合もスキーマを整備（起動時に1回）
 try:
     ensure_db()
+    _verify_critical_tables()
 except Exception as _e:
-    # gunicorn 起動時に ImportError にしてすぐ分かるようにする
-    print(f"[startup] DB initialization failed: {_e}", flush=True)
+    # ログを出したうえで必ず伝播させる（gunicorn 起動時は ImportError になる）。
+    # ここで握り潰すと「/api/health は 200 なのに誰もログインできない」状態のまま
+    # 起動が完了してしまい、Railway のヘルスチェックが異常を検知できない。
+    print(f"[startup] FATAL: DB initialization failed: {_e}", flush=True)
+    raise
 
 
 if __name__ == "__main__":
     ensure_db()
+    _verify_critical_tables()
     # ポート5000はmacOSのAirPlay Receiverが使用するため、デフォルトは8000
     port = int(os.getenv("PORT", "8000"))
     # debug=True は開発時のみ。本番環境変数 FLASK_DEBUG=0 で明示的に無効化可能。
