@@ -2870,6 +2870,11 @@ async function openWishImportModal(onImported) {
     // I-2: どのスタッフのカレンダーを一度でも表示したかを記録し、
     // 未確認のまま登録しようとした店長に注意を出すために使う。
     viewedStaffIds: new Set(),
+    // fix round 3: #wtiSubmitMsg に書いた登録結果メッセージ（成功件数・失敗内容）を
+    // state 側にも持たせる。_wtiRenderStep2 が毎回このHTMLを描くことで、
+    // 再描画（成功済み項目の除去を画面に反映するために必須）が直後に走っても
+    // メッセージが消えないようにする。
+    submitMsg: null,
   };
   const wrap = openModal('<i class="bi bi-clipboard-plus"></i> テキストから取り込む',
     '<div class="text-secondary small">読み込み中...</div>', null, { width: 640 });
@@ -3090,7 +3095,7 @@ function _wtiRenderStep2(wrap, state) {
       <button class="btn btn-light" id="wtiBackBtn" type="button"><i class="bi bi-arrow-left"></i> やり直す</button>
       <button class="btn btn-primary flex-grow" id="wtiSubmitBtn" type="button"><i class="bi bi-check2-circle"></i> 合計 ${summary.total}件を登録する</button>
     </div>
-    <div id="wtiSubmitMsg" class="mt-2"></div>`);
+    <div id="wtiSubmitMsg" class="mt-2">${state.submitMsg || ''}</div>`);
 
   wrap.querySelector('#wtiCalStaff')?.addEventListener('change', (e) => {
     state.calStaffId = +e.target.value;
@@ -3329,7 +3334,8 @@ async function _wtiSubmit(wrap, state) {
   const overwriteGroup = assignable.filter((it) => state.existing.has(`${it.staffId}|${it.date}`) && it.overwriteConfirmed);
   const normalGroup = assignable.filter((it) => !(state.existing.has(`${it.staffId}|${it.date}`) && it.overwriteConfirmed));
   setLoading(true);
-  if (msgBox) msgBox.innerHTML = '<div class="text-secondary small">登録中...</div>';
+  state.submitMsg = '<div class="text-secondary small">登録中...</div>';
+  if (msgBox) msgBox.innerHTML = state.submitMsg;
   let created = 0, skipped = 0;
   const succeededItems = [];
   const serverMessages = [];
@@ -3359,7 +3365,12 @@ async function _wtiSubmit(wrap, state) {
     const succeededUids = new Set(succeededItems.map((it) => it.uid));
     state.items = state.items.filter((it) => !succeededUids.has(it.uid));
     const successPart = created > 0 ? `${serverMessages.join(' ') || `${created}件は登録済みです。`} ` : '';
-    if (msgBox) msgBox.innerHTML = `<div class="alert alert-danger py-2">${esc(successPart)}失敗: ${esc(errors.join(' / '))}</div>`;
+    // fix round 3: #wtiSubmitMsg への直書きは、この2行下の _wtiRenderStep2 が
+    // #wtiSubmitMsg ごと再描画するため直後に消えてしまう（e2e が実機で検出）。
+    // 再描画自体は succeededItems 除去後の state を画面（カレンダー・合計件数）に
+    // 反映するために必須なので削らず、メッセージを state 側に持たせて
+    // _wtiRenderStep2 に描かせることで、再描画後も残るようにする。
+    state.submitMsg = `<div class="alert alert-danger py-2">${esc(successPart)}失敗: ${esc(errors.join(' / '))}</div>`;
     toast(created > 0 ? `一部登録できませんでした（${created}件は登録済み）` : '登録に失敗しました', 'error');
     _wtiRenderStep2(wrap, state);
     return;
@@ -3373,7 +3384,8 @@ async function _wtiSubmit(wrap, state) {
     // M-2: 全件スキップ（重複等）は成功ではない。緑トーストにせず、モーダルも閉じずに
     // 内容を見直せるようにする
     const msg = `登録できる項目がありませんでした（${skipped}件は重複のためスキップ）`;
-    if (msgBox) msgBox.innerHTML = `<div class="alert alert-warning py-2">${esc(msg)}</div>`;
+    state.submitMsg = `<div class="alert alert-warning py-2">${esc(msg)}</div>`;
+    if (msgBox) msgBox.innerHTML = state.submitMsg;
     toast(msg, 'warning');
     return;
   }

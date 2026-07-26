@@ -431,18 +431,13 @@ test.describe('希望テキスト取り込み（wish text import）', () => {
     });
 
     await page.click('#wtiSubmitBtn');
-    // msgBoxのテキストを同期点にしない（既知のバグ: 後述のsoft assertで検出する）。
-    // 代わりにネットワーク往復の完了をリクエスト数で待つ。
+    // msgBoxのテキストを同期点にしない。代わりにネットワーク往復の完了をリクエスト数で待つ。
     await expect.poll(() => calls.length, { timeout: 5000 }).toBe(2);
     await expect(page.locator('#wtiSubmitBtn')).toBeVisible(); // モーダルは閉じない
-    // ★既知の不具合: _wtiSubmit が部分失敗メッセージを #wtiSubmitMsg にセットした直後、
-    // 同期的に _wtiRenderStep2(wrap, state) を呼んでいる（app.js の該当行）。この再描画が
-    // #wtiSubmitMsg を中身なしの新しいdivに置き換えてしまうため、成功件数を含む
-    // メッセージは実際には画面に残らない（3秒で消えるトーストしか見えない）。
-    // 要件6「成功した件数が画面に残ること」を満たしていないため、ここは意図的に
-    // soft assertion にして失敗を可視化しつつ、以降の（正しく動く）再送検証は継続する。
+    // fix round 3: 部分失敗メッセージは state.submitMsg に保持され、直後の
+    // _wtiRenderStep2 再描画後も #wtiSubmitMsg に残る（成功した件数が画面に残る）。
     const msg1 = await page.locator('#wtiSubmitMsg').textContent();
-    expect.soft(msg1, '既知のバグ: _wtiRenderStep2 の再描画で部分失敗メッセージが消える').toContain('登録しました');
+    expect(msg1).toContain('登録しました');
 
     // 再送: 成功済み（08-22）は含まれず、失敗分（08-21）だけが送られる
     // （state.items からの除去自体は正しく行われている。合計ボタンの表示件数が
@@ -473,10 +468,10 @@ test.describe('希望テキスト取り込み（wish text import）', () => {
     await page.click('#wtiSubmitBtn');
     await expect.poll(() => calls.length, { timeout: 5000 }).toBe(2);
     await expect(page.locator('#wtiSubmitBtn')).toBeVisible();
-    // ★既知の不具合（部分失敗Aと同一原因）: 成功件数を含むメッセージが
-    // _wtiRenderStep2 の再描画で消えてしまう。soft assertionで可視化する。
+    // fix round 3（部分失敗Aと同一修正）: 成功件数を含むメッセージが
+    // 再描画後も #wtiSubmitMsg に残る。
     const msg1 = await page.locator('#wtiSubmitMsg').textContent();
-    expect.soft(msg1, '既知のバグ: _wtiRenderStep2 の再描画で部分失敗メッセージが消える').toContain('登録しました');
+    expect(msg1).toContain('登録しました');
 
     await expect(page.locator('#wtiSubmitBtn')).toContainText('合計 1件を登録する');
     await page.click('#wtiSubmitBtn');
@@ -501,11 +496,10 @@ test.describe('希望テキスト取り込み（wish text import）', () => {
     await expect.poll(() => calls.length, { timeout: 5000 }).toBe(2);
     await expect(page.locator('#wtiSubmitBtn')).toBeVisible();
     const msg1 = await page.locator('#wtiSubmitMsg').textContent();
-    expect(msg1).not.toContain('登録しました'); // 何も成功していないのに成功を名乗らない（これは成立する＝空文字列）
-    // ★既知の不具合（部分失敗A/Bと同一原因）: 「失敗」の説明メッセージ自体も
-    // _wtiRenderStep2 の再描画で消えてしまい、ユーザーには何も残らない
-    // （3秒で消えるトーストだけが頼り）。soft assertionで可視化する。
-    expect.soft(msg1, '既知のバグ: _wtiRenderStep2 の再描画で失敗メッセージが消える').toContain('失敗');
+    expect(msg1).not.toContain('登録しました'); // 何も成功していないのに成功を名乗らない
+    // fix round 3（部分失敗A/Bと同一修正）: 「失敗」の説明メッセージも
+    // 再描画後も #wtiSubmitMsg に残る。
+    expect(msg1).toContain('失敗');
 
     // 何も成功していないので、再送でも両方のグループがそのまま送られる
     await page.click('#wtiSubmitBtn');
