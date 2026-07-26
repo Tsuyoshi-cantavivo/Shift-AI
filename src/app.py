@@ -19,7 +19,7 @@ from auth import hash_password, verify_password, gen_token, strip_password
 from utils import (
     calc_next_period, jst_now, jst_today, minutes_between, compute_break_minutes,
     night_minutes, validate_password, parse_settings, build_ics, parse_iso, normalize_iso,
-    norm_hhmm, norm_dt_iso, add_days, build_staff_tendency,
+    norm_hhmm, norm_dt_iso, add_days, build_staff_tendency, combine_dt_overnight,
 )
 import shift_engine
 import ai
@@ -3482,6 +3482,101 @@ def shop_wishes_parse():
             hint = e.get("staff_hint")
             e["staff_id"] = by_name.get(hint) if hint else None
     return jsonify(result)
+
+
+def _wish_times(date, availability, start, end, shop_end):
+    """希望の availability から start_datetime/end_datetime を決める（設計書 §3 の表）。
+
+    - rest        : {date}T00:00:00 〜 {date}T23:59:59（終日休み）
+    - any/morning/evening : {date}T09:00:00 〜 {date}T{shop_end}:00
+      （3種とも時刻は同じ。既存の /api/staff/requests と同じ挙動で、区別は
+      availability の値そのものが担う。ここを変えると既存データとの整合が崩れる）
+    - time        : 指定された start〜end。end<=start なら翌日扱い
+      （combine_dt_overnight は shift_patterns/fixed_shifts と同じ日またぎ判定を使う）
+    """
+    if availability == "rest":
+        return f"{date}T00:00:00", f"{date}T23:59:59"
+    if availability == "time":
+        return combine_dt_overnight(date, start, end)
+    return f"{date}T09:00:00", f"{date}T{shop_end}:00"
+
+
+@app.post("/api/shop/wishes/bulk")
+def shop_wishes_bulk():
+    """プレビューで確定した希望を一括登録する。
+
+    既存の希望提出（/api/staff/requests）と同じく shifts(status='requested') と
+    wish_history の両方に書く。片方だけでは機能しない
+    （前者はAI生成の入力、後者は希望表管理画面が読む永久履歴）。
+
+    店長の代理入力なので、スタッフ提出時の募集期間・締切の検証は行わない
+    （締切はスタッフに対する期限であり店長を縛らない。募集期間が未設定の
+    店舗でも取り込めるようにする）。
+    """
+    shop, shop_id, _ = _shop_ctx()
+    body = request.get_json(silent=True) or {}
+    wishes = body.get("wishes") or []
+    overwrite = bool(body.get("overwrite"))
+    if not wishes:
+        abort(400, description="wishes が必要です")
+    shop_end = _get_shop_shift_end_time(shop_id)
+    created = skipped = 0
+    for w in wishes:
+        staff_id = w.get("staff_id")
+        date = w.get("date")
+        avail = w.get("availability")
+        if not staff_id or not date or not avail:
+            skipped += 1
+            continue
+        if avail == "time" and (not w.get("start") or not w.get("end")):
+            skipped += 1
+            continue
+        # ★ 他店舗/退職者の staff_id を弾く（parse 側では未検証。保存側が最終防衛線）
+        staff = query_one("SELECT id FROM staffs WHERE id=? AND shop_id=?", (staff_id, shop_id))
+        if not staff:
+            skipped += 1
+            continue
+        start_dt, end_dt = _wish_times(date, avail, w.get("start"), w.get("end"), shop_end)
+        if overwrite:
+            # 店長がプレビューで明示的に選んだ場合のみ、その日の既存希望を消して入れ直す
+            execute("DELETE FROM wish_history WHERE staff_id=? AND start_datetime LIKE ?", (staff_id, date + "%"))
+            execute("DELETE FROM shifts WHERE staff_id=? AND status='requested' AND start_datetime LIKE ?", (staff_id, date + "%"))
+        else:
+            overlap, _conflict = _check_staff_overlap(shop_id, staff_id, start_dt, end_dt, include_requested=True)
+            if overlap:
+                skipped += 1
+                continue
+        note = "店長が取り込み"
+        raw = (w.get("raw") or "").strip()
+        if raw:
+            note += f": {raw[:200]}"
+        if avail == "time":
+            work = minutes_between(start_dt, end_dt)
+            execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason) VALUES (?,?,?,?,?,?,?)",
+                    (shop_id, staff_id, start_dt, end_dt, compute_break_minutes(work), "requested", note))
+        else:
+            execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, status, reason, availability) VALUES (?,?,?,?,?,?,?)",
+                    (shop_id, staff_id, start_dt, end_dt, "requested", note, avail))
+        # ★ wish_history にも永久保存（AI再生成の入力 + 希望表管理画面の参照元）
+        # 同じ (staff_id, start, end) が既存ならスキップ（二重登録防止。/api/staff/requests と同じ作法）
+        existing = None
+        try:
+            existing = query_one(
+                "SELECT id FROM wish_history WHERE staff_id=? AND start_datetime=? AND end_datetime=?",
+                (staff_id, start_dt, end_dt))
+        except Exception:
+            pass  # テーブル未作成時は無害（ensure_db で自動作成される）
+        if existing is None:
+            try:
+                execute("INSERT INTO wish_history (shop_id, staff_id, start_datetime, end_datetime, availability, note) VALUES (?,?,?,?,?,?)",
+                        (shop_id, staff_id, start_dt, end_dt, avail, note))
+            except Exception:
+                pass  # wish_history 未作成時は無害
+        created += 1
+    msg = f"{created}件の希望を登録しました"
+    if skipped:
+        msg += f"（{skipped}件は重複または不正のためスキップ）"
+    return jsonify({"ok": True, "created": created, "skipped": skipped, "message": msg})
 
 
 @app.get("/api/shop/staff-tendencies")

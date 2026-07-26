@@ -192,3 +192,198 @@ class TestWishParseApi:
                          headers=auth(token))
 
         assert r.status_code == 400
+
+
+class TestWishBulkApi:
+    """POST /api/shop/wishes/bulk — プレビューで確定した希望を実際に登録する。
+
+    最重要: shifts(status=requested) と wish_history の両方に入ること。
+    片方だけでは機能しない（前者はAI生成の入力、後者は希望表管理画面が読む）。
+    """
+
+    def _shifts_requested_count(self, shop_id=None):
+        if shop_id is None:
+            return dbmod.query_one("SELECT COUNT(*) as c FROM shifts WHERE status='requested'")["c"]
+        return dbmod.query_one(
+            "SELECT COUNT(*) as c FROM shifts WHERE status='requested' AND shop_id=?", (shop_id,))["c"]
+
+    def _wish_history_count(self, shop_id=None):
+        if shop_id is None:
+            return dbmod.query_one("SELECT COUNT(*) as c FROM wish_history")["c"]
+        return dbmod.query_one("SELECT COUNT(*) as c FROM wish_history WHERE shop_id=?", (shop_id,))["c"]
+
+    def test_creates_in_both_tables(self, client):
+        """shifts(status=requested) と wish_history の両方に入ること。"""
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        wishes = [
+            {"staff_id": staff_id, "date": "2026-08-03", "availability": "rest",
+             "start": None, "end": None, "raw": "8/3は休みたいです"},
+            {"staff_id": staff_id, "date": "2026-08-04", "availability": "any",
+             "start": None, "end": None, "raw": "8/4は終日OK"},
+            {"staff_id": staff_id, "date": "2026-08-05", "availability": "time",
+             "start": "17:00", "end": "22:00", "raw": "8/5は17-22"},
+        ]
+        r = client.post("/api/shop/wishes/bulk", json={"wishes": wishes}, headers=auth(token))
+
+        assert r.status_code == 200, r.get_json()
+        body = r.get_json()
+        assert body["ok"] is True
+        assert body["created"] == 3
+        assert body["skipped"] == 0
+        assert self._shifts_requested_count(shop_id) == 3
+        assert self._wish_history_count(shop_id) == 3
+
+    def test_rest_uses_full_day(self, client):
+        """availability=rest は 00:00:00〜23:59:59 で入ること。"""
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        wishes = [{"staff_id": staff_id, "date": "2026-08-03", "availability": "rest",
+                   "start": None, "end": None, "raw": "8/3は休み"}]
+        r = client.post("/api/shop/wishes/bulk", json={"wishes": wishes}, headers=auth(token))
+
+        assert r.status_code == 200, r.get_json()
+        row = dbmod.query_one(
+            "SELECT start_datetime, end_datetime FROM shifts WHERE staff_id=? AND status='requested'",
+            (staff_id,))
+        assert row["start_datetime"] == "2026-08-03T00:00:00"
+        assert row["end_datetime"] == "2026-08-03T23:59:59"
+        wh = dbmod.query_one(
+            "SELECT start_datetime, end_datetime FROM wish_history WHERE staff_id=?", (staff_id,))
+        assert wh["start_datetime"] == "2026-08-03T00:00:00"
+        assert wh["end_datetime"] == "2026-08-03T23:59:59"
+
+    def test_availability_uses_shop_end_time(self, client):
+        """any/morning/evening は 09:00 開始・店舗の終了時刻で入ること。"""
+        shop_id = insert_shop(settings={"shift_hours": {"bulk": {"start_time": "09:00", "end_time": "21:30"}}})
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        wishes = [
+            {"staff_id": staff_id, "date": "2026-08-03", "availability": "morning",
+             "start": None, "end": None, "raw": "8/3は早番希望"},
+            {"staff_id": staff_id, "date": "2026-08-04", "availability": "evening",
+             "start": None, "end": None, "raw": "8/4は遅番希望"},
+        ]
+        r = client.post("/api/shop/wishes/bulk", json={"wishes": wishes}, headers=auth(token))
+
+        assert r.status_code == 200, r.get_json()
+        rows = dbmod.query_all(
+            "SELECT start_datetime, end_datetime, availability FROM shifts "
+            "WHERE staff_id=? AND status='requested' ORDER BY start_datetime", (staff_id,))
+        assert len(rows) == 2
+        for row in rows:
+            assert row["start_datetime"].endswith("T09:00:00")
+            assert row["end_datetime"].endswith("T21:30:00")
+
+    def test_time_overnight_wraps_to_next_day(self, client):
+        """availability=time で end<=start なら翌日扱いになること。"""
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        wishes = [{"staff_id": staff_id, "date": "2026-08-03", "availability": "time",
+                   "start": "22:00", "end": "05:00", "raw": "8/3夜勤"}]
+        r = client.post("/api/shop/wishes/bulk", json={"wishes": wishes}, headers=auth(token))
+
+        assert r.status_code == 200, r.get_json()
+        row = dbmod.query_one(
+            "SELECT start_datetime, end_datetime FROM shifts WHERE staff_id=? AND status='requested'",
+            (staff_id,))
+        assert row["start_datetime"] == "2026-08-03T22:00:00"
+        assert row["end_datetime"] == "2026-08-04T05:00:00"
+
+    def test_duplicate_is_skipped(self, client):
+        """同じ (staff_id, date) を2回登録したら2回目はスキップされること。"""
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+        wishes = [{"staff_id": staff_id, "date": "2026-08-03", "availability": "rest",
+                   "start": None, "end": None, "raw": "8/3は休み"}]
+
+        r1 = client.post("/api/shop/wishes/bulk", json={"wishes": wishes}, headers=auth(token))
+        r2 = client.post("/api/shop/wishes/bulk", json={"wishes": wishes}, headers=auth(token))
+
+        assert r1.get_json()["created"] == 1
+        assert r2.get_json()["created"] == 0
+        assert r2.get_json()["skipped"] == 1
+        assert self._shifts_requested_count(shop_id) == 1
+        assert self._wish_history_count(shop_id) == 1
+
+    def test_overwrite_replaces_existing(self, client):
+        """overwrite=true なら既存を消して入れ直すこと。"""
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+        first = [{"staff_id": staff_id, "date": "2026-08-03", "availability": "rest",
+                  "start": None, "end": None, "raw": "8/3は休み"}]
+        second = [{"staff_id": staff_id, "date": "2026-08-03", "availability": "time",
+                   "start": "17:00", "end": "22:00", "raw": "8/3は17-22に変更"}]
+
+        client.post("/api/shop/wishes/bulk", json={"wishes": first}, headers=auth(token))
+        r = client.post("/api/shop/wishes/bulk", json={"wishes": second, "overwrite": True}, headers=auth(token))
+
+        assert r.status_code == 200, r.get_json()
+        assert r.get_json()["created"] == 1
+        assert self._shifts_requested_count(shop_id) == 1
+        assert self._wish_history_count(shop_id) == 1
+        row = dbmod.query_one(
+            "SELECT start_datetime, end_datetime FROM shifts WHERE staff_id=? AND status='requested'",
+            (staff_id,))
+        assert row["start_datetime"] == "2026-08-03T17:00:00"
+        assert row["end_datetime"] == "2026-08-03T22:00:00"
+
+    def test_ignores_deadline(self, client):
+        """締切を過ぎていても店長は登録できること（スタッフの提出とは違う）。
+
+        募集期間(shift_request_periods)を一切作らない店舗でも通ることを確認する。
+        """
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+        # 締切が過去の募集期間をわざと作る（スタッフ提出なら 400 になる状況）
+        dbmod.execute(
+            "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) "
+            "VALUES (?,?,?,?,1)",
+            (shop_id, "2026-08-01", "2026-08-31", "2020-01-01"))
+
+        wishes = [{"staff_id": staff_id, "date": "2026-08-03", "availability": "rest",
+                   "start": None, "end": None, "raw": "8/3は休み"}]
+        r = client.post("/api/shop/wishes/bulk", json={"wishes": wishes}, headers=auth(token))
+
+        assert r.status_code == 200, r.get_json()
+        assert r.get_json()["created"] == 1
+
+    def test_rejects_other_shop_staff(self, client):
+        """他店舗の staff_id は拒否されること。"""
+        shop_id = insert_shop(code="SHOP1")
+        other_shop_id = insert_shop(code="SHOP2")
+        other_staff_id = insert_staff(other_shop_id, "E1", "他店舗スタッフ")
+        token = make_session("shop", shop_id, shop_id)
+
+        wishes = [{"staff_id": other_staff_id, "date": "2026-08-03", "availability": "rest",
+                   "start": None, "end": None, "raw": "8/3は休み"}]
+        r = client.post("/api/shop/wishes/bulk", json={"wishes": wishes}, headers=auth(token))
+
+        assert r.status_code == 200, r.get_json()
+        body = r.get_json()
+        assert body["created"] == 0
+        assert body["skipped"] == 1
+        assert self._shifts_requested_count() == 0
+        assert self._wish_history_count() == 0
+
+    def test_requires_shop_role(self, client):
+        """staff ロールでは 403。"""
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("staff", staff_id, shop_id)
+
+        wishes = [{"staff_id": staff_id, "date": "2026-08-03", "availability": "rest",
+                   "start": None, "end": None, "raw": "8/3は休み"}]
+        r = client.post("/api/shop/wishes/bulk", json={"wishes": wishes}, headers=auth(token))
+
+        assert r.status_code == 403
