@@ -6,6 +6,7 @@
 import os
 import json
 import re
+import secrets
 import unicodedata
 from datetime import datetime, timedelta
 from flask import (Flask, request, jsonify, abort, Response, send_file, g)
@@ -595,16 +596,21 @@ def health():
 # ===========================================================
 @app.post("/api/init")
 def handle_init():
-    """初回セットアップ: 管理者が未登録の場合のみ、初期管理者(admin/admin123)を作成。
-    ※ 認証不要だが、管理者が既に存在する場合は何もしない（安全性）。
-    ※ 本番運用開始後は必ず admin のパスワードを変更すること。
+    """初回セットアップ: 管理者が未登録の場合のみ、初期管理者を作成。
+
+    ※ 認証不要のエンドポイントなので、環境変数 ALLOW_INIT=1 のときだけ有効にする。
+       既定で無効なのは、DBリセット直後に第三者が初期管理者を作れてしまうため。
+    ※ 初期パスワードはランダム生成し、このレスポンスで1回だけ返す（保存も再表示もしない）。
     """
+    if os.getenv("ALLOW_INIT") != "1":
+        abort(403, description="初期セットアップは無効です（ALLOW_INIT=1 で有効化してください）")
     msg = {"admin": "", "shop": "", "logins": {}}
     if not query_one("SELECT id FROM system_admins LIMIT 1"):
+        initial_pw = secrets.token_urlsafe(12)
         execute("INSERT INTO system_admins (admin_id, password_hash, name) VALUES (?,?,?)",
-                ("admin", hash_password("admin123"), "システム管理者"))
-        msg["admin"] = "管理者作成: admin / admin123（※必ずパスワードを変更してください）"
-        msg["logins"] = {"admin": {"id": "admin", "password": "admin123"}}
+                ("admin", hash_password(initial_pw), "システム管理者"))
+        msg["admin"] = "管理者を作成しました。このパスワードは再表示されません。"
+        msg["logins"] = {"admin": {"id": "admin", "password": initial_pw}}
         return jsonify({"ok": True, "message": "初期管理者を作成しました", "details": msg,
                         "logins": msg["logins"]})
     return jsonify({"ok": True, "message": "管理者は既に存在します。ログインしてください。",

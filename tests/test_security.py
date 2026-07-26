@@ -500,11 +500,21 @@ class TestMassAssignment:
 
 
 # ============================================================
-# Init endpoint (公開状態)
+# Init endpoint (S4修正: ALLOW_INIT ガード)
 # ============================================================
 class TestPublicInit:
-    def test_init_endpoint_is_public(self, client):
-        """[警告] /api/init は認証不要で誰でもデモデータを作成可能。"""
+    def test_init_endpoint_requires_allow_init(self, client, monkeypatch):
+        """[修正済み] ALLOW_INIT 未設定なら 403 で拒否される（旧: 認証不要で公開）。
+
+        詳細な回帰テストは tests/test_admin_init.py 側にまとめてある。
+        """
+        monkeypatch.delenv("ALLOW_INIT", raising=False)
+        r = client.post("/api/init")
+        assert r.status_code == 403
+
+    def test_init_endpoint_works_when_explicitly_allowed(self, client, monkeypatch):
+        """ALLOW_INIT=1 を明示したときのみデモ初期化が動くこと。"""
+        monkeypatch.setenv("ALLOW_INIT", "1")
         r = client.post("/api/init")
         assert r.status_code == 200
         # 危険性: 本番環境でこのエンドポイントが有効だと、第三者が初期化可能
