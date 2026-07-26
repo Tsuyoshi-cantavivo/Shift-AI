@@ -19,7 +19,9 @@ CREATE TABLE IF NOT EXISTS shops (
   password_hash TEXT NOT NULL,
   is_active     INTEGER DEFAULT 1,
   settings      TEXT DEFAULT '{}',
-  created_at    TEXT DEFAULT (datetime('now'))
+  created_at    TEXT DEFAULT (datetime('now')),
+  is_archived INTEGER DEFAULT 0,
+  archived_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS staffs (
@@ -112,12 +114,13 @@ CREATE INDEX IF NOT EXISTS idx_shifts_staff ON shifts(staff_id);
 CREATE INDEX IF NOT EXISTS idx_shifts_status ON shifts(status);
 
 CREATE TABLE IF NOT EXISTS sessions (
-  token      TEXT PRIMARY KEY,
-  role       TEXT NOT NULL CHECK(role IN ('admin','shop','staff')),
-  user_id    INTEGER NOT NULL,
-  shop_id    INTEGER,
-  created_at TEXT DEFAULT (datetime('now')),
-  expires_at TEXT
+  token          TEXT PRIMARY KEY,
+  role           TEXT NOT NULL CHECK(role IN ('admin','shop','staff')),
+  user_id        INTEGER NOT NULL,
+  shop_id        INTEGER,
+  acting_shop_id INTEGER,   -- 代理閲覧中の店舗（admin セッションのみ）
+  created_at     TEXT DEFAULT (datetime('now')),
+  expires_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(role, user_id);
 
@@ -247,4 +250,14 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   locked_until   TEXT,
   updated_at     TEXT,
   blocked_logged INTEGER NOT NULL DEFAULT 0
+);
+
+-- -----------------------------------------------------------
+-- 16. schema_migrations: マイグレーションの適用状態（ステートメント単位）
+-- -----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  filename   TEXT NOT NULL,
+  stmt_index INTEGER NOT NULL,
+  applied_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (filename, stmt_index)
 );
