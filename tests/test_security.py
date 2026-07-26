@@ -531,3 +531,84 @@ class TestSessionToken:
         client.post("/api/logout", headers=auth(tok))
         r = client.get("/api/me", headers=auth(tok))
         assert r.status_code == 401
+
+
+# ============================================================
+# 固定シフト: 未認証アクセス / テナント越境（回帰テスト）
+# ============================================================
+class TestFixedShiftsAuth:
+    def test_fixed_shift_create_requires_auth(self, client):
+        """認証ヘッダ無しで固定シフトを作成できないこと。"""
+        shop_id = insert_shop("SHOP1")
+        staff_id = insert_staff(shop_id, "p1", "太郎")
+        r = client.post("/api/shop/fixed-shifts",
+                        json={"staff_id": staff_id, "weekday": 1,
+                              "start_time": "09:00", "end_time": "17:00"})
+        assert r.status_code == 401, "未認証で固定シフトが作成できてしまう"
+
+    def test_fixed_shift_update_requires_auth(self, client):
+        shop_id = insert_shop("SHOP1")
+        staff_id = insert_staff(shop_id, "p1", "太郎")
+        fid = insert_fixed(staff_id, 1, "09:00", "17:00")
+        r = client.put(f"/api/shop/fixed-shifts/{fid}",
+                       json={"weekday": 2, "start_time": "10:00", "end_time": "18:00"})
+        assert r.status_code == 401
+
+    def test_fixed_shift_delete_requires_auth(self, client):
+        shop_id = insert_shop("SHOP1")
+        staff_id = insert_staff(shop_id, "p1", "太郎")
+        fid = insert_fixed(staff_id, 1, "09:00", "17:00")
+        r = client.delete(f"/api/shop/fixed-shifts/{fid}")
+        assert r.status_code == 401
+
+    def test_fixed_shift_create_rejects_other_shop_staff(self, client):
+        """他店舗のスタッフを指定した固定シフトは作成できないこと。"""
+        shop_a = insert_shop("SHOPA", "pw12345678")
+        insert_staff(shop_a, "mgrA", "店長A", role="manager", password="pw12345678")
+        shop_b = insert_shop("SHOPB", "pw12345678")
+        staff_b = insert_staff(shop_b, "p1", "他店の人")
+
+        r = client.post("/api/login", json={"shop_code": "SHOPA", "user_code": "mgrA",
+                                            "password": "pw12345678"})
+        assert r.status_code == 200
+        token = r.get_json()["token"]
+
+        r = client.post("/api/shop/fixed-shifts",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"staff_id": staff_b, "weekday": 1,
+                              "start_time": "09:00", "end_time": "17:00"})
+        assert r.status_code == 404, "他店舗スタッフの固定シフトが作れてしまう"
+
+    def test_fixed_shift_update_rejects_other_shop(self, client):
+        shop_a = insert_shop("SHOPA", "pw12345678")
+        insert_staff(shop_a, "mgrA", "店長A", role="manager", password="pw12345678")
+        shop_b = insert_shop("SHOPB", "pw12345678")
+        staff_b = insert_staff(shop_b, "p1", "他店の人")
+        fid = insert_fixed(staff_b, 1, "09:00", "17:00")
+
+        r = client.post("/api/login", json={"shop_code": "SHOPA", "user_code": "mgrA",
+                                            "password": "pw12345678"})
+        token = r.get_json()["token"]
+
+        r = client.put(f"/api/shop/fixed-shifts/{fid}",
+                       headers={"Authorization": f"Bearer {token}"},
+                       json={"weekday": 2, "start_time": "10:00", "end_time": "18:00"})
+        assert r.status_code == 404
+
+    def test_fixed_shift_delete_rejects_other_shop(self, client):
+        shop_a = insert_shop("SHOPA", "pw12345678")
+        insert_staff(shop_a, "mgrA", "店長A", role="manager", password="pw12345678")
+        shop_b = insert_shop("SHOPB", "pw12345678")
+        staff_b = insert_staff(shop_b, "p1", "他店の人")
+        fid = insert_fixed(staff_b, 1, "09:00", "17:00")
+
+        r = client.post("/api/login", json={"shop_code": "SHOPA", "user_code": "mgrA",
+                                            "password": "pw12345678"})
+        token = r.get_json()["token"]
+
+        r = client.delete(f"/api/shop/fixed-shifts/{fid}",
+                          headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 404
+        # 他店舗のデータが残っていること
+        from db import query_one as qo
+        assert qo("SELECT id FROM fixed_shifts WHERE id=?", (fid,)) is not None

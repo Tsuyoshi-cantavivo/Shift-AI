@@ -1426,6 +1426,13 @@ def _shop_ctx():
     return g.user, g.user["id"], parse_settings(g.user.get("settings"))
 
 
+def _assert_staff_in_shop(staff_id, shop_id):
+    """staff_id が自店舗に属することを検証する（他店舗・存在しないIDは404）。"""
+    row = query_one("SELECT id FROM staffs WHERE id=? AND shop_id=?", (staff_id, shop_id))
+    if row is None:
+        abort(404, description="スタッフが見つかりません")
+
+
 def _get_shop_shift_end_time(shop_id):
     """店舗のシフト終了時刻を取得（shift_hours優先 → shift_patterns → 22:00）。
 
@@ -2362,9 +2369,24 @@ def shop_fixed():
     return jsonify({"fixed_shifts": rows})
 
 
+def _assert_fixed_shift_in_shop(fid, shop_id):
+    """固定シフトが自店舗スタッフのものであることを検証する。
+
+    fixed_shifts には shop_id 列が無く staff_id しか持たないため、staffs 経由で
+    JOIN して所属を判定する。他店舗のものは 404（存在を秘匿する既存方針に合わせる）。
+    """
+    row = query_one(
+        "SELECT fs.id FROM fixed_shifts fs JOIN staffs s ON fs.staff_id=s.id "
+        "WHERE fs.id=? AND s.shop_id=?", (fid, shop_id))
+    if row is None:
+        abort(404, description="固定シフトが見つかりません")
+
+
 @app.post("/api/shop/fixed-shifts")
 def shop_fixed_post():
+    shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
+    _assert_staff_in_shop(body["staff_id"], shop_id)
     meta = execute("INSERT INTO fixed_shifts (staff_id, weekday, start_time, end_time) VALUES (?,?,?,?)",
                    (body["staff_id"], body["weekday"], body["start_time"], body["end_time"]))
     return jsonify({"ok": True, "id": meta["last_row_id"]})
@@ -2372,13 +2394,18 @@ def shop_fixed_post():
 
 @app.put("/api/shop/fixed-shifts/<int:fid>")
 def shop_fixed_put(fid):
+    shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
-    execute("UPDATE fixed_shifts SET weekday=?, start_time=?, end_time=? WHERE id=?", (body["weekday"], body["start_time"], body["end_time"], fid))
+    _assert_fixed_shift_in_shop(fid, shop_id)
+    execute("UPDATE fixed_shifts SET weekday=?, start_time=?, end_time=? WHERE id=?",
+            (body["weekday"], body["start_time"], body["end_time"], fid))
     return jsonify({"ok": True})
 
 
 @app.delete("/api/shop/fixed-shifts/<int:fid>")
 def shop_fixed_del(fid):
+    shop, shop_id, _ = _shop_ctx()
+    _assert_fixed_shift_in_shop(fid, shop_id)
     execute("DELETE FROM fixed_shifts WHERE id=?", (fid,))
     return jsonify({"ok": True})
 
