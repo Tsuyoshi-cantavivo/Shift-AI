@@ -870,3 +870,214 @@ def _staff_rule_based_reply(message, ctx):
         return ("確定シフトの変更・休みは、マイシフトタブでシフトバーをタップして「変更申請」から行えます。\n"
                 "店長の承認後に反映されます。")
     return f"{name}さん、シフトについて知りたいことを教えてください。例: 「次のシフトは？」「来月5万円稼ぐには？」"
+
+
+# ---------- 機能5: 希望テキストの取り込み（日付ベース） ----------
+# parse_shift_request() とは別物。あちらは「月8万円稼ぎたい」から必要日数を
+# 逆算する収入目標ベースで、特定日付を表現できない。こちらは「8/3は休み」の
+# ような日付ごとの希望を抽出する。
+
+_WISH_REST_WORDS = ("休", "不可", "NG", "ng", "無理", "×", "ムリ")
+_WISH_ANY_WORDS = ("終日", "いつでも", "フル", "どこでも")
+_WISH_MORNING_WORDS = ("早番", "午前", "朝")
+_WISH_EVENING_WORDS = ("遅番", "午後", "夕方", "夜")
+
+# 「8/10〜8/12」「8月10日〜8月12日」「8/10〜12」等の日付範囲
+_WISH_DATE_RANGE_RE = re.compile(
+    r"(\d{1,2})\s*[/月]\s*(\d{1,2})\s*日?"
+    r"\s*(?:〜|～|~|-|ー|―|—|–|から)\s*"
+    r"(?:(\d{1,2})\s*[/月]\s*)?(\d{1,2})\s*日?"
+)
+# 単独の日付トークン（列挙・単独の両方をこれ1つで拾う）: 「8/3」「8月3日」「08/03」
+_WISH_DATE_TOKEN_RE = re.compile(r"(\d{1,2})\s*[/月]\s*(\d{1,2})\s*日?")
+
+_WISH_STAFF_BRACKET_RE = re.compile(r"^\s*【([^】]{1,12})】")
+_WISH_STAFF_COLON_RE = re.compile(r"^\s*([^\s:：【】]{1,12})\s*[:：]")
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_iso_date(s):
+    """'YYYY-MM-DD' 形式かつ暦上有効な日付かを判定する。"""
+    if not isinstance(s, str) or not _ISO_DATE_RE.match(s):
+        return False
+    try:
+        from datetime import date
+        y, mo, d = s.split("-")
+        date(int(y), int(mo), int(d))
+        return True
+    except ValueError:
+        return False
+
+
+def _mk_wish_date(year, month, day):
+    """(year, month, day) から 'YYYY-MM-DD' を返す。暦上不正なら None。"""
+    from datetime import date
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
+def _extract_dates(line, year_month):
+    """行から日付を抽出して ["YYYY-MM-DD", ...] を返す。取れなければ []。
+
+    範囲（8/3〜8/5）→ 列挙・単独（8/3、8/5 / 8/3）の順に試す。
+    年は year_month（"2026-08"）から補う。月をまたぐ表記（9/1）は
+    year_month の年をそのまま使う。
+    """
+    year = int(year_month[:4])
+
+    m = _WISH_DATE_RANGE_RE.search(line)
+    if m:
+        sm, sd, em, ed = m.groups()
+        start_month = int(sm)
+        end_month = int(em) if em else start_month
+        start = _mk_wish_date(year, start_month, int(sd))
+        end = _mk_wish_date(year, end_month, int(ed))
+        if start and end:
+            from datetime import date as _date, timedelta
+            d0, d1 = _date.fromisoformat(start), _date.fromisoformat(end)
+            if d0 <= d1 and (d1 - d0).days <= 62:
+                dates = []
+                cur = d0
+                while cur <= d1:
+                    dates.append(cur.isoformat())
+                    cur += timedelta(days=1)
+                return dates
+
+    dates = []
+    seen = set()
+    for mo, d in _WISH_DATE_TOKEN_RE.findall(line):
+        iso = _mk_wish_date(year, int(mo), int(d))
+        if iso and iso not in seen:
+            seen.add(iso)
+            dates.append(iso)
+    return dates
+
+
+def _extract_wish_availability(line):
+    """行から (availability, start, end) を判定する。どれにも該当しなければ
+    (None, None, None)。判定順は 休み → 時刻指定 → 終日 → 早番 → 遅番。
+    """
+    if any(w in line for w in _WISH_REST_WORDS):
+        return "rest", None, None
+    time_range = _parse_explicit_time_range(line)
+    if time_range:
+        start, end = time_range
+        return "time", start, end
+    if any(w in line for w in _WISH_ANY_WORDS):
+        return "any", None, None
+    if any(w in line for w in _WISH_MORNING_WORDS):
+        return "morning", None, None
+    if any(w in line for w in _WISH_EVENING_WORDS):
+        return "evening", None, None
+    return None, None, None
+
+
+def _extract_staff_hint(line, staff_names=None):
+    """行頭の『名前:』『名前：』『【名前】』、または staff_names に含まれる
+    名前が行内にあれば拾う。無ければ None。
+    """
+    m = _WISH_STAFF_BRACKET_RE.match(line)
+    if m:
+        return m.group(1).strip()
+    m = _WISH_STAFF_COLON_RE.match(line)
+    if m:
+        return m.group(1).strip()
+    for name in (staff_names or []):
+        if name and name in line:
+            return name
+    return None
+
+
+def _parse_wish_fallback(text, year_month, staff_names=None):
+    """LLM を使わない正規表現ベースの解析。LLM 未設定・失敗時の受け皿。
+
+    行ごとに解析し、日付が1つも取れない行・希望内容が判定できない行は
+    unparsed に入れる（捨てない）。同じ (availability, start, end, staff_hint)
+    の行は dates をまとめる。
+    """
+    entries_by_key = {}
+    entry_order = []
+    unparsed = []
+
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        dates = _extract_dates(line, year_month)
+        if not dates:
+            unparsed.append(line)
+            continue
+
+        availability, start, end = _extract_wish_availability(line)
+        if availability is None:
+            unparsed.append(line)
+            continue
+
+        staff_hint = _extract_staff_hint(line, staff_names)
+        key = (availability, start, end, staff_hint)
+        if key not in entries_by_key:
+            entries_by_key[key] = {
+                "staff_hint": staff_hint, "dates": [], "availability": availability,
+                "start": start, "end": end, "raw": line,
+            }
+            entry_order.append(key)
+        else:
+            entries_by_key[key]["raw"] += "\n" + line
+
+        for d in dates:
+            if d not in entries_by_key[key]["dates"]:
+                entries_by_key[key]["dates"].append(d)
+
+    entries = []
+    for key in entry_order:
+        e = entries_by_key[key]
+        e["dates"].sort()
+        entries.append(e)
+
+    return {"entries": entries, "unparsed": unparsed, "source": "fallback"}
+
+
+def parse_wish_text(text, year_month, staff_names=None):
+    """テキストから日付ごとの希望を抽出する。LLM が使えなければフォールバックする。"""
+    if not is_llm_available():
+        return _parse_wish_fallback(text, year_month, staff_names)
+    names_hint = "、".join(staff_names or []) or "（不明）"
+    system_prompt = (
+        "あなたはシフト希望の解析アシスタントです。入力テキストから次のJSONを厳密に出力してください（他の文章不可）。"
+        'スキーマ: {"entries":[{"staff_hint":"名前またはnull","dates":["YYYY-MM-DD"],'
+        '"availability":"rest"|"any"|"morning"|"evening"|"time","start":"HH:MM"|null,'
+        '"end":"HH:MM"|null,"raw":"根拠となった元の文"}],"unparsed":["読み取れなかった文"]}。'
+        "availability の意味: rest=休み希望, any=いつでも可, morning=早番, evening=遅番, time=時間指定。"
+        "同じ内容の日は dates にまとめ、内容が違えば entries を分けること。"
+        "raw には必ずその判断の根拠になった入力文をそのまま入れること。"
+        "日付が読み取れない文、挨拶や雑談は unparsed に入れ、推測で日付を作らないこと。"
+    )
+    user_prompt = (
+        f'入力テキスト:\n"""\n{text}\n"""\n'
+        f"対象月: {year_month}（日付はこの月として解釈。月をまたぐ記述があればその月で）\n"
+        f"この店舗のスタッフ名: {names_hint}\n"
+        "上記スキーマのJSONのみを出力してください。"
+    )
+    result = call_llm(system_prompt, user_prompt, temperature=0.1)
+    if result:
+        try:
+            parsed = json.loads(re.sub(r"```json|```", "", result).strip())
+            entries = parsed.get("entries") or []
+            # LLM の取りこぼし・逸脱を補正する
+            for e in entries:
+                e.setdefault("staff_hint", None)
+                e.setdefault("start", None)
+                e.setdefault("end", None)
+                e.setdefault("raw", "")
+                if e.get("availability") not in ("rest", "any", "morning", "evening", "time"):
+                    e["availability"] = "any"
+                e["dates"] = [d for d in (e.get("dates") or []) if _is_iso_date(d)]
+            entries = [e for e in entries if e["dates"]]
+            return {"entries": entries, "unparsed": parsed.get("unparsed") or [], "source": "llm"}
+        except Exception:
+            pass
+    return _parse_wish_fallback(text, year_month, staff_names)
