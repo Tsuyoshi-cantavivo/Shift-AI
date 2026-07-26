@@ -8,7 +8,7 @@
  * 4. 休希望/柔軟希望/時間指定が視覚的に区別できること
  */
 const { test, expect } = require('@playwright/test');
-const { ensureShop, loginAsManager, attachConsoleCollector } = require('./helpers');
+const { ensureShop, loginAsManager, loginAsStaffApi, attachConsoleCollector } = require('./helpers');
 
 const RUN_ID = Date.now().toString(36);
 const SHOP = {
@@ -49,33 +49,41 @@ test.describe('希望表管理（カードUI）', () => {
     const shopToken = (await loginRes.json()).token;
     const shopHdr = { Authorization: `Bearer ${shopToken}` };
     // スタッフ作成
-    const staff1 = await request.post('/api/shop/staffs', {
+    await request.post('/api/shop/staffs', {
       data: { staff_code: 'EMP1', name: '山田一郎', password: 'Emp1234a', role: 'employee' },
       headers: shopHdr,
     });
-    const staff2 = await request.post('/api/shop/staffs', {
+    await request.post('/api/shop/staffs', {
       data: { staff_code: 'PT1', name: '佐藤花子', password: 'Pt1234ab', role: 'part_time' },
       headers: shopHdr,
     });
-    const sid1 = (await staff1.json()).id;
-    const sid2 = (await staff2.json()).id;
     // 募集期間を作る
     await request.post('/api/shop/periods', {
       data: { start_date: '2026-08-01', end_date: '2026-08-31', deadline: '2099-12-31' },
       headers: shopHdr,
     });
-    // 希望を出す（スタッフ1: 時間指定, スタッフ2: 休希望 + 柔軟）
-    await request.post('/api/shop/shifts', {
-      data: { staff_id: sid1, start_datetime: '2026-08-03T09:00:00', end_datetime: '2026-08-03T18:00:00', status: 'requested', reason: 'スタッフ希望' },
-      headers: shopHdr,
+    // 希望はスタッフ本人が /api/staff/requests で提出する（wish_history に永久保存される
+    // 唯一の経路）。希望表管理画面は wish_history を参照するため、管理者が
+    // /api/shop/shifts に直接 POST しても希望表には反映されない。
+    // スタッフ1（EMP1）: 時間指定の希望
+    const token1 = await loginAsStaffApi(request, {
+      shopCode: SHOP.shopCode, staffCode: 'EMP1', password: 'Emp1234a',
     });
-    await request.post('/api/shop/shifts', {
-      data: { staff_id: sid2, start_datetime: '2026-08-04T00:00:00', end_datetime: '2026-08-04T23:59:59', status: 'requested', availability: 'rest', reason: '休希望' },
-      headers: shopHdr,
+    await request.post('/api/staff/requests', {
+      data: { shifts: [{ start_datetime: '2026-08-03T09:00:00', end_datetime: '2026-08-03T18:00:00' }] },
+      headers: { Authorization: `Bearer ${token1}` },
     });
-    await request.post('/api/shop/shifts', {
-      data: { staff_id: sid2, start_datetime: '2026-08-05T09:00:00', end_datetime: '2026-08-05T22:00:00', status: 'requested', availability: 'any' },
-      headers: shopHdr,
+    // スタッフ2（PT1）: 休希望 + 柔軟希望
+    const token2 = await loginAsStaffApi(request, {
+      shopCode: SHOP.shopCode, staffCode: 'PT1', password: 'Pt1234ab',
+    });
+    await request.post('/api/staff/requests', {
+      data: { shifts: [{ start_datetime: '2026-08-04T00:00:00', end_datetime: '2026-08-04T23:59:59', availability: 'rest' }] },
+      headers: { Authorization: `Bearer ${token2}` },
+    });
+    await request.post('/api/staff/requests', {
+      data: { shifts: [{ start_datetime: '2026-08-05T09:00:00', end_datetime: '2026-08-05T22:00:00', availability: 'any' }] },
+      headers: { Authorization: `Bearer ${token2}` },
     });
 
     // ログインして希望表管理を開く

@@ -33,9 +33,12 @@ test.describe('タイムライン & 印刷画面の時間表示', () => {
       data: { staff_code: 'EMP2', name: '佐藤花子', password: 'Emp1234a', role: 'employee', max_hours_per_month: 200 },
       headers: shopHdr,
     });
-    // 04:00-02:00 パターン
+    // 翌日をまたぐ夜間パターン（20:00-05:00, 9h）。
+    // 旧仕様では 04:00-02:00（22h）だったが、労基法32条コンプライアンス強化
+    // （_validate_pattern_hours, 15h超のパターン登録拒否）により無効化されたため、
+    // 翌日またぎの時間表示テストという目的を保ったまま合法な時間幅に変更。
     await request.post('/api/shop/patterns', {
-      data: { pattern_name: '通', start_time: '04:00', end_time: '02:00', required_staff: 2 },
+      data: { pattern_name: '夜', start_time: '20:00', end_time: '05:00', required_staff: 2 },
       headers: shopHdr,
     });
     // AIドラフト保存（08-10）

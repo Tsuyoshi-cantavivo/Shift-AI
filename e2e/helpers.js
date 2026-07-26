@@ -79,6 +79,22 @@ async function loginAsManager(page, { shopCode, managerCode, password }) {
 }
 
 /**
+ * API経由でスタッフ（employee/part_time）としてログインし、トークンを返す。
+ *
+ * 希望シフトは /api/staff/requests（スタッフ本人）または /api/shop/my-requests
+ * （店長自身）でのみ wish_history に永久保存される。/api/shop/shifts への直接
+ * POST は「店長が実際にシフトとして配置する」操作であり、スタッフの希望提出とは
+ * 別物なので、希望表管理（希望表）のテストデータ作成には使わないこと。
+ */
+async function loginAsStaffApi(request, { shopCode, staffCode, password }) {
+  const res = await request.post('/api/login', {
+    data: { shop_code: shopCode, user_code: staffCode, password },
+  });
+  const body = await res.json();
+  return body.token;
+}
+
+/**
  * コンソールエラーを収集。
  * ページ遷移毎にリセットされるため、各テストで attach する。
  */
@@ -103,5 +119,6 @@ module.exports = {
   ensureShop,
   loginAsAdmin,
   loginAsManager,
+  loginAsStaffApi,
   attachConsoleCollector,
 };

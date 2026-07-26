@@ -6,7 +6,7 @@
  *   確定するまで消えないこと。
  */
 const { test, expect } = require('@playwright/test');
-const { ensureShop, loginAsManager, attachConsoleCollector } = require('./helpers');
+const { ensureShop, loginAsManager, loginAsStaffApi, attachConsoleCollector } = require('./helpers');
 
 const RUN_ID = Date.now().toString(36);
 const SHOP = {
@@ -23,6 +23,9 @@ test.describe('ドラフト保存 ⇔ 希望表保持', () => {
   });
 
   test('AIドラフト保存後も希望表管理画面にカードが残る', async ({ page, request }) => {
+    // スタッフ本人ログイン→希望提出の分だけAPI往復が増えるため、
+    // 並列実行時の負荷でも安定するようタイムアウトに余裕を持たせる。
+    test.setTimeout(60000);
     const errors = attachConsoleCollector(page);
 
     // 準備: スタッフとパターン作成
@@ -30,11 +33,10 @@ test.describe('ドラフト保存 ⇔ 希望表保持', () => {
       data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
     });
     const shopHdr = { Authorization: `Bearer ${(await loginRes.json()).token}` };
-    const empRes = await request.post('/api/shop/staffs', {
+    await request.post('/api/shop/staffs', {
       data: { staff_code: 'EMP1', name: '山田一郎', password: 'Emp1234a', role: 'employee' },
       headers: shopHdr,
     });
-    const sid = (await empRes.json()).id;
     await request.post('/api/shop/patterns', {
       data: { pattern_name: '通', start_time: '09:00', end_time: '18:00', required_staff: 1 },
       headers: shopHdr,
@@ -43,16 +45,16 @@ test.describe('ドラフト保存 ⇔ 希望表保持', () => {
       data: { start_date: '2026-08-01', end_date: '2026-08-31', deadline: '2099-12-31' },
       headers: shopHdr,
     });
-    // スタッフ希望を直接INSERT（API経由）
-    await request.post('/api/shop/shifts', {
-      data: {
-        staff_id: sid,
-        start_datetime: '2026-08-03T09:00:00',
-        end_datetime: '2026-08-03T18:00:00',
-        status: 'requested',
-        reason: 'スタッフ希望提出',
-      },
-      headers: shopHdr,
+    // スタッフ本人として希望を提出（/api/staff/requests）。
+    // これが wish_history に永久保存される唯一の「スタッフ希望」経路であり、
+    // 希望表管理画面（loadReqList）は wish_history を参照する設計のため、
+    // 管理者が /api/shop/shifts に直接 POST しても希望表には出ない。
+    const staffToken = await loginAsStaffApi(request, {
+      shopCode: SHOP.shopCode, staffCode: 'EMP1', password: 'Emp1234a',
+    });
+    await request.post('/api/staff/requests', {
+      data: { shifts: [{ start_datetime: '2026-08-03T09:00:00', end_datetime: '2026-08-03T18:00:00' }] },
+      headers: { Authorization: `Bearer ${staffToken}` },
     });
 
     // ログインして希望表管理を確認（カードがあるはず）
@@ -64,7 +66,7 @@ test.describe('ドラフト保存 ⇔ 希望表保持', () => {
     await page.click('button[data-screen="requests"]');
     await page.waitForSelector('#reqLoadBtn');
     await page.click('#reqLoadBtn');
-    await page.waitForSelector('.req-staff-card', { timeout: 10000 });
+    await page.waitForSelector('.req-staff-card', { timeout: 20000 });
     const cardCountBefore = await page.locator('.req-staff-card').count();
     expect(cardCountBefore).toBeGreaterThanOrEqual(1);
     console.log('AIドラフト保存前のカード数:', cardCountBefore);
@@ -81,7 +83,7 @@ test.describe('ドラフト保存 ⇔ 希望表保持', () => {
 
     // 再度希望表管理を読み込み → カードが残っていることを確認
     await page.click('#reqLoadBtn');
-    await page.waitForSelector('.req-staff-card', { timeout: 10000 });
+    await page.waitForSelector('.req-staff-card', { timeout: 20000 });
     const cardCountAfter = await page.locator('.req-staff-card').count();
     console.log('AIドラフト保存後のカード数:', cardCountAfter);
     expect(cardCountAfter).toBe(cardCountBefore);
@@ -103,7 +105,7 @@ test.describe('ドラフト保存 ⇔ 希望表保持', () => {
     await page.click('button[data-screen="requests"]');
     await page.waitForSelector('#reqLoadBtn');
     await page.click('#reqLoadBtn');
-    await page.waitForSelector('.req-staff-card', { timeout: 10000 });
+    await page.waitForSelector('.req-staff-card', { timeout: 20000 });
     const beforeCount = await page.locator('.req-staff-card').count();
     expect(beforeCount).toBeGreaterThanOrEqual(1);
 
