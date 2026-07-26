@@ -8,6 +8,7 @@ LLM 経路は本番でのみ動き、失敗時は自動でフォールバック�
 import pytest
 from src import ai
 
+import app as appmod
 import db as dbmod
 from helpers import insert_shop, insert_staff, make_session, auth
 
@@ -409,3 +410,89 @@ class TestWishBulkApi:
         r = client.post("/api/shop/wishes/bulk", json={"wishes": wishes}, headers=auth(token))
 
         assert r.status_code == 403
+
+    def test_rejects_unknown_availability(self, client):
+        """rest/any/morning/evening/time 以外の availability はスキップされること。
+
+        既知語彙以外を any/morning/evening 扱いにフォールバックさせると、
+        希望表管理画面の .wmark が未知トークンで表示崩れを起こすため。
+        """
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        wishes = [{"staff_id": staff_id, "date": "2026-08-03", "availability": "typo",
+                   "start": None, "end": None, "raw": "不明な値"}]
+        r = client.post("/api/shop/wishes/bulk", json={"wishes": wishes}, headers=auth(token))
+
+        assert r.status_code == 200, r.get_json()
+        body = r.get_json()
+        assert body["created"] == 0
+        assert body["skipped"] == 1
+        assert self._shifts_requested_count(shop_id) == 0
+        assert self._wish_history_count(shop_id) == 0
+
+    def test_wish_history_duplicate_without_shift_overlap_stays_in_sync(self, client):
+        """wish_history に既存行があるが shifts には重なりが無い状況でも、
+        created が実際にDBへ入った件数と一致すること（両テーブル非対称の回帰）。
+
+        _check_staff_overlap（shifts側・重なり判定）と wish_history の完全一致
+        判定は基準が異なる。shifts に何も無ければ overlap は False になるため、
+        wish_history 側だけを見ずに INSERT すると、shifts にだけ新規行ができて
+        wish_history には入らない（=非対称）まま created が加算されてしまう。
+        """
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+        # wish_history にだけ既存の rest 希望を直接投入する（shifts 側は空のまま）。
+        # _wish_times("2026-08-03", "rest", ...) が返す値と完全一致させる。
+        dbmod.execute(
+            "INSERT INTO wish_history (shop_id, staff_id, start_datetime, end_datetime, availability, note) "
+            "VALUES (?,?,?,?,?,?)",
+            (shop_id, staff_id, "2026-08-03T00:00:00", "2026-08-03T23:59:59", "rest", "手動投入"))
+        assert self._shifts_requested_count(shop_id) == 0
+        assert self._wish_history_count(shop_id) == 1
+
+        wishes = [{"staff_id": staff_id, "date": "2026-08-03", "availability": "rest",
+                   "start": None, "end": None, "raw": "8/3は休み"}]
+        r = client.post("/api/shop/wishes/bulk", json={"wishes": wishes}, headers=auth(token))
+
+        assert r.status_code == 200, r.get_json()
+        body = r.get_json()
+        assert body["created"] == 0
+        assert body["skipped"] == 1
+        # shifts に孤立した新規行ができていないこと（＝wish_historyに入らないのに shiftsだけ増える、を防ぐ）
+        assert self._shifts_requested_count(shop_id) == 0
+        # wish_history も重複INSERTされていないこと
+        assert self._wish_history_count(shop_id) == 1
+
+    def test_wish_history_insert_failure_rolls_back_shift(self, client, monkeypatch):
+        """wish_history への INSERT が本物のDBエラーで失敗したら、直前に作った
+        shifts 行を取り消し、created ではなく skipped に計上すること。
+
+        「登録できていないのに登録した」と表示する事故を防ぐための回帰。
+        """
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        real_execute = appmod.execute
+
+        def fake_execute(sql, params=()):
+            if sql.strip().startswith("INSERT INTO wish_history"):
+                raise RuntimeError("simulated wish_history insert failure")
+            return real_execute(sql, params)
+
+        monkeypatch.setattr(appmod, "execute", fake_execute)
+
+        wishes = [{"staff_id": staff_id, "date": "2026-08-03", "availability": "rest",
+                   "start": None, "end": None, "raw": "8/3は休み"}]
+        r = client.post("/api/shop/wishes/bulk", json={"wishes": wishes}, headers=auth(token))
+
+        assert r.status_code == 200, r.get_json()
+        body = r.get_json()
+        assert body["created"] == 0
+        assert body["skipped"] == 1
+        # shifts 行がロールバックされ、孤立レコードが残っていないこと
+        assert self._shifts_requested_count(shop_id) == 0
+        assert self._wish_history_count(shop_id) == 0

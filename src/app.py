@@ -3501,6 +3501,30 @@ def _wish_times(date, availability, start, end, shop_end):
     return f"{date}T09:00:00", f"{date}T{shop_end}:00"
 
 
+# 希望表管理画面の .wmark が理解する語彙のみを許可する（設計書 §3）。
+# ここに無い値（タイプミス等）は any/morning/evening 扱いにフォールバックさせず、
+# 明示的にスキップする（未知トークンによる画面表示崩れを防ぐ）。
+_WISH_AVAILABILITY_VALUES = ("rest", "any", "morning", "evening", "time")
+
+
+def _wish_history_exists(staff_id, start_dt, end_dt):
+    """wish_history に同一 (staff_id, start_datetime, end_datetime) の行が既存か。
+
+    wish_history はスキーマ初期化時に必ず作成される（schema.sql）。
+    「no such table」以外の DB エラーはここで握りつぶさず呼び出し元に伝える。
+    黙って握りつぶすと「実際には確認できていないのに既存なしとして登録を進めた」
+    という事故につながるため。
+    """
+    try:
+        return query_one(
+            "SELECT id FROM wish_history WHERE staff_id=? AND start_datetime=? AND end_datetime=?",
+            (staff_id, start_dt, end_dt)) is not None
+    except Exception as e:
+        if "no such table" in str(e).lower():
+            return False
+        raise
+
+
 @app.post("/api/shop/wishes/bulk")
 def shop_wishes_bulk():
     """プレビューで確定した希望を一括登録する。
@@ -3508,6 +3532,8 @@ def shop_wishes_bulk():
     既存の希望提出（/api/staff/requests）と同じく shifts(status='requested') と
     wish_history の両方に書く。片方だけでは機能しない
     （前者はAI生成の入力、後者は希望表管理画面が読む永久履歴）。
+    `created` は「両テーブルに実際に書けた」件数だけを数える
+    （どちらか一方にしか書けない状態を作らない）。
 
     店長の代理入力なので、スタッフ提出時の募集期間・締切の検証は行わない
     （締切はスタッフに対する期限であり店長を縛らない。募集期間が未設定の
@@ -3525,7 +3551,7 @@ def shop_wishes_bulk():
         staff_id = w.get("staff_id")
         date = w.get("date")
         avail = w.get("availability")
-        if not staff_id or not date or not avail:
+        if not staff_id or not date or avail not in _WISH_AVAILABILITY_VALUES:
             skipped += 1
             continue
         if avail == "time" and (not w.get("start") or not w.get("end")):
@@ -3542,8 +3568,14 @@ def shop_wishes_bulk():
             execute("DELETE FROM wish_history WHERE staff_id=? AND start_datetime LIKE ?", (staff_id, date + "%"))
             execute("DELETE FROM shifts WHERE staff_id=? AND status='requested' AND start_datetime LIKE ?", (staff_id, date + "%"))
         else:
+            # ★ shifts と wish_history はスキップ判定の基準が違う
+            #   （shifts=時間帯の重なり判定 / wish_history=完全一致判定）。
+            # どちらか一方だけを見て INSERT すると「重ならないので shifts には新規
+            # 行ができるが、wish_history は完全一致の既存行があるため書けない」という
+            # 非対称が起き、created が実態と乖離する。両方をここでまとめて判定し、
+            # どちらかに該当すれば INSERT 自体を行わない。
             overlap, _conflict = _check_staff_overlap(shop_id, staff_id, start_dt, end_dt, include_requested=True)
-            if overlap:
+            if overlap or _wish_history_exists(staff_id, start_dt, end_dt):
                 skipped += 1
                 continue
         note = "店長が取り込み"
@@ -3552,26 +3584,28 @@ def shop_wishes_bulk():
             note += f": {raw[:200]}"
         if avail == "time":
             work = minutes_between(start_dt, end_dt)
-            execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason) VALUES (?,?,?,?,?,?,?)",
-                    (shop_id, staff_id, start_dt, end_dt, compute_break_minutes(work), "requested", note))
+            shift_meta = execute(
+                "INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason) VALUES (?,?,?,?,?,?,?)",
+                (shop_id, staff_id, start_dt, end_dt, compute_break_minutes(work), "requested", note))
         else:
-            execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, status, reason, availability) VALUES (?,?,?,?,?,?,?)",
-                    (shop_id, staff_id, start_dt, end_dt, "requested", note, avail))
-        # ★ wish_history にも永久保存（AI再生成の入力 + 希望表管理画面の参照元）
-        # 同じ (staff_id, start, end) が既存ならスキップ（二重登録防止。/api/staff/requests と同じ作法）
-        existing = None
+            shift_meta = execute(
+                "INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, status, reason, availability) VALUES (?,?,?,?,?,?,?)",
+                (shop_id, staff_id, start_dt, end_dt, "requested", note, avail))
+        # ★ wish_history にも永久保存（AI再生成の入力 + 希望表管理画面の参照元）。
+        # ここで失敗すると shifts 側だけ書けた状態（片方だけ入る）になってしまうため、
+        # 直前に作った shifts 行を取り消し、created ではなく skipped として扱う。
+        # 例外は握りつぶさず print で残す（「登録できていないのに登録した」と
+        # 表示する事故を防ぐため、原因は追えるようにする）。
         try:
-            existing = query_one(
-                "SELECT id FROM wish_history WHERE staff_id=? AND start_datetime=? AND end_datetime=?",
-                (staff_id, start_dt, end_dt))
-        except Exception:
-            pass  # テーブル未作成時は無害（ensure_db で自動作成される）
-        if existing is None:
-            try:
-                execute("INSERT INTO wish_history (shop_id, staff_id, start_datetime, end_datetime, availability, note) VALUES (?,?,?,?,?,?)",
-                        (shop_id, staff_id, start_dt, end_dt, avail, note))
-            except Exception:
-                pass  # wish_history 未作成時は無害
+            execute(
+                "INSERT INTO wish_history (shop_id, staff_id, start_datetime, end_datetime, availability, note) VALUES (?,?,?,?,?,?)",
+                (shop_id, staff_id, start_dt, end_dt, avail, note))
+        except Exception as e:
+            execute("DELETE FROM shifts WHERE id=?", (shift_meta["last_row_id"],))
+            print(f"[wishes/bulk] wish_history INSERT失敗のため shifts行を取消 "
+                  f"staff_id={staff_id} date={date}: {e}", flush=True)
+            skipped += 1
+            continue
         created += 1
     msg = f"{created}件の希望を登録しました"
     if skipped:
