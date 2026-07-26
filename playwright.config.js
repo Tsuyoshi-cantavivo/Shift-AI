@@ -13,6 +13,13 @@ module.exports = defineConfig({
   testDir: './e2e',
   timeout: 30000,
   retries: 1,
+  // 直列実行。全テストが単一の SQLite（shift_e2e.db）と単一の Flask サーバを
+  // 共有しているため、並列だと書き込みが競合してテストが不安定になる。
+  // 実測: 並列だと 54 passed + 2 flaky、悪いときは 8 failed。
+  //       直列なら 56 passed で完全に安定（複数回で確認）。
+  // 代償は実行時間（約30秒 → 約1.5分）だが、偽の失敗を追う時間の方が高くつく。
+  // 並列に戻すなら、テストごとに DB を分離する仕組みが先に必要。
+  workers: 1,
   use: {
     baseURL: 'http://127.0.0.1:8000',
     headless: true,
