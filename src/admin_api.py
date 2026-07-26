@@ -794,3 +794,64 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         audit("admin.password_change", target_type="system_admin", target_id=admin_id)
         return jsonify({"ok": True})
 
+    def _current_admin_id():
+        """require_auth(["admin"]) 済みの前提で、自分の system_admins.id を返す。"""
+        return (getattr(g, "user", None) or {}).get("id")
+
+    @app.get("/api/admin/admins")
+    def admin_list_admins():
+        """システム管理者アカウントの一覧（パスワードハッシュは含めない）。"""
+        require_auth(["admin"])
+        rows = query_all("SELECT id, admin_id, name, created_at FROM system_admins ORDER BY id")
+        return jsonify({"admins": rows})
+
+    @app.post("/api/admin/admins")
+    def admin_create_admin():
+        """2人目以降の運営者を追加する。
+
+        【なぜ必要か】
+          system_admins は /api/init で1行作られるのみで、これまで運営者を
+          増やす手段が無かった（1人の運営者が退職・異動すると引き継げない）。
+        """
+        require_auth(["admin"])
+        body = request.get_json(silent=True) or {}
+        new_id = (body.get("admin_id") or "").strip()
+        name = (body.get("name") or "").strip() or "システム管理者"
+        pw = body.get("password") or ""
+        if not new_id:
+            raise ValueError("管理者IDを入力してください")
+        if new_id == "admin" and query_one("SELECT id FROM system_admins WHERE admin_id='admin'"):
+            raise ValueError("その管理者IDは既に使われています")
+        if query_one("SELECT id FROM system_admins WHERE admin_id=?", (new_id,)):
+            raise ValueError("その管理者IDは既に使われています")
+        msg = validate_password(pw)
+        if msg:
+            raise ValueError(msg)
+        meta = execute("INSERT INTO system_admins (admin_id, password_hash, name) VALUES (?,?,?)",
+                       (new_id, hash_password(pw), name))
+        audit("admin.create", target_type="system_admin", target_id=meta["last_row_id"],
+              detail=f"admin_id={new_id}")
+        return jsonify({"ok": True, "id": meta["last_row_id"]})
+
+    @app.delete("/api/admin/admins/<int:aid>")
+    def admin_delete_admin(aid):
+        """運営者を削除する。最後の1人・自分自身は削除できない。"""
+        require_auth(["admin"])
+        me = _current_admin_id()
+        if aid == me:
+            raise ValueError("自分自身は削除できません")
+        target = query_one("SELECT id, admin_id FROM system_admins WHERE id=?", (aid,))
+        if target is None:
+            abort(404, description="管理者が見つかりません")
+        total = query_one("SELECT COUNT(*) AS c FROM system_admins")["c"]
+        if total <= 1:
+            raise ValueError("最後の管理者は削除できません")
+        # 削除対象のセッションを全て失効させる（削除後もトークンが生きたままだと
+        # require_auth が system_admins を引けず 401 になるはずが、削除前に
+        # 発行された古いキャッシュ等で誤用されるリスクを避けるため明示的に消す）。
+        execute("DELETE FROM sessions WHERE role='admin' AND user_id=?", (aid,))
+        execute("DELETE FROM system_admins WHERE id=?", (aid,))
+        audit("admin.delete", target_type="system_admin", target_id=aid,
+              detail=f"admin_id={target['admin_id']}")
+        return jsonify({"ok": True})
+

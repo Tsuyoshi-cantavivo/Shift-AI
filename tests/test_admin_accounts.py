@@ -91,3 +91,67 @@ class TestAdminPasswordChange:
         # 入力されたパスワードが記録されていないこと
         joined = f"{row['actor_name']} {row['detail']}"
         assert "NewPass456" not in joined and "Admin123" not in joined
+
+
+class TestAdminAccounts:
+    def test_list_admins(self, client):
+        insert_admin("admin", "Admin123")
+        t = _token(client)
+        r = client.get("/api/admin/admins", headers=_hdr(t))
+        assert r.status_code == 200
+        admins = r.get_json()["admins"]
+        assert len(admins) == 1
+        assert admins[0]["admin_id"] == "admin"
+        assert "password_hash" not in admins[0], "パスワードハッシュが漏れている"
+
+    def test_create_admin(self, client):
+        insert_admin("admin", "Admin123")
+        t = _token(client)
+        r = client.post("/api/admin/admins", headers=_hdr(t),
+                        json={"admin_id": "ops2", "name": "運営2", "password": "OpsPass123"})
+        assert r.status_code == 200
+        # 作った管理者でログインできる
+        assert client.post("/api/login", json={"user_code": "ops2",
+                                               "password": "OpsPass123"}).status_code == 200
+
+    def test_duplicate_admin_id_is_rejected(self, client):
+        insert_admin("admin", "Admin123")
+        t = _token(client)
+        r = client.post("/api/admin/admins", headers=_hdr(t),
+                        json={"admin_id": "admin", "name": "重複", "password": "OpsPass123"})
+        assert r.status_code == 400
+
+    def test_delete_admin(self, client):
+        insert_admin("admin", "Admin123")
+        other = insert_admin("ops2", "OpsPass123", name="運営2")
+        t = _token(client)
+        r = client.delete(f"/api/admin/admins/{other}", headers=_hdr(t))
+        assert r.status_code == 200
+        assert dbmod.query_one("SELECT id FROM system_admins WHERE id=?", (other,)) is None
+
+    def test_cannot_delete_self(self, client):
+        insert_admin("admin", "Admin123")
+        insert_admin("ops2", "OpsPass123", name="運営2")
+        t = _token(client)
+        me = dbmod.query_one("SELECT id FROM system_admins WHERE admin_id='admin'")["id"]
+        r = client.delete(f"/api/admin/admins/{me}", headers=_hdr(t))
+        assert r.status_code == 400
+
+    def test_cannot_delete_last_admin(self, client):
+        insert_admin("admin", "Admin123")
+        other = insert_admin("ops2", "OpsPass123", name="運営2")
+        t = _token(client, "ops2", "OpsPass123")
+        me = dbmod.query_one("SELECT id FROM system_admins WHERE admin_id='admin'")["id"]
+        r = client.delete(f"/api/admin/admins/{me}", headers=_hdr(t))
+        assert r.status_code == 200
+        # 残り1人になったので、自分も消せない
+        r = client.delete(f"/api/admin/admins/{other}", headers=_hdr(t))
+        assert r.status_code == 400
+
+    def test_deleting_admin_revokes_their_sessions(self, client):
+        insert_admin("admin", "Admin123")
+        other = insert_admin("ops2", "OpsPass123", name="運営2")
+        other_token = _token(client, "ops2", "OpsPass123")
+        t = _token(client)
+        assert client.delete(f"/api/admin/admins/{other}", headers=_hdr(t)).status_code == 200
+        assert client.get("/api/me", headers=_hdr(other_token)).status_code == 401

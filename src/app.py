@@ -778,6 +778,9 @@ def login():
     【仕様】
       - システム管理者: ユーザーコード に "admin" を指定（店舗コードは任意）。
         ※ admin_id が "admin" 以外の場合は、店舗コード側に admin_id を入れてもOK。
+        ※ 店舗コードを空にした場合、ユーザーコードに admin_id を直接指定してもよい
+          （Phase 2 で複数管理者に対応。system_admins に一致する行がある場合のみ
+          管理者ログインとして扱う）。
       - 店舗管理者: staffs.role='manager' のスタッフ → role='shop' セッション。
       - 一般スタッフ: staffs.role='employee'/'part_time' → role='staff' セッション。
       - 後方互換: user_code == shop_code の場合、shops テーブルでの旧店主ログイン可。
@@ -828,6 +831,27 @@ def login():
         audit("auth.login_failed", actor_role="anonymous",
               actor_name=admin_id_guess, detail="管理者ログイン失敗")
         raise ValueError("管理者IDまたはパスワードが正しくありません")
+
+    # ---- システム管理者（店舗コード無し・ユーザーコードに admin_id を直接指定）----
+    # 【なぜ必要か】
+    #   上の分岐は「どちらかの欄に "admin" という語」を要求するため、admin_id が
+    #   "admin" 以外の2人目以降の管理者（Phase 2 で追加可能になった）はそのままでは
+    #   ログインできない。店舗コードを空にしたままユーザーコードだけで system_admins
+    #   を引けた場合に限り管理者ログインとして扱う（店舗・スタッフは必ず shop_code
+    #   を要するため、ここで衝突する余地は無い）。
+    if not shop_code and user_code:
+        admin = query_one("SELECT * FROM system_admins WHERE admin_id=?", (user_code,))
+        if admin:
+            if verify_password(pw, admin["password_hash"]):
+                _clear_login_failures(attempt_key)
+                audit("auth.login", target_type="system_admin", target_id=admin["id"],
+                      actor_role="admin", actor_id=admin["id"], actor_name=admin.get("name"),
+                      detail=f"admin_id={admin['admin_id']}")
+                return jsonify(_create_session("admin", admin["id"], None, admin))
+            _record_login_failure(attempt_key)
+            audit("auth.login_failed", actor_role="anonymous",
+                  actor_name=user_code, detail="管理者ログイン失敗")
+            raise ValueError("管理者IDまたはパスワードが正しくありません")
 
     # 入力不備は認証の試行ではないので失敗としては数えない
     if not shop_code or not user_code:
