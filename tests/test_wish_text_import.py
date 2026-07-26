@@ -109,15 +109,54 @@ class TestParseWishFallback:
         assert r["entries"][0]["availability"] == "rest"
 
     def test_made_kara_split_across_comma_is_not_falsely_unparsed(self):
-        """fix round 2: 「8/3までは休み、8/9からは出れます」の前半が
+        """fix round 2/3: 「8/3までは休み、8/9からは出れます」の前半が
         『まで』により日番号3を時刻と誤読され、小節分割後も unparsed に
-        落ちていた回帰。前半は正しく rest/8-3 の1エントリになること。
+        落ちていた回帰（round 2）。前半は正しく rest/8-3 の1エントリになること。
+
+        後半「8/9からは出れます」は休み語を含まないため round 2 の安全網
+        (_wish_has_conflicting_signals) を通らない。round 3 修正前はここで
+        日番号9が『9時から』と誤読され、availability="time", start="09:00"
+        として安全網に掛からずそのまま黙って登録されてしまっていた
+        （元テストはこのエントリのフィールドを assert していなかったため、
+        この誤りを見逃していた）。round 3 修正後は availability を判定できず
+        unparsed に送られ、誤った時刻が黙って確定しないことを検証する。
         """
         r = ai._parse_wish_fallback("8/3までは休み、8/9からは出れます", "2026-08")
-        assert r["unparsed"] == []
-        assert len(r["entries"]) == 2
-        rest_entry = next(e for e in r["entries"] if e["availability"] == "rest")
+        assert len(r["entries"]) == 1
+        rest_entry = r["entries"][0]
         assert rest_entry["dates"] == ["2026-08-03"]
+        assert rest_entry["availability"] == "rest"
+        assert rest_entry["start"] is None
+        assert rest_entry["end"] is None
+        # round 3 の核心: 「8/9からは出れます」が time/09:00 として黙って登録されていないこと
+        assert not any(e["availability"] == "time" and e["start"] == "09:00" for e in r["entries"])
+        assert "8/9からは出れます" in r["unparsed"]
+
+    def test_date_before_kara_without_rest_word_is_not_read_as_hour(self):
+        """fix round 3: 休み語を伴わない「8/9からは出れます」でも、日番号9が
+        『9時から』と誤読されて availability=time/start=09:00 が黙って
+        登録されないこと。休み語が無いため round 2 の安全網
+        (_wish_has_conflicting_signals) には掛からず、_extract_wish_availability
+        自身が時刻判定の前に日付トークンを除去する必要があった。
+        """
+        availability, start, end = ai._extract_wish_availability("8/9からは出れます")
+        assert not (availability == "time" and start == "09:00")
+
+        r = ai._parse_wish_fallback("8/9からは出れます", "2026-08")
+        assert not any(e["availability"] == "time" and e["start"] == "09:00" for e in r["entries"])
+
+    def test_time_after_date_with_space_separator_is_still_time(self):
+        """fix round 3のガード: 日付トークン除去が本物の時刻表現まで
+        握りつぶさないこと。「8/5 5時から」は日付の『8/5』だけが除去され、
+        本当の時刻表現である『5時から』は正しく time/05:00 として残ること。
+        """
+        r = ai._parse_wish_fallback("8/5 5時から", "2026-08")
+        assert len(r["entries"]) == 1
+        e = r["entries"][0]
+        assert e["dates"] == ["2026-08-05"]
+        assert e["availability"] == "time"
+        assert e["start"] == "05:00"
+        assert e["end"] is None
 
     def test_single_segment_conflicting_signals_still_goes_to_unparsed(self):
         """(b) 最終防衛線の単一小節（カンマ分割を経由しない）経路の専用テスト。

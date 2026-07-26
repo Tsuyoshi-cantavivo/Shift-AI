@@ -971,10 +971,19 @@ def _extract_dates(line, year_month):
 def _extract_wish_availability(line):
     """行から (availability, start, end) を判定する。どれにも該当しなければ
     (None, None, None)。判定順は 休み → 時刻指定 → 終日 → 早番 → 遅番。
+
+    時刻の有無は、日付トークン（8/5 等）を取り除いた文字列に対して判定する。
+    `_parse_explicit_time_range` の「N時から/以降/まで/迄」系パターンは1〜2桁の
+    数字が区切り語に直接続けばマッチするため、除去せずに判定すると
+    「8/9からは出れます」の日番号9が『9時から』と誤読され、休み語を含まない
+    ため round 2 の `_wish_has_conflicting_signals` の安全網にも掛からず、
+    誤った availability="time" を黙って確定してしまう（fix round 3）。
+    この関数は機能5（希望テキスト取り込み）専用で他機能から呼ばれないため
+    直接修正できる。共有関数の `_parse_explicit_time_range` 自体は変更しない。
     """
     if any(w in line for w in _WISH_REST_WORDS):
         return "rest", None, None
-    time_range = _parse_explicit_time_range(line)
+    time_range = _parse_explicit_time_range(_WISH_DATE_TOKEN_RE.sub("", line))
     if time_range:
         start, end = time_range
         return "time", start, end
