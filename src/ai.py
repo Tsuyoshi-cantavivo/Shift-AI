@@ -909,6 +909,18 @@ _WISH_SEGMENT_SPLIT_RE = re.compile(r"[、,;；]")
 # （入れると「8/9からは出れます」が『日付だけの小節』と誤認される）。
 _WISH_FILLER_RE = re.compile(r"[はもとのがをにへや\s　・/／,，.。．、;；:：\-ー―—–〜～~]+")
 
+# 日付に添える曜日表記（「8/3(月)」「8/3（月）」「8/3月」）。
+# 曜日は availability の情報を一切持たない純粋な装飾であり、日本語のシフト
+# 希望では標準的な書き方。日付トークンを取り除いた「あと」に適用すること
+# （先に適用すると「8月3日」の『月』『日』を壊す）。
+_WISH_WEEKDAY_RE = re.compile(r"[（(]?[月火水木金土日祝][）)]?")
+
+# 日付範囲を閉じる「まで」（「8/3から8/5まで」）。範囲にくっついた場合だけ
+# 取り除く。単独の「8/10まで」は範囲ではなく期限を表す意味のある語なので
+# `_WISH_FILLER_RE` には入れず、引き続き unparsed に落とす。
+_WISH_DATE_RANGE_WITH_CLOSER_RE = re.compile(
+    _WISH_DATE_RANGE_RE.pattern + r"\s*(?:まで)?")
+
 
 def _normalize_wish_text(s):
     """全角数字・全角スラッシュを半角に正規化する。"""
@@ -1041,11 +1053,14 @@ def _wish_has_conflicting_signals(segment):
 def _wish_segment_is_dates_only(segment):
     """小節が『日付だけ』かを判定する（fix round 4）。
 
-    日付範囲・日付トークンを取り除き、さらに助詞・記号・空白といった意味を
-    持たない残骸（`_WISH_FILLER_RE`）を取り除いて、残りが空なら True。
+    日付範囲・日付トークン・曜日表記を取り除き、さらに助詞・記号・空白といった
+    意味を持たない残骸（`_WISH_FILLER_RE`）を取り除いて、残りが空なら True。
 
-    「8/3」「8/3は」「8/10〜8/12」「8/10から8/12」は True。
+    「8/3」「8/3は」「8/3(月)」「8/3月」「8/10〜8/12」「8/10から8/12」
+    「8/3から8/5まで」は True。
     「8/9からは出れます」「8/9出勤希望」は『出れます』『出勤希望』が残るため False。
+    単独の「8/10から」「8/10まで」「8/10以降」も、期限や起点という意味のある
+    情報を持つため False（後続の条件に引き継がず unparsed に落とす）。
 
     この区別が無いと、日付＋未認識テキストの小節が後続の小節の availability に
     黙って吸収され、書かれていない内容（極性が反転した rest、述べられていない
@@ -1057,8 +1072,10 @@ def _wish_segment_is_dates_only(segment):
     # 「小久保: 8/3、8/5は17-22」の先頭小節が日付だけと見なされなくなる。
     residue = _WISH_STAFF_BRACKET_RE.sub("", segment, count=1)
     residue = _WISH_STAFF_COLON_RE.sub("", residue, count=1)
-    residue = _WISH_DATE_RANGE_RE.sub("", residue)
+    residue = _WISH_DATE_RANGE_WITH_CLOSER_RE.sub("", residue)
     residue = _WISH_DATE_TOKEN_RE.sub("", residue)
+    # 曜日は日付トークンを消した「あと」に剥がす（先に消すと「8月3日」が壊れる）
+    residue = _WISH_WEEKDAY_RE.sub("", residue)
     return _WISH_FILLER_RE.sub("", residue) == ""
 
 
@@ -1129,7 +1146,13 @@ def _parse_wish_line(line, year_month):
             _flush_pending_as_unparsed()
             unparsed_fragments.append(seg)
         else:
-            # 日付も希望内容も読み取れない小節（雑談・接続語等）
+            # 日付も希望内容も読み取れない小節（雑談・接続語等）。
+            # fix round 5: ここでも pending_dates をフラッシュする。
+            # 「8/3、出れます、8/12は休み」の『出れます』は日付を持たないだけで、
+            # 「8/9からは出れます」と同じく未認識の希望表明でありうる。
+            # 素通りさせると 8/3 が後続の rest に吸収され、出勤可能の意で書かれた
+            # 日が休みとして黙って確定する（elif seg_dates 側と同一クラスの極性反転）。
+            _flush_pending_as_unparsed()
             unparsed_fragments.append(seg)
 
     if pending_dates:

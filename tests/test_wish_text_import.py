@@ -241,9 +241,9 @@ class TestParseWishFallback:
         assert e["end"] == "22:00"
 
     def test_segment_is_dates_only_classification(self):
-        """fix round 4 の判定基準そのものを直接検証する。
+        """fix round 4/5 の判定基準そのものを直接検証する。
 
-        日付範囲・日付トークン・助詞・記号を取り除いて実質空なら『日付だけ』。
+        日付範囲・日付トークン・曜日・助詞・記号を取り除いて実質空なら『日付だけ』。
         『から』『まで』『出れます』のような意味を持つ語は残骸として扱わない。
         """
         assert ai._wish_segment_is_dates_only("8/3") is True
@@ -251,9 +251,138 @@ class TestParseWishFallback:
         assert ai._wish_segment_is_dates_only("8月3日") is True
         assert ai._wish_segment_is_dates_only("8/10〜8/12") is True
         assert ai._wish_segment_is_dates_only("8/10から8/12") is True  # 範囲の区切りの『から』
+        assert ai._wish_segment_is_dates_only("8/3から8/5まで") is True  # 範囲を閉じる『まで』
+        assert ai._wish_segment_is_dates_only("8/3(月)") is True  # 曜日は純粋な装飾
+        assert ai._wish_segment_is_dates_only("8/3（月）") is True
+        assert ai._wish_segment_is_dates_only("8/3月") is True
         assert ai._wish_segment_is_dates_only("8/9からは出れます") is False
         assert ai._wish_segment_is_dates_only("8/9出勤希望") is False
         assert ai._wish_segment_is_dates_only("8/9は無理かも") is False
+        # 曜日除去を足しても、極性反転の保護が緩んでいないこと
+        assert ai._wish_segment_is_dates_only("8/3のみ") is False
+        assert ai._wish_segment_is_dates_only("8/3は一日") is False
+        # 単独の起点・期限は意味を持つ情報なので引き継がない（『まで』を
+        # 残骸リストに入れず範囲の閉じとしてのみ扱っている理由）
+        assert ai._wish_segment_is_dates_only("8/10から") is False
+        assert ai._wish_segment_is_dates_only("8/10まで") is False
+        assert ai._wish_segment_is_dates_only("8/10以降") is False
+        # 時刻を曜日・スタッフ名の除去が巻き込んでいないこと
+        assert ai._wish_segment_is_dates_only("8/3 17:00-22:00") is False
+        assert ai._wish_segment_is_dates_only("8:00-17:00") is False
+
+    def test_weekday_decorated_dates_still_carry_over(self):
+        """fix round 5 (a): 日付に添えた曜日は availability の情報を持たない
+        純粋な装飾であり、『日付だけの小節』の判定を妨げないこと。
+
+        round 4 の残骸判定に曜日が入っていなかったため、日本語のシフト希望では
+        標準表記である「8/3(月)、8/5(水)は休み」の先頭小節が unparsed に落ち、
+        引き継ぎ機能がほぼ死んでいた回帰。半角カッコ・全角カッコ・カッコなしの
+        3形式すべてを検証する。
+        """
+        for text in ("8/3(月)、8/5(水)は休み", "8/3（月）、8/5（水）は休み", "8/3月、8/5水は休み"):
+            r = ai._parse_wish_fallback(text, "2026-08")
+            assert r["unparsed"] == [], text
+            assert len(r["entries"]) == 1, text
+            assert r["entries"][0]["dates"] == ["2026-08-03", "2026-08-05"], text
+            assert r["entries"][0]["availability"] == "rest", text
+
+    def test_weekday_decorated_dates_with_time_condition(self):
+        """fix round 5 (a): 曜日つきの列挙＋末尾の時刻条件も1エントリ3日付になること。"""
+        r = ai._parse_wish_fallback("8/3(月)、8/5(水)、8/7(金) 17-22", "2026-08")
+        assert r["unparsed"] == []
+        assert len(r["entries"]) == 1
+        e = r["entries"][0]
+        assert e["dates"] == ["2026-08-03", "2026-08-05", "2026-08-07"]
+        assert e["availability"] == "time"
+        assert e["start"] == "17:00"
+        assert e["end"] == "22:00"
+
+    def test_date_range_closed_by_made_still_carries_over(self):
+        """fix round 5 (a): 範囲を閉じる『まで』（「8/3から8/5まで」）は残骸として
+        剥がすこと。単独の「8/10まで」は期限という意味を持つ情報なので剥がさない
+        （後続の条件に引き継がず unparsed に落とす）ことも併せて確認する。
+        """
+        r = ai._parse_wish_fallback("8/3から8/5まで、17-22", "2026-08")
+        assert r["unparsed"] == []
+        assert len(r["entries"]) == 1
+        assert r["entries"][0]["dates"] == ["2026-08-03", "2026-08-04", "2026-08-05"]
+        assert r["entries"][0]["availability"] == "time"
+
+        r2 = ai._parse_wish_fallback("8/10まで、8/12は休み", "2026-08")
+        assert not any("2026-08-10" in e["dates"] for e in r2["entries"])
+        assert "8/10まで" in r2["unparsed"]
+
+    def test_dateless_unknown_segment_does_not_absorb_pending_dates(self):
+        """fix round 5 (b): 日付を持たない未認識小節でも pending_dates を
+        フラッシュすること。
+
+        「8/3、出れます、8/12は休み」の『出れます』は日付を伴わないだけで、
+        「8/9からは出れます」と同じ未認識の希望表明でありうる。round 4 では
+        この経路（`else` 分岐）が pending_dates を素通りさせていたため、
+        出勤可能の意で書かれた 8/3 が後続の rest に吸収され、真逆の休み希望として
+        黙って確定していた（`unparsed` には『出れます』しか残らない）。
+        """
+        r = ai._parse_wish_fallback("8/3、出れます、8/12は休み", "2026-08")
+        assert not any("2026-08-03" in e["dates"] for e in r["entries"])
+        assert "8/3" in r["unparsed"]
+        assert "出れます" in r["unparsed"]
+        assert len(r["entries"]) == 1
+        assert r["entries"][0]["dates"] == ["2026-08-12"]
+        assert r["entries"][0]["availability"] == "rest"
+
+    def test_dateless_unknown_segment_flushes_multiple_pending_dates(self):
+        """fix round 5 (b): 溜まっている pending_dates が複数でもまとめて
+        unparsed に送ること（部分的に吸収されないこと）。
+        """
+        r = ai._parse_wish_fallback("8/3、8/5、出れます、8/12は休み", "2026-08")
+        assert len(r["entries"]) == 1
+        assert r["entries"][0]["dates"] == ["2026-08-12"]
+        assert not any(d in r["entries"][0]["dates"] for d in ("2026-08-03", "2026-08-05"))
+        assert "8/3 / 8/5" in r["unparsed"]
+        assert "出れます" in r["unparsed"]
+
+    def test_intentionally_unparsed_expressions(self):
+        """★意図的に unparsed に落としている表現の一覧★（fix round 4/5）
+
+        ここに並ぶ表現は「解析できるのにサボっている」のではなく、
+        **誤った availability を黙って登録しないために意図的に人へ渡している**もの。
+        いずれも『日付は取れるが、日付以外に意味を持つ語が残る小節』であり、
+        その語が後続の条件と同じ希望を表しているという保証がない。
+
+        判定を緩めれば取り込み率は上がるが、緩めるほど「8/9からは出れます」型
+        （＝極性が反転した silent 誤登録）を再び通してしまう。取り込み率と
+        安全性のトレードオフを、ここで現在の線引きとして固定する。
+
+        この挙動を変える（＝どれかを救う）場合は、
+        test_ambiguous_segment_before_rest_does_not_flip_polarity と
+        test_segment_is_dates_only_classification が守っている保護が
+        緩んでいないことを必ず確認すること。
+        """
+        cases = [
+            # (入力, 意図的に落とす小節, 落とす理由)
+            ("8/3のみ、17-22", "8/3のみ", "『のみ』が限定の意味を持つ"),
+            ("8/3です、8/5は休み", "8/3です", "『です』は助詞ではないため残骸に含めていない"),
+            ("8/3の分は、8/5は休み", "8/3の分は", "『分』が意味を持つ語として残る"),
+            ("8/3は一日、8/5は休み", "8/3は一日", "『一日』が終日希望なのか単なる言い回しか判別できない"),
+            ("8/10から、8/12は休み", "8/10から", "起点（8/10以降ずっと）の意味を持ち、後続の条件と同一とは限らない"),
+            ("8/10以降、8/12は休み", "8/10以降", "同上"),
+            ("小久保 8/3、8/5は休み", "小久保 8/3", "コロン無しの名前は在籍名簿なしに残骸と判別できない"),
+        ]
+        for text, dropped, _reason in cases:
+            r = ai._parse_wish_fallback(text, "2026-08", ["小久保"])
+            assert dropped in r["unparsed"], f"{text}: {dropped} が unparsed に無い"
+
+    def test_intentionally_unparsed_expressions_do_not_lose_the_rest(self):
+        """★意図的に落としている表現があっても、同じ行の他の条件は救うこと★
+
+        『安全側に倒す』は「行ごと捨てる」ではない。落ちるのは曖昧な小節だけで、
+        明示された条件（8/5は休み）は必ずエントリとして残る。
+        """
+        for text in ("8/3です、8/5は休み", "8/3の分は、8/5は休み", "8/3は一日、8/5は休み"):
+            r = ai._parse_wish_fallback(text, "2026-08")
+            assert len(r["entries"]) == 1, text
+            assert r["entries"][0]["dates"] == ["2026-08-05"], text
+            assert r["entries"][0]["availability"] == "rest", text
 
     def test_staff_prefix_before_date_only_segment_still_carries_over(self):
         """fix round 4 のガード: 行頭の『名前:』『【名前】』は希望内容ではなく
