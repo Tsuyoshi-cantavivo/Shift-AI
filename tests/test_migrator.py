@@ -47,6 +47,28 @@ class TestSplitStatements:
     def test_ignores_empty_statements(self):
         assert migrator.split_statements(";;\n\n;") == []
 
+    def test_double_dash_inside_string_is_not_a_comment(self):
+        """文字列リテラル内の `--` は行コメントとして読み飛ばさないこと。
+
+        コメント除去を別パスで行うと、リテラルの内外を区別できず
+        `'a--b'` の `--b'` 以降を消してクォート閉じ忘れの壊れた文になる。
+        """
+        sql = "INSERT INTO t (v) VALUES ('a--b');"
+        assert migrator.split_statements(sql) == [
+            "INSERT INTO t (v) VALUES ('a--b')",
+        ]
+
+    def test_block_comment_markers_inside_string_are_not_stripped(self):
+        """文字列リテラル内の `/* */` はブロックコメントとして除去しないこと。
+
+        これを誤って除去すると、例外も出さずに値が静かに欠落する
+        （'a/*b*/c' が 'ac' になる等）。
+        """
+        sql = "INSERT INTO t (v) VALUES ('a/*b*/c');"
+        assert migrator.split_statements(sql) == [
+            "INSERT INTO t (v) VALUES ('a/*b*/c')",
+        ]
+
 
 class TestStatus:
     def test_legacy_files_are_backfilled_as_applied(self):
@@ -96,6 +118,36 @@ class TestApplyPending:
         assert result["failed"] is None, f"スキップされず失敗している: {result['failed']}"
         assert len(result["skipped"]) == 1
         dbmod.execute("DROP TABLE IF EXISTS mig_col")
+
+    def test_skips_add_column_without_column_keyword(self, tmp_path, monkeypatch):
+        """`COLUMN` キーワード省略でも検出できること（SQLiteでは有効な構文）。
+
+        検出漏れがあると「列が既に存在する状態で再実行→duplicate columnで停止」
+        という実害になる。
+        """
+        monkeypatch.setattr(migrator, "MIGRATIONS_DIR", str(tmp_path))
+        monkeypatch.setattr(migrator, "LEGACY_FILES", ())
+        dbmod.execute("CREATE TABLE IF NOT EXISTS mig_col2 (id INTEGER, already TEXT)")
+        (tmp_path / "0009_test.sql").write_text(
+            "ALTER TABLE mig_col2 ADD already TEXT;\n", encoding="utf-8")
+
+        result = migrator.apply_pending()
+        assert result["failed"] is None, f"スキップされず失敗している: {result['failed']}"
+        assert len(result["skipped"]) == 1
+        dbmod.execute("DROP TABLE IF EXISTS mig_col2")
+
+    def test_skips_add_column_with_quoted_identifiers(self, tmp_path, monkeypatch):
+        """ダブルクォートで囲まれたテーブル名・列名でも検出できること。"""
+        monkeypatch.setattr(migrator, "MIGRATIONS_DIR", str(tmp_path))
+        monkeypatch.setattr(migrator, "LEGACY_FILES", ())
+        dbmod.execute("CREATE TABLE IF NOT EXISTS mig_col3 (id INTEGER, already TEXT)")
+        (tmp_path / "0009_test.sql").write_text(
+            'ALTER TABLE "mig_col3" ADD COLUMN "already" TEXT;\n', encoding="utf-8")
+
+        result = migrator.apply_pending()
+        assert result["failed"] is None, f"スキップされず失敗している: {result['failed']}"
+        assert len(result["skipped"]) == 1
+        dbmod.execute("DROP TABLE IF EXISTS mig_col3")
 
     def test_partial_failure_records_only_successes(self, tmp_path, monkeypatch):
         """途中で失敗したとき、成功した分だけが記録され、失敗箇所が返ること。"""

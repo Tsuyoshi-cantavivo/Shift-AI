@@ -28,8 +28,21 @@ LEGACY_FILES = (
     "0004_fix_student_role_check.sql",
 )
 
-_ADD_COLUMN_RE = re.compile(r"^\s*ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+COLUMN\s+([A-Za-z_][A-Za-z0-9_]*)",
-                            re.IGNORECASE)
+# 識別子: 素の裸の単語（bareword）、または "..." / `...` / [...] で囲まれたクォート識別子。
+# COLUMN キーワードは省略可能（`ALTER TABLE t ADD col TEXT` はSQLiteで有効な構文）。
+_IDENT_RE = r'(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*)'
+_ADD_COLUMN_RE = re.compile(
+    rf"^\s*ALTER\s+TABLE\s+({_IDENT_RE})\s+ADD\s+(?:COLUMN\s+)?({_IDENT_RE})",
+    re.IGNORECASE)
+
+
+def _strip_ident_quotes(name):
+    """識別子を囲む `"..."` / `` `...` `` / `[...]` を剥がす。"""
+    if len(name) >= 2 and name[0] == name[-1] and name[0] in ('"', '`'):
+        return name[1:-1]
+    if len(name) >= 2 and name[0] == "[" and name[-1] == "]":
+        return name[1:-1]
+    return name
 
 
 def _ensure_table():
@@ -39,44 +52,56 @@ def _ensure_table():
             "PRIMARY KEY (filename, stmt_index))")
 
 
-def _strip_comments(sql):
-    """-- 行コメントと /* */ ブロックコメントを除去する。"""
-    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.S)
-    out = []
-    for line in sql.split("\n"):
-        idx = line.find("--")
-        out.append(line[:idx] if idx >= 0 else line)
-    return "\n".join(out)
-
-
 def split_statements(sql):
     """SQL をステートメントに分割する。
 
     素朴な `split(";")` だと文字列リテラル内のセミコロンで誤分割するため、
     シングルクォートの内外を追跡する。'' はエスケープされたクォートとして扱う。
+
+    コメント除去（-- 行コメント / /* */ ブロックコメント）も同じ走査の中で行う。
+    以前は別パスで正規表現による除去を先に行っていたが、それだと文字列リテラルの
+    内外を区別できず、`'a--b'` のようなリテラル内の `--` まで消してクォート閉じ忘れの
+    壊れた文になったり、`'a/*b*/c'` が例外も出さず静かに `'ac'` になったりする
+    （レビュー指摘）。文字列の外にいるときだけコメントとして読み飛ばすことで、
+    1パスで正しく処理する。
     """
-    sql = _strip_comments(sql)
+    n = len(sql)
     out, buf, in_str, i = [], [], False, 0
-    while i < len(sql):
+    while i < n:
         ch = sql[i]
         if in_str:
             buf.append(ch)
             if ch == "'":
-                if i + 1 < len(sql) and sql[i + 1] == "'":
+                if i + 1 < n and sql[i + 1] == "'":
                     buf.append("'")
                     i += 2
                     continue
                 in_str = False
-        elif ch == "'":
+            i += 1
+            continue
+        if ch == "'":
             in_str = True
             buf.append(ch)
-        elif ch == ";":
+            i += 1
+            continue
+        if ch == "-" and i + 1 < n and sql[i + 1] == "-":
+            # 行コメント: 改行の直前まで読み飛ばす（改行自体は通常どおり処理させる）
+            j = sql.find("\n", i)
+            i = n if j == -1 else j
+            continue
+        if ch == "/" and i + 1 < n and sql[i + 1] == "*":
+            # ブロックコメント: 閉じタグの直後まで読み飛ばす
+            j = sql.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        if ch == ";":
             stmt = "".join(buf).strip()
             if stmt:
                 out.append(stmt)
             buf = []
-        else:
-            buf.append(ch)
+            i += 1
+            continue
+        buf.append(ch)
         i += 1
     stmt = "".join(buf).strip()
     if stmt:
@@ -142,7 +167,9 @@ def _should_skip(sql):
     m = _ADD_COLUMN_RE.match(sql)
     if not m:
         return False
-    return _column_exists(m.group(1), m.group(2))
+    table = _strip_ident_quotes(m.group(1))
+    column = _strip_ident_quotes(m.group(2))
+    return _column_exists(table, column)
 
 
 def apply_pending():
