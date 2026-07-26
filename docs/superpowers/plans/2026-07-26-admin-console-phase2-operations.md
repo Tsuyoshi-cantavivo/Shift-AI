@@ -434,11 +434,14 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 
 -- 2. ログイン試行のレート制限（Phase 1 で ensure_db が作るが、記録として残す）
+-- blocked_logged は「ロック期間中の 429 を監査ログに1回だけ記録する」ためのフラグ。
+-- Phase 1 で後から追加したため、既存DBには ensure_db の ALTER で追従させている。
 CREATE TABLE IF NOT EXISTS login_attempts (
-  attempt_key  TEXT PRIMARY KEY,
-  fail_count   INTEGER NOT NULL DEFAULT 0,
-  locked_until TEXT,
-  updated_at   TEXT
+  attempt_key    TEXT PRIMARY KEY,
+  fail_count     INTEGER NOT NULL DEFAULT 0,
+  locked_until   TEXT,
+  updated_at     TEXT,
+  blocked_logged INTEGER NOT NULL DEFAULT 0
 );
 
 -- 3. 代理閲覧: admin セッションが一時的に見ている店舗
