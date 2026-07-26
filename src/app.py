@@ -90,6 +90,23 @@ def handle_exc(e):
     return jsonify({"error": "サーバーエラー: " + str(e)}), 500
 
 
+@app.before_request
+def _init_auth_context():
+    """認証コンテキストの既定値を全リクエストで用意する。
+
+    【なぜ require_auth 側の代入だけでは足りないか】
+      require_auth 末尾の代入に到達するのは「認証に成功した」リクエストだけで、
+        - require_auth を通らない経路（/api/login, /api/logout, /api/health, 静的配信）
+        - require_auth が abort する経路（401 / 403 / 409）
+      では g.impersonating が未定義のまま残る。audit() は login() / logout() から
+      require_auth を経ずに呼ばれ、しかも例外を握り潰して print するだけなので、
+      audit() が g.impersonating を直接読むと監査ログが例外なしで欠落する。
+      ここで既定値を立てておけば「常に定義済み」が本当に成り立つ。
+    """
+    g.impersonating = False
+    g.session = None
+
+
 # ===========================================================
 # 認証ヘルパ
 # ===========================================================
@@ -209,6 +226,9 @@ def require_auth(allowed):
     session = query_one("SELECT * FROM sessions WHERE token=?", (token,))
     if not session:
         abort(401, description="セッションが無効です")
+    # 呼び出し側が同じ行を引き直さずに済むよう保持する（本番の D1 は1文ごとに
+    # HTTP 往復するため、/api/me や代理閲覧APIでの再取得が実測できる遅延になる）。
+    g.session = session
     if session.get("expires_at"):
         # NOTE: かつて bare except Exception: pass で HTTPException を握り潰し、
         # 期限切れトークンが有効扱いになる脆弱性があった。ValueError のみ捕捉する。
@@ -228,7 +248,9 @@ def require_auth(allowed):
     # ため。書き込みは許さない（運営者が顧客の確定シフトを壊す事故を構造的に防ぐ）。
     acting = session.get("acting_shop_id")
     if role == "admin" and acting and "shop" in allowed and "admin" not in allowed:
-        if request.method != "GET":
+        # HEAD も RFC 上のセーフメソッドで、Flask は GET ビューにルーティングする。
+        # ここで弾くと代理中だけ HEAD が 403 になり GET と挙動がズレる。
+        if request.method not in ("GET", "HEAD"):
             abort(403, description="代理閲覧中はデータを変更できません")
         # 店舗が引けないときに 403/401 ではなく 409 にするのは、
         # 「代理先が消えた」ことを運営者に伝えるため。ここでフォールバックすると
@@ -268,8 +290,8 @@ def require_auth(allowed):
     g.role = role
     g.user = strip_password(user)
     g.shop_id = session.get("shop_id")
-    # 通常経路は代理閲覧ではない。audit() などが getattr(g, "impersonating", False)
-    # ではなく素直に g.impersonating を見られるよう、両経路で必ず立てておく。
+    # 通常経路は代理閲覧ではない。既定値は _init_auth_context() が全リクエストで
+    # 立てているので、ここは「代理経路で True にした後の取り消し」ではなく明示の再確認。
     g.impersonating = False
     return role, g.user, session.get("shop_id")
 
@@ -934,10 +956,8 @@ def me():
     result = {"role": role, "user": user}
     if role == "admin":
         # 代理閲覧中かどうかをフロントに伝える（警告バーとナビ切替に使う）。
-        # require_auth は session 行を返さないのでトークンから直接引く。
-        token = request.headers.get("Authorization", "")[7:]
-        row = query_one("SELECT acting_shop_id FROM sessions WHERE token=?", (token,))
-        acting = (row or {}).get("acting_shop_id")
+        # require_auth が読んだ sessions 行を g.session で使い回し、再取得しない。
+        acting = (getattr(g, "session", None) or {}).get("acting_shop_id")
         shop = query_one("SELECT id, shop_name FROM shops WHERE id=?", (acting,)) if acting else None
         result["impersonating"] = ({"shop_id": shop["id"], "shop_name": shop["shop_name"]}
                                    if shop else None)

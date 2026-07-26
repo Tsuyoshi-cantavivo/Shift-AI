@@ -754,22 +754,41 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
     @app.post("/api/admin/impersonate/<int:shop_id>")
     def admin_impersonate_start(shop_id):
         require_auth(["admin"])
-        shop = query_one("SELECT id, shop_code, shop_name FROM shops WHERE id=?", (shop_id,))
+        shop = query_one("SELECT id, shop_code, shop_name, is_active FROM shops WHERE id=?",
+                         (shop_id,))
         if shop is None:
             abort(404, description="店舗が見つかりません")
-        token = request.headers.get("Authorization", "")[7:]
+        # require_auth が読んだ sessions 行を使い回す（本番D1は1文ごとにHTTP往復する）。
+        # UPDATE を token で絞るのは必須。role='admin' で絞ると他の運営者のセッションまで
+        # 巻き込み、押していない管理者が勝手に代理状態になる。
+        sess = getattr(g, "session", None) or {}
+        token = sess.get("token")
+        prev = sess.get("acting_shop_id")
+        # 解除せずに別店舗へ乗り換えると impersonate_start が2行並び、1店舗目を
+        # いつ抜けたのかがログから追えない。先に旧店舗の end を記録してから切り替える。
+        if prev and prev != shop_id:
+            audit("admin.impersonate_end", target_type="shop", target_id=prev, shop_id=prev,
+                  detail="別店舗の代理閲覧開始に伴い終了")
         execute("UPDATE sessions SET acting_shop_id=? WHERE token=?", (shop_id, token))
+        # 停止中(is_active=0)の店舗にも入れる。停止は「新規ログインの遮断」であって
+        # 既存セッションの遮断ではなく、require_auth の通常 shop 経路も is_active を
+        # 見ていないため一貫している。サポート用途では停止中こそ中を見たい。
+        # ただし運営者が承知の上で入ったことがログから読めるよう detail に明記する。
+        suffix = "" if shop.get("is_active") else "（停止中）"
         audit("admin.impersonate_start", target_type="shop", target_id=shop_id, shop_id=shop_id,
-              detail=f"{shop['shop_code']} の代理閲覧を開始（閲覧のみ）")
-        return jsonify({"ok": True, "shop": shop})
+              detail=f"{shop['shop_code']} の代理閲覧を開始（閲覧のみ）{suffix}")
+        return jsonify({"ok": True, "shop": {"id": shop["id"], "shop_code": shop["shop_code"],
+                                             "shop_name": shop["shop_name"]}})
 
 
     @app.delete("/api/admin/impersonate")
     def admin_impersonate_stop():
         require_auth(["admin"])
-        token = request.headers.get("Authorization", "")[7:]
-        row = query_one("SELECT acting_shop_id FROM sessions WHERE token=?", (token,))
-        acting = (row or {}).get("acting_shop_id")
+        # 開始と同じく token で絞る。role='admin' で絞ると他の運営者の代理まで
+        # 解除してしまい、サポート中の別担当者が突然店舗データを見失う。
+        sess = getattr(g, "session", None) or {}
+        token = sess.get("token")
+        acting = sess.get("acting_shop_id")
         execute("UPDATE sessions SET acting_shop_id=NULL WHERE token=?", (token,))
         # 代理していなかった場合は監査ログを汚さない（解除は何度押しても安全）
         if acting:

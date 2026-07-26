@@ -3,8 +3,11 @@
 管理者はサポート時に顧客の画面を見る必要があるが、書き込みは許さない。
 運営者が顧客の確定シフトを壊す事故を構造的に防ぐため、GET のみ許可する。
 """
+from flask import g, request_finished
+
+import app as appmod
 import db as dbmod
-from helpers import insert_admin, insert_shop, insert_staff
+from helpers import insert_admin, insert_shop, insert_staff, make_session
 
 
 def _admin_token(client):
@@ -12,6 +15,36 @@ def _admin_token(client):
     r = client.post("/api/login", json={"user_code": "admin", "password": "Admin123"})
     assert r.status_code == 200
     return r.get_json()["token"]
+
+
+def _second_admin_token(client, admin_id="admin2"):
+    """別の管理者アカウントでログインする。
+
+    login() の "admin" はマジックワードなので、admin_id が "admin" 以外のときは
+    店舗コード側に "admin" を入れ、ユーザーコード側に admin_id を入れる。
+    """
+    insert_admin(admin_id, "Admin123")
+    r = client.post("/api/login", json={"shop_code": "admin", "user_code": admin_id,
+                                        "password": "Admin123"})
+    assert r.status_code == 200, r.get_json()
+    return r.get_json()["token"]
+
+
+def _capture_impersonating(client, method, path, headers=None):
+    """リクエスト終了時点の g.impersonating を捕捉する。
+
+    g はリクエストコンテキスト内でしか読めないため、request_finished シグナル
+    （finalize_request 内で送出＝コンテキストがまだ生きている）で拾う。
+    未設定なら "UNSET" が入るので「常に定義済み」であることまで検証できる。
+    """
+    seen = []
+
+    def _rec(sender, response, **extra):
+        seen.append(getattr(g, "impersonating", "UNSET"))
+
+    with request_finished.connected_to(_rec, appmod.app):
+        getattr(client, method)(path, headers=headers or {})
+    return seen
 
 
 def _hdr(t):
@@ -126,6 +159,83 @@ class TestImpersonateEnd:
         assert r.status_code == 409
 
 
+class TestImpersonateIsolation:
+    """代理状態が「自分のセッション行」だけに閉じていること。
+
+    UPDATE の WHERE を token=? から role='admin' に緩めると、押していない運営者が
+    勝手に代理状態になったり、逆に他人の代理を解除してしまう。管理者アカウントは
+    複数持てる（Task 5）ので、これは現実的な回帰。
+    """
+
+    def test_other_admin_is_not_impersonated(self, client):
+        sid = _shop_with_staff()
+        ta = _admin_token(client)
+        tb = _second_admin_token(client)
+        assert client.post(f"/api/admin/impersonate/{sid}", headers=_hdr(ta)).status_code == 200
+        assert client.get("/api/shop/staffs", headers=_hdr(ta)).status_code == 200
+        assert client.get("/api/shop/staffs", headers=_hdr(tb)).status_code == 403, \
+            "代理を開始していない別の管理者まで代理状態になっている"
+        assert client.get("/api/me", headers=_hdr(tb)).get_json().get("impersonating") is None
+
+    def test_other_admin_stop_does_not_end_my_impersonation(self, client):
+        sid = _shop_with_staff()
+        ta = _admin_token(client)
+        tb = _second_admin_token(client)
+        client.post(f"/api/admin/impersonate/{sid}", headers=_hdr(ta))
+        assert client.delete("/api/admin/impersonate", headers=_hdr(tb)).status_code == 200
+        assert client.get("/api/shop/staffs", headers=_hdr(ta)).status_code == 200, \
+            "別の管理者の解除操作で自分の代理まで解除されている"
+
+    def test_shop_session_ignores_acting_shop_id(self, client):
+        """shop セッションに acting_shop_id が乗っても別テナントに着地しないこと。
+
+        現状 non-admin に acting_shop_id を立てるコードは無いが、require_auth は
+        全APIの唯一の認可関門で、role == "admin" の条件を落とすと店舗セッションが
+        他店のデータを読める状態になる（多層防御の要）。
+        """
+        sid1 = insert_shop("SHOP1", "pw12345678", name="レイクタウン店")
+        insert_staff(sid1, "p1", "自店スタッフ")
+        mgr = insert_staff(sid1, "mgr", "店長", role="manager", password="pw12345678")
+        sid2 = insert_shop("SHOP2", "pw12345678", name="別テナント店")
+        insert_staff(sid2, "p2", "他店スタッフ")
+
+        t = make_session("shop", mgr, sid1)
+        dbmod.execute("UPDATE sessions SET acting_shop_id=? WHERE token=?", (sid2, t))
+
+        r = client.get("/api/shop/staffs", headers=_hdr(t))
+        assert r.status_code == 200
+        names = [s["name"] for s in r.get_json()["staffs"]]
+        assert "自店スタッフ" in names
+        assert "他店スタッフ" not in names, \
+            "shop セッションの acting_shop_id で別テナントに着地している"
+
+
+class TestImpersonatingFlag:
+    """g.impersonating（brief の Produces で公開したインタフェース）の検証。"""
+
+    def test_true_during_impersonated_get(self, client):
+        sid = _shop_with_staff()
+        t = _admin_token(client)
+        client.post(f"/api/admin/impersonate/{sid}", headers=_hdr(t))
+        assert _capture_impersonating(client, "get", "/api/shop/staffs", _hdr(t)) == [True]
+
+    def test_false_on_normal_auth(self, client):
+        _shop_with_staff()
+        t = _admin_token(client)
+        assert _capture_impersonating(client, "get", "/api/admin/shops", _hdr(t)) == [False]
+
+    def test_false_when_require_auth_is_not_reached(self, client):
+        """require_auth を通らない／abort する経路でも未設定にならないこと。
+
+        audit() は login() / logout() から require_auth を経ずに呼ばれ、しかも
+        例外を握り潰すため、未設定だと監査ログが静かに欠落する。
+        """
+        # require_auth を一度も通らない経路
+        assert _capture_impersonating(client, "get", "/api/health") == [False]
+        # require_auth が 401 で abort する経路
+        assert _capture_impersonating(client, "get", "/api/shop/staffs") == [False]
+
+
 class TestImpersonateAudit:
     def test_start_and_end_are_audited(self, client):
         sid = _shop_with_staff()
@@ -136,3 +246,38 @@ class TestImpersonateAudit:
             "SELECT action FROM audit_logs WHERE action LIKE 'admin.impersonate%'")]
         assert "admin.impersonate_start" in actions
         assert "admin.impersonate_end" in actions
+
+    def test_switching_shops_closes_previous(self, client):
+        """解除せず別店舗へ乗り換えたとき、旧店舗の end が記録されること。"""
+        sid1 = _shop_with_staff()
+        sid2 = insert_shop("SHOP2", "pw12345678", name="越谷店")
+        t = _admin_token(client)
+        client.post(f"/api/admin/impersonate/{sid1}", headers=_hdr(t))
+        client.post(f"/api/admin/impersonate/{sid2}", headers=_hdr(t))
+        rows = dbmod.query_all(
+            "SELECT action, target_id FROM audit_logs "
+            "WHERE action LIKE 'admin.impersonate%' ORDER BY id")
+        assert [(r["action"], r["target_id"]) for r in rows] == [
+            ("admin.impersonate_start", sid1),
+            ("admin.impersonate_end", sid1),
+            ("admin.impersonate_start", sid2),
+        ], "乗り換え時に旧店舗の終了が記録されていない"
+
+    def test_inactive_shop_is_marked_in_audit_detail(self, client):
+        """停止中の店舗に入ったことがログから読めること（入れること自体は許容）。"""
+        sid = _shop_with_staff()
+        dbmod.execute("UPDATE shops SET is_active=0 WHERE id=?", (sid,))
+        t = _admin_token(client)
+        assert client.post(f"/api/admin/impersonate/{sid}", headers=_hdr(t)).status_code == 200
+        row = dbmod.query_one(
+            "SELECT detail FROM audit_logs WHERE action='admin.impersonate_start'")
+        assert "（停止中）" in row["detail"]
+
+
+class TestImpersonateSafeMethods:
+    def test_head_is_allowed(self, client):
+        """HEAD はセーフメソッドなので GET と同じく通ること。"""
+        sid = _shop_with_staff()
+        t = _admin_token(client)
+        client.post(f"/api/admin/impersonate/{sid}", headers=_hdr(t))
+        assert client.head("/api/shop/staffs", headers=_hdr(t)).status_code == 200
