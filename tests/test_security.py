@@ -182,15 +182,43 @@ class TestIDOR:
 # 認証: Brute-force / Mass Assignment
 # ============================================================
 class TestAuthSecurity:
-    def test_login_brute_force_no_lockout(self, client):
-        """[警告] ログイン失敗を何度繰り返してもロックアウト無し（Rate Limit 脆弱性）。"""
+    def test_login_brute_force_locks_out(self, client):
+        """10回失敗した時点でロックされ、正しいパスワードでもログインできないこと。"""
         insert_admin("admin", "Admin123")
-        for _ in range(50):
+        for i in range(10):
+            r = client.post("/api/login", json={"id": "admin", "password": "wrong"})
+            assert r.status_code == 400, f"{i+1}回目が想定外のステータス: {r.status_code}"
+        # 11回目はロックされて 429
+        r = client.post("/api/login", json={"id": "admin", "password": "wrong"})
+        assert r.status_code == 429
+        # 正しいパスワードでもロック中は通らない
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 429, "ロック中に正しいパスワードで通ってしまう"
+
+    def test_login_success_clears_failure_count(self, client):
+        """失敗のあと成功すると、失敗カウントがリセットされること。"""
+        insert_admin("admin", "Admin123")
+        for _ in range(5):
+            client.post("/api/login", json={"id": "admin", "password": "wrong"})
+        r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
+        assert r.status_code == 200
+        # リセットされているので、さらに5回失敗してもロックされない
+        for _ in range(5):
             r = client.post("/api/login", json={"id": "admin", "password": "wrong"})
             assert r.status_code == 400
-        # 50 回失敗後も正しいパスワードで即ログイン可能
         r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
-        assert r.status_code == 200, "Rate Limit 無し — 50 回失敗後も即座に成功可能"
+        assert r.status_code == 200
+
+    def test_login_lock_is_per_account(self, client):
+        """あるアカウントのロックが、別アカウントのログインを妨げないこと。"""
+        insert_admin("admin", "Admin123")
+        shop_id = insert_shop("SHOP1", "pw12345678")
+        insert_staff(shop_id, "mgr", "店長", role="manager", password="pw12345678")
+        for _ in range(11):
+            client.post("/api/login", json={"id": "admin", "password": "wrong"})
+        r = client.post("/api/login", json={"shop_code": "SHOP1", "user_code": "mgr",
+                                            "password": "pw12345678"})
+        assert r.status_code == 200, "別アカウントまで巻き添えでロックされている"
 
     def test_login_timing_attack_resistance(self, client):
         """存在しないIDと存在するIDの応答時間が近いこと（タイミング攻撃耐性）。"""

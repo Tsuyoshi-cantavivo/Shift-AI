@@ -231,3 +231,15 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_shop ON audit_logs(shop_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at);
+
+-- -----------------------------------------------------------
+-- login_attempts: ログイン試行のレート制限
+-- attempt_key は "<remote_addr>|<shop_code>|<user_code>"。
+-- バックグラウンドジョブが無いため、期限切れ行はログイン処理のついでに掃除する。
+-- -----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS login_attempts (
+  attempt_key  TEXT PRIMARY KEY,
+  fail_count   INTEGER NOT NULL DEFAULT 0,
+  locked_until TEXT,
+  updated_at   TEXT
+);

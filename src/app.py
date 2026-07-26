@@ -82,6 +82,79 @@ def handle_exc(e):
 # ===========================================================
 # 認証ヘルパ
 # ===========================================================
+# ログイン試行のレート制限
+_LOGIN_MAX_FAILS = 10        # この回数失敗したらロック
+_LOGIN_WINDOW_MIN = 15       # 失敗カウントを保持する時間（分）
+_LOGIN_LOCK_MIN = 15         # ロックする時間（分）
+
+
+def _login_attempt_key(shop_code, user_code):
+    """レート制限のキー。管理者ログインは user_code を 'admin' に正規化する。
+
+    管理者は「店舗コード欄・ユーザーコード欄のどちらかに admin」で試行できる
+    （login() 参照）ため、正規化しないと同じ管理者アカウントに対して
+    2つの別キーが立ち、許される試行回数が2倍になってしまう。
+    """
+    ip = request.remote_addr or "-"
+    if shop_code == "admin" or user_code == "admin":
+        return f"{ip}|admin"
+    return f"{ip}|{shop_code}|{user_code}"
+
+
+def _check_login_lock(key):
+    """ロック中なら 429 で中断する。期限切れの行はここで掃除する。
+
+    定期実行のバックグラウンドジョブが無い構成のため、行の掃除は
+    「そのキーに触ったログイン処理のついで」に行う。放置すると
+    login_attempts が古い行で膨らみ続ける。
+    """
+    now = jst_now()
+    row = query_one("SELECT fail_count, locked_until, updated_at FROM login_attempts WHERE attempt_key=?",
+                    (key,))
+    if not row:
+        return
+    locked_until = row.get("locked_until")
+    if locked_until:
+        try:
+            lock_dt = datetime.strptime(locked_until, "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            lock_dt = None
+        if lock_dt and now < lock_dt:
+            abort(429, description="ログイン試行が多すぎます。しばらく待ってからお試しください")
+    # ロック期限切れ、または最終試行がウィンドウ外なら行を捨てる
+    updated = row.get("updated_at")
+    stale = True
+    if updated:
+        try:
+            stale = (now - datetime.strptime(updated, "%Y-%m-%d %H:%M:%S")) > timedelta(minutes=_LOGIN_WINDOW_MIN)
+        except (ValueError, TypeError):
+            stale = True
+    if stale or locked_until:
+        execute("DELETE FROM login_attempts WHERE attempt_key=?", (key,))
+
+
+def _record_login_failure(key):
+    """失敗を1回数える。上限に達したらロック時刻を設定する。"""
+    now = jst_now()
+    now_s = now.strftime("%Y-%m-%d %H:%M:%S")
+    row = query_one("SELECT fail_count FROM login_attempts WHERE attempt_key=?", (key,))
+    count = (row["fail_count"] if row else 0) + 1
+    locked_until = None
+    if count >= _LOGIN_MAX_FAILS:
+        locked_until = (now + timedelta(minutes=_LOGIN_LOCK_MIN)).strftime("%Y-%m-%d %H:%M:%S")
+    if row:
+        execute("UPDATE login_attempts SET fail_count=?, locked_until=?, updated_at=? WHERE attempt_key=?",
+                (count, locked_until, now_s, key))
+    else:
+        execute("INSERT INTO login_attempts (attempt_key, fail_count, locked_until, updated_at) VALUES (?,?,?,?)",
+                (key, count, locked_until, now_s))
+
+
+def _clear_login_failures(key):
+    """ログイン成功時に失敗カウントを消す。"""
+    execute("DELETE FROM login_attempts WHERE attempt_key=?", (key,))
+
+
 def require_auth(allowed):
     auth = request.headers.get("Authorization", "")
     token = auth[7:] if auth.startswith("Bearer ") else ""
@@ -643,6 +716,10 @@ def login():
     if not pw:
         raise ValueError("パスワードを入力してください")
 
+    # 認証を試みる前にロック状態を確認する（正しいパスワードでもロック中は通さない）
+    attempt_key = _login_attempt_key(shop_code, user_code)
+    _check_login_lock(attempt_key)
+
     # ---- システム管理者 ("admin" マジックワード) ----
     if user_code == "admin" or shop_code == "admin":
         # もう片方のフィールドが "admin" 以外の値なら、それを admin_id として試す。
@@ -653,9 +730,12 @@ def login():
         if not admin and admin_id_guess != "admin":
             admin = query_one("SELECT * FROM system_admins WHERE admin_id=?", ("admin",))
         if admin and verify_password(pw, admin["password_hash"]):
+            _clear_login_failures(attempt_key)
             return jsonify(_create_session("admin", admin["id"], None, admin))
+        _record_login_failure(attempt_key)
         raise ValueError("管理者IDまたはパスワードが正しくありません")
 
+    # 入力不備は認証の試行ではないので失敗としては数えない
     if not shop_code or not user_code:
         raise ValueError("店舗コードとユーザーコードを入力してください")
 
@@ -665,6 +745,7 @@ def login():
         "WHERE sh.shop_code=? AND s.staff_code=? AND s.is_resigned=0 AND sh.is_active=1",
         (shop_code, user_code))
     if staff and verify_password(pw, staff["password_hash"]):
+        _clear_login_failures(attempt_key)
         if staff["role"] == "manager":
             # manager は店舗権限(shopping) → user オブジェクトは shops 行を返す
             shop = query_one("SELECT * FROM shops WHERE id=?", (staff["shop_id"],))
@@ -676,8 +757,10 @@ def login():
     if user_code == shop_code:
         shop = query_one("SELECT * FROM shops WHERE shop_code=? AND is_active=1", (shop_code,))
         if shop and verify_password(pw, shop["password_hash"]):
+            _clear_login_failures(attempt_key)
             return jsonify(_create_session("shop", shop["id"], shop["id"], shop))
 
+    _record_login_failure(attempt_key)
     raise ValueError("店舗コード・ユーザーコードまたはパスワードが正しくありません")
 
 
@@ -4174,6 +4257,14 @@ def ensure_db():
         execute("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at)")
     except Exception as e:
         print(f"[ensure_db] WARN: audit_logs setup failed (skipped): {e}", flush=True)
+    # ログイン試行のレート制限テーブル（作成失敗しても業務は止めない）
+    try:
+        execute(
+            "CREATE TABLE IF NOT EXISTS login_attempts ("
+            "attempt_key TEXT PRIMARY KEY, fail_count INTEGER NOT NULL DEFAULT 0, "
+            "locked_until TEXT, updated_at TEXT)")
+    except Exception as e:
+        print(f"[ensure_db] WARN: login_attempts setup failed (skipped): {e}", flush=True)
 
 
 def _normalize_datetime_data():
