@@ -748,6 +748,36 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         return jsonify(summarize_shifts(shifts, {s["id"]: s for s in staffs}, parse_settings(shop["settings"])))
 
 
+    # ---- 代理閲覧（閲覧のみ） ----
+    # 状態は「自分のセッション行」に持たせる。トークンを差し替える方式だと
+    # フロントが2本のトークンを二重管理することになり、戻し忘れ事故が起きるため。
+    @app.post("/api/admin/impersonate/<int:shop_id>")
+    def admin_impersonate_start(shop_id):
+        require_auth(["admin"])
+        shop = query_one("SELECT id, shop_code, shop_name FROM shops WHERE id=?", (shop_id,))
+        if shop is None:
+            abort(404, description="店舗が見つかりません")
+        token = request.headers.get("Authorization", "")[7:]
+        execute("UPDATE sessions SET acting_shop_id=? WHERE token=?", (shop_id, token))
+        audit("admin.impersonate_start", target_type="shop", target_id=shop_id, shop_id=shop_id,
+              detail=f"{shop['shop_code']} の代理閲覧を開始（閲覧のみ）")
+        return jsonify({"ok": True, "shop": shop})
+
+
+    @app.delete("/api/admin/impersonate")
+    def admin_impersonate_stop():
+        require_auth(["admin"])
+        token = request.headers.get("Authorization", "")[7:]
+        row = query_one("SELECT acting_shop_id FROM sessions WHERE token=?", (token,))
+        acting = (row or {}).get("acting_shop_id")
+        execute("UPDATE sessions SET acting_shop_id=NULL WHERE token=?", (token,))
+        # 代理していなかった場合は監査ログを汚さない（解除は何度押しても安全）
+        if acting:
+            audit("admin.impersonate_end", target_type="shop", target_id=acting, shop_id=acting,
+                  detail="代理閲覧を終了")
+        return jsonify({"ok": True})
+
+
     @app.get("/api/admin/notifications")
     def admin_notifs():
         require_auth(["admin"])

@@ -262,6 +262,10 @@ const AUDIT_ACTION_LABELS = {
   'auth.login_blocked': 'ログインブロック',
   'auth.logout': 'ログアウト',
   'admin.password_change': '管理者PW変更',
+  'admin.impersonate_start': '代理閲覧開始',
+  'admin.impersonate_end': '代理閲覧終了',
+  'admin.create': '管理者追加',
+  'admin.delete': '管理者削除',
 };
 function auditActionLabel(a) { return AUDIT_ACTION_LABELS[a] || a || '—'; }
 

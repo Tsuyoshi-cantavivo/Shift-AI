@@ -219,6 +219,29 @@ def require_auth(allowed):
         if expired:
             abort(401, description="セッションの有効期限が切れました")
     role = session["role"]
+
+    # 代理閲覧: admin セッションに acting_shop_id が立っているとき、店舗用APIに限り
+    # 店舗権限として振る舞う。"admin" not in allowed を条件にしているのは、
+    #   - /api/admin/* は管理者のまま動かす（「管理者に戻る」を確実に押せるようにする）
+    #   - /api/me も管理者のまま動かす（impersonating 情報を返すため）
+    #   - require_auth(["staff"]) には化けない
+    # ため。書き込みは許さない（運営者が顧客の確定シフトを壊す事故を構造的に防ぐ）。
+    acting = session.get("acting_shop_id")
+    if role == "admin" and acting and "shop" in allowed and "admin" not in allowed:
+        if request.method != "GET":
+            abort(403, description="代理閲覧中はデータを変更できません")
+        # 店舗が引けないときに 403/401 ではなく 409 にするのは、
+        # 「代理先が消えた」ことを運営者に伝えるため。ここでフォールバックすると
+        # 通常経路と同じく別テナントに着地し得るので、必ず止める。
+        shop = query_one("SELECT * FROM shops WHERE id=?", (acting,))
+        if shop is None:
+            abort(409, description="代理閲覧中の店舗が見つかりません")
+        g.role = "shop"
+        g.user = strip_password(shop)
+        g.shop_id = acting
+        g.impersonating = True
+        return "shop", g.user, acting
+
     if role not in allowed:
         abort(403, description="権限がありません")
     # 参照先の行が引けないセッションは 401 にする（role 3種で対称にすること）。
@@ -245,6 +268,9 @@ def require_auth(allowed):
     g.role = role
     g.user = strip_password(user)
     g.shop_id = session.get("shop_id")
+    # 通常経路は代理閲覧ではない。audit() などが getattr(g, "impersonating", False)
+    # ではなく素直に g.impersonating を見られるよう、両経路で必ず立てておく。
+    g.impersonating = False
     return role, g.user, session.get("shop_id")
 
 
@@ -906,6 +932,15 @@ def logout():
 def me():
     role, user, _ = require_auth(["admin", "shop", "staff"])
     result = {"role": role, "user": user}
+    if role == "admin":
+        # 代理閲覧中かどうかをフロントに伝える（警告バーとナビ切替に使う）。
+        # require_auth は session 行を返さないのでトークンから直接引く。
+        token = request.headers.get("Authorization", "")[7:]
+        row = query_one("SELECT acting_shop_id FROM sessions WHERE token=?", (token,))
+        acting = (row or {}).get("acting_shop_id")
+        shop = query_one("SELECT id, shop_name FROM shops WHERE id=?", (acting,)) if acting else None
+        result["impersonating"] = ({"shop_id": shop["id"], "shop_name": shop["shop_name"]}
+                                   if shop else None)
     # shop ロールの場合は manager ロールかどうか、staff 情報も併せて返す
     # （UI で「店舗管理者」vs「旧仕様店主」を正確に区別するため）
     if role == "shop":
