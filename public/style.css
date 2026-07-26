@@ -1448,3 +1448,24 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
   margin-top: 6px;
   font-size: .75rem;
 }
+
+/* ---------- 34. Wish text import (希望テキスト取り込み) ---------- */
+/* カレンダー本体は .wish-cal/.wish-cell/.wmark（セクション26）をそのまま流用。
+   ここでは「既存希望あり」の印と、元の文の対比表示に必要な分だけ追加する。 */
+.wti-cal .wish-cell { position: relative; }
+.wti-existing-flag {
+  position: absolute; top: 3px; right: 3px; font-size: .62rem; color: var(--warning);
+}
+.wti-raw-quote {
+  background: var(--paper); border-left: 3px solid var(--info); border-radius: var(--radius-sm);
+  padding: 6px 10px; font-size: .82rem; line-height: 1.5; color: var(--ink-2);
+  white-space: pre-wrap; word-break: break-word;
+}
+.wti-unassigned-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 12px; background: var(--paper); border: 1px solid var(--rule);
+  border-radius: var(--radius); margin-bottom: 8px;
+}
+.wti-unassigned-info { flex: 1 1 220px; min-width: 0; }
+.wti-unassigned-select { flex: 0 0 auto; width: auto; min-width: 160px; }
+.wti-unparsed ul { padding-left: 18px; margin: 0; }

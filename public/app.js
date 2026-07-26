@@ -2625,8 +2625,10 @@ SCREENS.requests = async function (el) {
         <div class="col-5"><label class="form-label" for="reqEnd">終了</label><input type="date" id="reqEnd" class="form-control" value="${defaultEnd}"></div>
         <div class="col-2 flex items-end"><button class="btn btn-primary w-full" id="reqLoadBtn">表示</button></div>
       </div>
+      <div class="mb-3"><button class="btn btn-light w-full" id="reqImportBtn"><i class="bi bi-clipboard-plus"></i> テキストから取り込む</button></div>
       <div id="reqList"><div class="text-secondary small">「表示」ボタンを押してください</div></div>`);
   document.getElementById('reqLoadBtn')?.addEventListener('click', () => loadReqList());
+  document.getElementById('reqImportBtn')?.addEventListener('click', () => openWishImportModal(loadReqList));
   await loadReqList();
 
   async function loadReqList() {
@@ -2791,6 +2793,386 @@ function openStaffReqDetailModal({ staff, list }) {
         </table>
       </div>`,
     null, { saveLabel: '閉じる' });
+}
+
+/* ---------- Wish text import (希望テキスト取り込み) ----------
+   店長が LINE 等のテキストを貼り付けて、複数スタッフ分の希望を代理入力する。
+   流れ: ステップ1(貼付・解析) → ステップ2(月間カレンダーで確認・修正・登録)。
+   parse は保存しないので何度でもやり直せる。bulk 登録は日付ごとに展開して送る。
+   参考: SCREENS.request のスタッフ希望カレンダー（app.js内 `let wishState`/`wishMonth`
+   の少し下）。見た目・操作感（.wish-cal/.wish-cell/.wmark）をそのまま流用している。
+   ここでの状態は `wishState`/`wishMonth`（スタッフ本人用）とは別物として state object
+   に閉じ込め、干渉しないようにする。 */
+
+/* 対象月セレクトの選択肢: 当月を含む前後（-1〜+2ヶ月）。 */
+function _wtiMonthOptions() {
+  const opts = [];
+  const now = new Date();
+  for (let off = -1; off <= 2; off++) {
+    const d = new Date(now.getFullYear(), now.getMonth() + off, 1);
+    const val = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    opts.push({ value: val, label: `${d.getFullYear()}年${d.getMonth() + 1}月` });
+  }
+  return opts;
+}
+function _wtiLastDayOfMonth(yearMonth) {
+  const [y, m] = yearMonth.split('-').map(Number);
+  return new Date(y, m, 0).getDate();
+}
+
+/* 解析結果 entries（dates配列を持つ）を、日付ごとに1件へ展開したフラットな
+   作業状態に変換する。カレンダーでの個別編集・削除・スタッフ割り当てを
+   単純にするため、以降の画面操作はすべてこのフラット配列を対象に行う。
+   entryIdx は「未割り当て」一覧のグルーピング（元の1文をまとめて振り分ける）に使う。 */
+function _wtiFlatten(entries) {
+  const items = [];
+  (entries || []).forEach((e, idx) => {
+    (e.dates || []).forEach((date) => {
+      items.push({
+        uid: `${idx}-${date}-${Math.random().toString(36).slice(2, 7)}`,
+        entryIdx: idx,
+        staffId: e.staff_id || null,
+        staffHint: e.staff_hint || null,
+        date,
+        availability: e.availability,
+        start: e.start || null,
+        end: e.end || null,
+        raw: e.raw || '',
+        overwriteConfirmed: false,
+      });
+    });
+  });
+  return items;
+}
+
+async function openWishImportModal(onImported) {
+  let staffs = [];
+  try {
+    const sd = await api('/shop/staffs');
+    staffs = (sd.staffs || []).filter((s) => !s.is_resigned);
+  } catch (e) { toast('スタッフ一覧の取得に失敗しました', 'error'); return; }
+  const state = {
+    staffs, items: [], unparsed: [], source: null, existing: new Set(), periods: [],
+    yearMonth: todayStr().slice(0, 7), explicitStaffId: null, rawText: '',
+    calStaffId: null, calMonth: null, onImported,
+  };
+  const wrap = openModal('<i class="bi bi-clipboard-plus"></i> テキストから取り込む',
+    '<div class="text-secondary small">読み込み中...</div>', null, { width: 640 });
+  _wtiRenderStep1(wrap, state);
+}
+
+/* ステップ1: 貼り付け（対象月・スタッフ・テキスト・解析ボタン） */
+function _wtiRenderStep1(wrap, state) {
+  const titleEl = wrap.querySelector('.modal-title');
+  if (titleEl) titleEl.innerHTML = '<i class="bi bi-clipboard-plus"></i> テキストから取り込む';
+  const body = wrap.querySelector('.modal-body');
+  if (!body) return;
+  const monthOpts = _wtiMonthOptions();
+  const staffOptsHtml = state.staffs.map((s) =>
+    `<option value="${s.id}"${state.explicitStaffId === s.id ? ' selected' : ''}>${esc(s.name)}（${roleLabel(s.role)}）</option>`).join('');
+  safeSetHTML(body, `
+    <div class="row mb-2">
+      <div class="col-6"><label class="form-label" for="wtiMonth">対象月</label>
+        <select id="wtiMonth" class="form-select">${monthOpts.map((o) =>
+          `<option value="${o.value}"${o.value === state.yearMonth ? ' selected' : ''}>${o.label}</option>`).join('')}</select>
+      </div>
+      <div class="col-6"><label class="form-label" for="wtiStaff">スタッフ</label>
+        <select id="wtiStaff" class="form-select"><option value="">自動判定</option>${staffOptsHtml}</select>
+      </div>
+    </div>
+    <label class="form-label" for="wtiText">貼り付けるテキスト</label>
+    <textarea id="wtiText" class="form-control mb-2" rows="7" placeholder="例：8/3は休みたいです&#10;8/5、8/7、8/9は17時から22時まで入れます">${esc(state.rawText || '')}</textarea>
+    <button class="btn btn-primary w-full" id="wtiParseBtn" type="button"><i class="bi bi-magic"></i> 解析する</button>
+    <div id="wtiParseMsg" class="mt-2"></div>`);
+  wrap.querySelector('#wtiParseBtn')?.addEventListener('click', () => _wtiParse(wrap, state));
+}
+
+async function _wtiParse(wrap, state) {
+  const text = (wrap.querySelector('#wtiText')?.value || '').trim();
+  if (!text) { toast('テキストを入力してください', 'error'); return; }
+  state.rawText = text;
+  state.yearMonth = wrap.querySelector('#wtiMonth')?.value || state.yearMonth;
+  const staffSel = wrap.querySelector('#wtiStaff')?.value || '';
+  state.explicitStaffId = staffSel ? +staffSel : null;
+  const msgBox = wrap.querySelector('#wtiParseMsg');
+  if (msgBox) msgBox.innerHTML = '<div class="text-secondary small">解析中...</div>';
+  setLoading(true);
+  try {
+    const body = { text, year_month: state.yearMonth };
+    if (state.explicitStaffId) body.staff_id = state.explicitStaffId;
+    const r = await api('/shop/wishes/parse', { method: 'POST', body: JSON.stringify(body) });
+    state.source = r.source;
+    state.unparsed = r.unparsed || [];
+    state.items = _wtiFlatten(r.entries || []);
+    if (!state.items.length) {
+      if (msgBox) msgBox.innerHTML = '<div class="alert alert-warning py-2">日付や希望内容を読み取れませんでした。文面を見直してください。</div>';
+      setLoading(false);
+      return;
+    }
+    // 対象月の範囲で既存希望・募集期間を取得（プレビューの印・警告用）
+    const dim = _wtiLastDayOfMonth(state.yearMonth);
+    const start = `${state.yearMonth}-01`;
+    const end = `${state.yearMonth}-${String(dim).padStart(2, '0')}`;
+    const [wishesD, periodsD] = await Promise.all([
+      api(`/shop/wishes?start=${start}&end=${end}`).catch(() => ({ wishes: [] })),
+      api('/shop/periods').catch(() => ({ periods: [] })),
+    ]);
+    state.existing = new Set((wishesD.wishes || []).map((w) => `${w.staff_id}|${(w.start_datetime || '').slice(0, 10)}`));
+    state.periods = periodsD.periods || [];
+    const firstAssigned = state.items.find((it) => it.staffId);
+    state.calStaffId = firstAssigned ? firstAssigned.staffId : null;
+    const [iy, im] = state.yearMonth.split('-').map(Number);
+    state.calMonth = { y: iy, m: im - 1 };
+    _wtiRenderStep2(wrap, state);
+  } catch (e) {
+    if (msgBox) msgBox.innerHTML = `<div class="alert alert-danger py-2">${esc(e.message)}</div>`;
+  } finally { setLoading(false); }
+}
+
+/* 期間外の警告文（対象日付のいずれかが、有効な募集期間のどれにも含まれない場合）。
+   募集期間が1つも無い店舗では警告を出さない（未設定でも取り込めるようにする、設計書§3）。 */
+function _wtiPeriodWarnHtml(state) {
+  const periods = (state.periods || []).filter((p) => p.is_active);
+  if (!periods.length) return '';
+  const inAny = (d) => periods.some((p) => d >= p.start_date && d <= p.end_date);
+  const outDates = [...new Set(state.items.map((it) => it.date))].filter((d) => !inAny(d)).sort();
+  if (!outDates.length) return '';
+  const sample = outDates.slice(0, 5).map((d) => d.slice(5)).join('、') + (outDates.length > 5 ? ' 他' : '');
+  return `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> ${outDates.length}件の日付が募集期間外です（${esc(sample)}）。登録は可能ですが、日付を確認してください。</div>`;
+}
+
+function _wtiUnparsedHtml(state) {
+  if (!state.unparsed || !state.unparsed.length) return '';
+  const rows = state.unparsed.map((u) => `<li>${esc(u)}</li>`).join('');
+  return `<div class="wti-unparsed"><div class="small text-secondary mb-1"><i class="bi bi-question-circle"></i> 読み取れなかった文（${state.unparsed.length}件）。必要であれば手入力で補ってください。</div><ul class="small text-secondary">${rows}</ul></div>`;
+}
+
+/* ステップ2: スタッフ切り替え + 月間カレンダー + 未割り当て一覧 + 登録ボタン。
+   何かが変わるたびに（スタッフ切替・月送り・編集・削除・割り当て）この関数を
+   呼び直して全体を再描画する。件数が小さい（1人1ヶ月分）ため、差分更新より
+   単純さを優先した。 */
+function _wtiRenderStep2(wrap, state) {
+  const titleEl = wrap.querySelector('.modal-title');
+  if (titleEl) titleEl.innerHTML = '<i class="bi bi-clipboard-check"></i> 取り込み内容の確認';
+  const body = wrap.querySelector('.modal-body');
+  if (!body) return;
+
+  const sourceWarn = state.source === 'fallback'
+    ? `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> 簡易解析で読み取りました。内容をよく確認してください。</div>`
+    : '';
+
+  const assignedStaffIds = [...new Set(state.items.filter((it) => it.staffId).map((it) => it.staffId))];
+  if (!state.calStaffId || !assignedStaffIds.includes(state.calStaffId)) {
+    state.calStaffId = assignedStaffIds[0] || null;
+  }
+  const staffSelectHtml = assignedStaffIds.length
+    ? `<select id="wtiCalStaff" class="form-select mb-2">${assignedStaffIds.map((sid) => {
+        const s = state.staffs.find((x) => x.id === sid);
+        const cnt = state.items.filter((it) => it.staffId === sid).length;
+        return `<option value="${sid}"${sid === state.calStaffId ? ' selected' : ''}>${esc(s ? s.name : '不明#' + sid)}（${cnt}件）</option>`;
+      }).join('')}</select>`
+    : `<div class="info-box mb-2"><i class="bi bi-info-circle"></i> 割り当て済みのスタッフがいません。下の「未割り当て」から振り分けてください。</div>`;
+
+  safeSetHTML(body, `
+    ${sourceWarn}
+    ${staffSelectHtml}
+    ${assignedStaffIds.length ? `<div class="cal-toolbar">
+      <button class="cal-nav-btn" id="wtiCalPrev" type="button"><i class="bi bi-chevron-left"></i></button>
+      <div class="cal-title num" id="wtiCalTitle"></div>
+      <button class="cal-nav-btn" id="wtiCalNext" type="button"><i class="bi bi-chevron-right"></i></button>
+    </div>
+    <div class="cal-weekdays"><div class="sun">日</div><div>月</div><div>火</div><div>水</div><div>木</div><div>金</div><div class="sat">土</div></div>
+    <div id="wtiCalGrid" class="wish-cal wti-cal"></div>` : ''}
+    <div id="wtiPeriodWarn">${_wtiPeriodWarnHtml(state)}</div>
+    <div id="wtiUnassigned"></div>
+    <div id="wtiUnparsed">${_wtiUnparsedHtml(state)}</div>
+    <div class="flex gap-2 mt-3">
+      <button class="btn btn-light" id="wtiBackBtn" type="button"><i class="bi bi-arrow-left"></i> やり直す</button>
+      <button class="btn btn-primary flex-grow" id="wtiSubmitBtn" type="button"><i class="bi bi-check2-circle"></i> 登録する</button>
+    </div>
+    <div id="wtiSubmitMsg" class="mt-2"></div>`);
+
+  wrap.querySelector('#wtiCalStaff')?.addEventListener('change', (e) => {
+    state.calStaffId = +e.target.value;
+    const [iy, im] = state.yearMonth.split('-').map(Number);
+    state.calMonth = { y: iy, m: im - 1 };
+    _wtiRenderStep2(wrap, state);
+  });
+  wrap.querySelector('#wtiCalPrev')?.addEventListener('click', () => {
+    state.calMonth.m--; if (state.calMonth.m < 0) { state.calMonth.m = 11; state.calMonth.y--; }
+    _wtiRenderStep2(wrap, state);
+  });
+  wrap.querySelector('#wtiCalNext')?.addEventListener('click', () => {
+    state.calMonth.m++; if (state.calMonth.m > 11) { state.calMonth.m = 0; state.calMonth.y++; }
+    _wtiRenderStep2(wrap, state);
+  });
+  wrap.querySelector('#wtiBackBtn')?.addEventListener('click', () => _wtiRenderStep1(wrap, state));
+  wrap.querySelector('#wtiSubmitBtn')?.addEventListener('click', () => _wtiSubmit(wrap, state));
+
+  _wtiRenderCalendar(wrap, state);
+  _wtiRenderUnassigned(wrap, state);
+}
+
+/* カレンダー本体の描画。SCREENS.request の drawWish() と同じ .wish-cal/.wish-cell/.wmark
+   を使い、見た目・操作感を揃える。既存希望がある日には印（アイコン）を付ける。 */
+function _wtiRenderCalendar(wrap, state) {
+  const titleEl = wrap.querySelector('#wtiCalTitle');
+  const gridEl = wrap.querySelector('#wtiCalGrid');
+  if (!gridEl) return;
+  if (!state.calStaffId || !state.calMonth) { gridEl.innerHTML = ''; if (titleEl) titleEl.textContent = ''; return; }
+  const { y, m } = state.calMonth;
+  if (titleEl) titleEl.textContent = `${y}年 ${m + 1}月`;
+  const first = new Date(y, m, 1); const startWd = first.getDay();
+  const dim = new Date(y, m + 1, 0).getDate();
+  const label = { any: '終日', morning: '早', evening: '遅', rest: '休' };
+  const byDate = {};
+  state.items.filter((it) => it.staffId === state.calStaffId).forEach((it) => { byDate[it.date] = it; });
+  let cells = '';
+  for (let i = 0; i < startWd; i++) cells += '<div class="wish-cell empty"></div>';
+  for (let d = 1; d <= dim; d++) {
+    const ds = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    const it = byDate[ds];
+    const wd = new Date(ds + 'T00:00:00').getDay();
+    const wdCls = wd === 0 ? 'sun' : (wd === 6 ? 'sat' : '');
+    const hasExisting = state.existing.has(`${state.calStaffId}|${ds}`);
+    const markText = it ? (it.availability === 'time' ? `${it.start || '?'}-${it.end || '?'}` : (label[it.availability] || it.availability)) : '';
+    const mark = it ? `<div class="wmark ${it.availability}">${esc(markText)}</div>` : '';
+    const flag = hasExisting ? '<i class="bi bi-exclamation-circle-fill wti-existing-flag" title="既存の希望があります"></i>' : '';
+    cells += `<div class="wish-cell" data-day="${ds}"><div class="wd ${wdCls}">${d}</div>${mark}${flag}</div>`;
+  }
+  gridEl.innerHTML = cells;
+  gridEl.querySelectorAll('.wish-cell[data-day]').forEach((c) => {
+    c?.addEventListener('click', () => {
+      const has = state.items.some((it) => it.staffId === state.calStaffId && it.date === c.dataset.day);
+      if (has) _wtiOpenDetail(wrap, state, c.dataset.day);
+    });
+  });
+}
+
+/* 日付クリックで開く詳細: 読み取り内容・【元の文】の対比表示（必須）・修正・削除。
+   既存希望がある日は「上書きする」チェックを出す（既定オフ＝スキップ側）。 */
+function _wtiOpenDetail(wrap, state, date) {
+  const idx = state.items.findIndex((it) => it.staffId === state.calStaffId && it.date === date);
+  if (idx === -1) return;
+  const it = state.items[idx];
+  const hasExisting = state.existing.has(`${state.calStaffId}|${date}`);
+  const availLabel = { rest: '休み希望', any: '終日OK', morning: '早番希望', evening: '遅番希望', time: '時間指定' }[it.availability] || it.availability;
+  const body = `
+    <div class="mb-2"><strong class="num">${esc(date)}</strong>（${wdName(date)}）</div>
+    <div class="mb-2">${badge('読み取り: ' + availLabel, it.availability === 'rest' ? 'danger' : 'info')}</div>
+    <div class="small text-secondary mb-1">元の文</div>
+    <div class="wti-raw-quote mb-2">${esc(it.raw || '（元の文なし）')}</div>
+    <label class="form-label" for="wtiDetailAvail">内容を修正</label>
+    <select id="wtiDetailAvail" class="form-select mb-2">
+      <option value="rest"${it.availability === 'rest' ? ' selected' : ''}>休み</option>
+      <option value="any"${it.availability === 'any' ? ' selected' : ''}>いつでも可</option>
+      <option value="morning"${it.availability === 'morning' ? ' selected' : ''}>早番</option>
+      <option value="evening"${it.availability === 'evening' ? ' selected' : ''}>遅番</option>
+      <option value="time"${it.availability === 'time' ? ' selected' : ''}>時間指定</option>
+    </select>
+    <div id="wtiDetailTimeRow" class="row mb-2" style="${it.availability === 'time' ? '' : 'display:none'}">
+      <div class="col-6"><input type="time" id="wtiDetailStart" class="form-control" value="${it.start || ''}"></div>
+      <div class="col-6"><input type="time" id="wtiDetailEnd" class="form-control" value="${it.end || ''}"></div>
+    </div>
+    ${hasExisting ? `<div class="alert alert-warning py-2 mb-1"><i class="bi bi-exclamation-triangle"></i> この日は既に希望が登録されています。<label class="flex items-center gap-2 mt-1" style="font-weight:400"><input type="checkbox" id="wtiDetailOverwrite"${it.overwriteConfirmed ? ' checked' : ''}> 既存を上書きして登録する</label></div>` : ''}`;
+  const dm = openModal(`<i class="bi bi-calendar-event"></i> ${esc(date)}の希望`, body, (w2, close) => {
+    it.availability = w2.querySelector('#wtiDetailAvail').value;
+    if (it.availability === 'time') {
+      it.start = w2.querySelector('#wtiDetailStart').value || null;
+      it.end = w2.querySelector('#wtiDetailEnd').value || null;
+    } else {
+      it.start = null; it.end = null;
+    }
+    if (hasExisting) it.overwriteConfirmed = !!w2.querySelector('#wtiDetailOverwrite')?.checked;
+    close();
+    _wtiRenderStep2(wrap, state);
+  }, { saveLabel: '保存' });
+  dm.querySelector('#wtiDetailAvail')?.addEventListener('change', (e) => {
+    const row = dm.querySelector('#wtiDetailTimeRow');
+    if (row) row.style.display = e.target.value === 'time' ? 'flex' : 'none';
+  });
+  const footer = dm.querySelector('.modal-footer');
+  if (footer) {
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'btn btn-outline-danger';
+    delBtn.innerHTML = '<i class="bi bi-trash"></i> 削除';
+    footer.insertBefore(delBtn, footer.lastElementChild);
+    delBtn.addEventListener('click', () => {
+      state.items.splice(idx, 1);
+      dm.remove();
+      _wtiRenderStep2(wrap, state);
+    });
+  }
+}
+
+/* 未割り当て一覧: staff_id が null のエントリを、元の1文（entryIdx）単位でまとめて
+   表示する。スタッフを選ぶまでは登録対象に入らない（推測で割り当てない）。 */
+function _wtiRenderUnassigned(wrap, state) {
+  const box = wrap.querySelector('#wtiUnassigned');
+  if (!box) return;
+  const groups = {};
+  state.items.forEach((it) => { if (!it.staffId) (groups[it.entryIdx] = groups[it.entryIdx] || []).push(it); });
+  const entryIdxs = Object.keys(groups);
+  if (!entryIdxs.length) { box.innerHTML = ''; return; }
+  const label = { rest: '休み', any: 'いつでも可', morning: '早番', evening: '遅番', time: '時間指定' };
+  const staffOpts = state.staffs.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+  const rows = entryIdxs.map((eidx) => {
+    const grp = groups[eidx];
+    const raw = grp[0].raw;
+    const datesTxt = grp.map((g) => g.date.slice(5)).join('、');
+    const availTxt = label[grp[0].availability] || grp[0].availability;
+    const hintTxt = grp[0].staffHint ? `（候補: ${esc(grp[0].staffHint)}）` : '';
+    return `<div class="wti-unassigned-row">
+      <div class="wti-unassigned-info">
+        <div class="small text-secondary">${esc(datesTxt)} ・ ${esc(availTxt)}${hintTxt}</div>
+        <div class="wti-raw-quote">${esc(raw)}</div>
+      </div>
+      <select class="form-select wti-unassigned-select" data-entry="${eidx}">
+        <option value="">誰の希望か選ぶ</option>${staffOpts}
+      </select>
+    </div>`;
+  }).join('');
+  box.innerHTML = `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-person-exclamation"></i> 未割り当て ${entryIdxs.length}件（スタッフを選ぶまで登録されません）</div>${rows}`;
+  box.querySelectorAll('[data-entry]').forEach((sel) => sel?.addEventListener('change', () => {
+    const eidx = sel.dataset.entry;
+    const sid = +sel.value || null;
+    if (!sid) return;
+    state.items.forEach((it) => { if (String(it.entryIdx) === eidx && !it.staffId) it.staffId = sid; });
+    state.calStaffId = sid;
+    buzz(10);
+    _wtiRenderStep2(wrap, state);
+  }));
+}
+
+/* 登録: staff_id が付いた項目のみ対象。overwrite は API 全体に一括で効くフラグの
+   ため、明示的に「上書きする」を選んだ日だけを分けて別リクエストで送る
+   （選んでいない日を巻き込んで消してしまわないようにするため）。 */
+async function _wtiSubmit(wrap, state) {
+  const msgBox = wrap.querySelector('#wtiSubmitMsg');
+  const assignable = state.items.filter((it) => it.staffId);
+  if (!assignable.length) { toast('登録できる希望がありません（未割り当てのみです）', 'error'); return; }
+  const toWish = (it) => ({ staff_id: it.staffId, date: it.date, availability: it.availability, start: it.start, end: it.end, raw: it.raw });
+  const overwriteGroup = assignable.filter((it) => state.existing.has(`${it.staffId}|${it.date}`) && it.overwriteConfirmed);
+  const normalGroup = assignable.filter((it) => !(state.existing.has(`${it.staffId}|${it.date}`) && it.overwriteConfirmed));
+  setLoading(true);
+  if (msgBox) msgBox.innerHTML = '<div class="text-secondary small">登録中...</div>';
+  try {
+    let created = 0, skipped = 0;
+    if (normalGroup.length) {
+      const r1 = await api('/shop/wishes/bulk', { method: 'POST', body: JSON.stringify({ wishes: normalGroup.map(toWish), overwrite: false }) });
+      created += r1.created || 0; skipped += r1.skipped || 0;
+    }
+    if (overwriteGroup.length) {
+      const r2 = await api('/shop/wishes/bulk', { method: 'POST', body: JSON.stringify({ wishes: overwriteGroup.map(toWish), overwrite: true }) });
+      created += r2.created || 0; skipped += r2.skipped || 0;
+    }
+    wrap.remove();
+    toast(`${created}件を登録しました${skipped ? `（${skipped}件はスキップ）` : ''}`, 'success');
+    if (typeof state.onImported === 'function') state.onImported();
+  } catch (e) {
+    if (msgBox) msgBox.innerHTML = `<div class="alert alert-danger py-2">${esc(e.message)}</div>`;
+  } finally { setLoading(false); }
 }
 
 /* ---------- Analytics (人件費分析) ---------- */
