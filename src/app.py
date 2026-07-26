@@ -24,6 +24,7 @@ from utils import (
     calc_next_period, jst_now, jst_today, minutes_between, compute_break_minutes,
     night_minutes, validate_password, parse_settings, build_ics, parse_iso, normalize_iso,
     norm_hhmm, norm_dt_iso, add_days, build_staff_tendency, combine_dt_overnight,
+    sanitize_login_code, LOGIN_CODE_MAX,
 )
 import shift_engine
 import ai
@@ -96,26 +97,11 @@ def handle_exc(e):
 _LOGIN_MAX_FAILS = 10        # この回数失敗したらロック
 _LOGIN_WINDOW_MIN = 15       # 失敗カウントを保持する時間（分）
 _LOGIN_LOCK_MIN = 15         # ロックする時間（分）
-_LOGIN_CODE_MAX = 64         # 店舗コード／ユーザーコードの最大長
-
-
-def _sanitize_login_code(value):
-    """ログイン入力のコードを正規化する（前後の空白除去 ＋ 改行の除去）。
-
-    【なぜ改行を落とすか】
-      失敗したコードは監査ログの actor_name とレート制限キーにそのまま入る。
-      改行が生で残ると、監査ログを1行1レコードとして読む運用（将来のCSV出力を含む）で
-      攻撃者が偽の行を差し込めてしまう。UI 側は esc() を通すので XSS にはならないが、
-      ログ偽装は残るため入口で落とす。
-
-    str() を挟むのは、JSON で文字列以外（数値・配列・オブジェクト）を送られたときに
-    .strip() が AttributeError になり、未認証クライアントに 500 が返るのを避けるため。
-    """
-    if value is None:
-        return ""
-    if not isinstance(value, str):
-        value = str(value)
-    return value.replace("\r", "").replace("\n", "").strip()
+# _LOGIN_CODE_MAX は utils.LOGIN_CODE_MAX のエイリアス。
+# admin_api.py（管理者作成時の admin_id 長チェック）と値を共有するため utils.py に移設した。
+_LOGIN_CODE_MAX = LOGIN_CODE_MAX
+# _sanitize_login_code は utils.sanitize_login_code のエイリアス（同上の理由で移設）。
+_sanitize_login_code = sanitize_login_code
 
 
 def _login_attempt_key(shop_code, user_code):
@@ -778,9 +764,6 @@ def login():
     【仕様】
       - システム管理者: ユーザーコード に "admin" を指定（店舗コードは任意）。
         ※ admin_id が "admin" 以外の場合は、店舗コード側に admin_id を入れてもOK。
-        ※ 店舗コードを空にした場合、ユーザーコードに admin_id を直接指定してもよい
-          （Phase 2 で複数管理者に対応。system_admins に一致する行がある場合のみ
-          管理者ログインとして扱う）。
       - 店舗管理者: staffs.role='manager' のスタッフ → role='shop' セッション。
       - 一般スタッフ: staffs.role='employee'/'part_time' → role='staff' セッション。
       - 後方互換: user_code == shop_code の場合、shops テーブルでの旧店主ログイン可。
@@ -831,27 +814,6 @@ def login():
         audit("auth.login_failed", actor_role="anonymous",
               actor_name=admin_id_guess, detail="管理者ログイン失敗")
         raise ValueError("管理者IDまたはパスワードが正しくありません")
-
-    # ---- システム管理者（店舗コード無し・ユーザーコードに admin_id を直接指定）----
-    # 【なぜ必要か】
-    #   上の分岐は「どちらかの欄に "admin" という語」を要求するため、admin_id が
-    #   "admin" 以外の2人目以降の管理者（Phase 2 で追加可能になった）はそのままでは
-    #   ログインできない。店舗コードを空にしたままユーザーコードだけで system_admins
-    #   を引けた場合に限り管理者ログインとして扱う（店舗・スタッフは必ず shop_code
-    #   を要するため、ここで衝突する余地は無い）。
-    if not shop_code and user_code:
-        admin = query_one("SELECT * FROM system_admins WHERE admin_id=?", (user_code,))
-        if admin:
-            if verify_password(pw, admin["password_hash"]):
-                _clear_login_failures(attempt_key)
-                audit("auth.login", target_type="system_admin", target_id=admin["id"],
-                      actor_role="admin", actor_id=admin["id"], actor_name=admin.get("name"),
-                      detail=f"admin_id={admin['admin_id']}")
-                return jsonify(_create_session("admin", admin["id"], None, admin))
-            _record_login_failure(attempt_key)
-            audit("auth.login_failed", actor_role="anonymous",
-                  actor_name=user_code, detail="管理者ログイン失敗")
-            raise ValueError("管理者IDまたはパスワードが正しくありません")
 
     # 入力不備は認証の試行ではないので失敗としては数えない
     if not shop_code or not user_code:

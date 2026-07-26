@@ -15,7 +15,8 @@ from flask import request, jsonify, abort, g
 
 from db import query_all, query_one, execute, insert_row
 from auth import hash_password, verify_password, strip_password
-from utils import calc_next_period, jst_now, parse_settings, validate_password
+from utils import (calc_next_period, jst_now, parse_settings, validate_password,
+                    sanitize_login_code, LOGIN_CODE_MAX)
 import json
 
 
@@ -815,20 +816,34 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         """
         require_auth(["admin"])
         body = request.get_json(silent=True) or {}
-        new_id = (body.get("admin_id") or "").strip()
+        # sanitize_login_code は login() と同じ正規化（前後空白・改行除去、非文字列を
+        # str() で吸収）。admin_id は監査ログや将来のログイン試行キーにそのまま入るため、
+        # login() 側の入力と同じ扱いにしておく必要がある。
+        new_id = sanitize_login_code(body.get("admin_id"))
         name = (body.get("name") or "").strip() or "システム管理者"
         pw = body.get("password") or ""
         if not new_id:
             raise ValueError("管理者IDを入力してください")
-        if new_id == "admin" and query_one("SELECT id FROM system_admins WHERE admin_id='admin'"):
-            raise ValueError("その管理者IDは既に使われています")
+        # login() は shop_code/user_code が LOGIN_CODE_MAX 文字を超えると常に400で
+        # 弾く。ここで同じ上限を掛けておかないと、作成はできるが二度とログイン
+        # できない管理者行を作ってしまう。
+        if len(new_id) > LOGIN_CODE_MAX:
+            raise ValueError(f"管理者IDは{LOGIN_CODE_MAX}文字以内で入力してください")
         if query_one("SELECT id FROM system_admins WHERE admin_id=?", (new_id,)):
             raise ValueError("その管理者IDは既に使われています")
         msg = validate_password(pw)
         if msg:
             raise ValueError(msg)
-        meta = execute("INSERT INTO system_admins (admin_id, password_hash, name) VALUES (?,?,?)",
-                       (new_id, hash_password(pw), name))
+        try:
+            meta = execute("INSERT INTO system_admins (admin_id, password_hash, name) VALUES (?,?,?)",
+                           (new_id, hash_password(pw), name))
+        except Exception as e:
+            # 事前の重複チェックと INSERT の間に別リクエストが同じ admin_id を
+            # 作ってしまう競合の保険。UNIQUE制約違反は生SQLエラーを返さず400にする
+            # （admin_create_shop の manager_code 重複と同じ扱い）。
+            if "UNIQUE" in str(e).upper():
+                raise ValueError("その管理者IDは既に使われています")
+            raise
         audit("admin.create", target_type="system_admin", target_id=meta["last_row_id"],
               detail=f"admin_id={new_id}")
         return jsonify({"ok": True, "id": meta["last_row_id"]})
@@ -838,19 +853,27 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         """運営者を削除する。最後の1人・自分自身は削除できない。"""
         require_auth(["admin"])
         me = _current_admin_id()
-        if aid == me:
-            raise ValueError("自分自身は削除できません")
         target = query_one("SELECT id, admin_id FROM system_admins WHERE id=?", (aid,))
         if target is None:
             abort(404, description="管理者が見つかりません")
-        total = query_one("SELECT COUNT(*) AS c FROM system_admins")["c"]
-        if total <= 1:
+        if aid == me:
+            raise ValueError("自分自身は削除できません")
+        # 【なぜ SELECT COUNT(*) →  DELETE の2段構えにしないか】
+        #   2人の管理者が互いを同時に削除しようとした場合、check-then-act だと
+        #   両方が「まだ2人いる」を見た状態のまま削除を実行してしまい、管理者が
+        #   0人になる事故が起こり得る（本番は D1 REST 経由で1文ごとにネットワーク
+        #   往復があり、ローカル SQLite よりこの競合窓が桁違いに広い）。
+        #   _record_login_failure の UPSERT と同じ考え方で、「2人以上いるときだけ
+        #   削除する」条件を DELETE 文自体に埋め込み、判定と実行をDB側で原子化する。
+        meta = execute(
+            "DELETE FROM system_admins WHERE id=? AND "
+            "(SELECT COUNT(*) FROM system_admins) > 1", (aid,))
+        if meta["changes"] == 0:
             raise ValueError("最後の管理者は削除できません")
         # 削除対象のセッションを全て失効させる（削除後もトークンが生きたままだと
         # require_auth が system_admins を引けず 401 になるはずが、削除前に
         # 発行された古いキャッシュ等で誤用されるリスクを避けるため明示的に消す）。
         execute("DELETE FROM sessions WHERE role='admin' AND user_id=?", (aid,))
-        execute("DELETE FROM system_admins WHERE id=?", (aid,))
         audit("admin.delete", target_type="system_admin", target_id=aid,
               detail=f"admin_id={target['admin_id']}")
         return jsonify({"ok": True})

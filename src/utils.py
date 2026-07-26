@@ -379,6 +379,35 @@ def validate_password(pw):
     return None
 
 
+# 店舗コード／ユーザーコード／管理者IDの最大長。
+# app.py の login() と admin_api.py の管理者作成の両方から参照する
+# （作成時にこの上限を超えて弾かないと、login() 側で必ず400になり
+# 二度とログインできない行を作ってしまうため、両者は同じ値を共有する必要がある）。
+LOGIN_CODE_MAX = 64
+
+
+def sanitize_login_code(value):
+    """ログイン系コード（店舗コード・ユーザーコード・管理者ID）を正規化する。
+
+    前後の空白除去 ＋ 改行の除去。
+
+    【なぜ改行を落とすか】
+      これらの値は監査ログの actor_name やレート制限キー、
+      system_admins.admin_id にそのまま入る。改行が生で残ると、
+      監査ログを1行1レコードとして読む運用（将来のCSV出力を含む）で
+      偽の行を差し込めてしまう。UI 側は esc() を通すので XSS にはならないが、
+      ログ偽装は残るため入口で落とす。
+
+    str() を挟むのは、JSON で文字列以外（数値・配列・オブジェクト）を送られたときに
+    .strip() が AttributeError になり、未認証クライアントに 500 が返るのを避けるため。
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    return value.replace("\r", "").replace("\n", "").strip()
+
+
 def parse_settings(s):
     try:
         return json.loads(s or "{}")
