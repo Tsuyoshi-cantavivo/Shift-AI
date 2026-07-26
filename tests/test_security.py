@@ -797,3 +797,22 @@ class TestSessionFallback:
 
         r = client.get("/api/shop/staffs", headers={"Authorization": f"Bearer {token}"})
         assert r.status_code != 200, "存在しない店舗のセッションで別テナントに着地している"
+
+
+class TestAdminNotificationsAuth:
+    def test_admin_notifications_requires_auth(self, client):
+        """未認証で管理者通知を読めないこと。"""
+        assert client.get("/api/admin/notifications").status_code == 401
+
+    def test_admin_notifications_read_all_requires_auth(self, client):
+        assert client.put("/api/admin/notifications/read-all").status_code == 401
+
+    def test_shop_role_cannot_read_admin_notifications(self, client):
+        """shop ロールでは403になること。"""
+        sid = insert_shop("SHOP1", "pw12345678")
+        insert_staff(sid, "mgr", "店長", role="manager", password="pw12345678")
+        r = client.post("/api/login", json={"shop_code": "SHOP1", "user_code": "mgr",
+                                            "password": "pw12345678"})
+        t = r.get_json()["token"]
+        r = client.get("/api/admin/notifications", headers={"Authorization": f"Bearer {t}"})
+        assert r.status_code == 403

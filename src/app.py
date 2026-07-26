@@ -1804,12 +1804,15 @@ def shop_notifs_readall():
 
 @app.get("/api/admin/notifications")
 def admin_notifs():
-    # システム管理者向け通知は現状なし（空リストを返す）
+    require_auth(["admin"])
+    # システム管理者向け通知は現状なし（空リストを返す）。
+    # Phase 2 で一斉通知の配信履歴を返す実装に置き換える。
     return jsonify({"notifications": [], "unread": 0})
 
 
 @app.put("/api/admin/notifications/read-all")
 def admin_notifs_readall():
+    require_auth(["admin"])
     return jsonify({"ok": True})
 
 
