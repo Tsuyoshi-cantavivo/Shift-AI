@@ -896,6 +896,18 @@ _WISH_STAFF_COLON_RE = re.compile(r"^\s*([^\s:：【】]{1,12})\s*[:：]")
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# 全角数字・全角スラッシュの正規化（LINEの文面はIMEの都合で全角になりがち）
+_WISH_FULLWIDTH_MAP = str.maketrans("０１２３４５６７８９／", "0123456789/")
+
+# 「8/3は休み、8/5は17-22」のように1行内でカンマ区切りごとに条件が異なる
+# 書き方に対応するための小節分割。LINEの文面ではごく自然な書き方のため。
+_WISH_SEGMENT_SPLIT_RE = re.compile(r"[、,;；]")
+
+
+def _normalize_wish_text(s):
+    """全角数字・全角スラッシュを半角に正規化する。"""
+    return s.translate(_WISH_FULLWIDTH_MAP)
+
 
 def _is_iso_date(s):
     """'YYYY-MM-DD' 形式かつ暦上有効な日付かを判定する。"""
@@ -991,46 +1003,116 @@ def _extract_staff_hint(line, staff_names=None):
     return None
 
 
+def _wish_has_conflicting_signals(segment):
+    """小節内に『休み系の語』と有効な時刻範囲が同時に含まれるかを判定する。
+
+    「8/3は休み、8/5は17-22」を1行のまま解析すると、rest語が先勝ちして
+    17-22 が握りつぶされ、休みでない日が休みとして誤登録される事故が起きる。
+    小節分割で大半は解消するが、万一1小節内に両方の語が残った場合は
+    誤ったavailabilityを黙って確定するより unparsed に送って人に渡す。
+    """
+    has_rest = any(w in segment for w in _WISH_REST_WORDS)
+    has_time = _parse_explicit_time_range(segment) is not None
+    return has_rest and has_time
+
+
+def _parse_wish_line(line, year_month):
+    """1行を『、,;；』で小節に分け、日付と希望内容を対応付ける。
+
+    日付だけの小節（例:「8/3」）は、希望内容が確定した直後の小節に
+    dates をまとめて引き継ぐ。これにより「8/3、8/5、8/7 は17時から」
+    のような列挙+末尾条件の書き方と、「8/3は休み、8/5は17-22」のように
+    小節ごとに条件が違う書き方の両方を区別して扱える。
+
+    戻り値: (entries, unparsed_fragments)
+    entries の要素は {"dates", "availability", "start", "end", "raw"}。
+    staff_hint は行単位の情報なので呼出元で付与する。
+    """
+    segments = [s.strip() for s in _WISH_SEGMENT_SPLIT_RE.split(line) if s.strip()]
+    if not segments:
+        return [], []
+
+    entries = []
+    unparsed_fragments = []
+    pending_dates = []
+    pending_raw = []
+
+    def _flush_pending_as_unparsed():
+        if pending_raw:
+            unparsed_fragments.append(" / ".join(pending_raw))
+        pending_dates.clear()
+        pending_raw.clear()
+
+    for seg in segments:
+        if _wish_has_conflicting_signals(seg):
+            # 休み語と時刻が同一小節に混在 → 片方を黙って採用せず unparsed へ
+            _flush_pending_as_unparsed()
+            unparsed_fragments.append(seg)
+            continue
+
+        seg_dates = _extract_dates(seg, year_month)
+        availability, start, end = _extract_wish_availability(seg)
+
+        if availability is not None:
+            dates = pending_dates + seg_dates
+            raw = " / ".join(pending_raw + [seg]) if pending_raw else seg
+            if dates:
+                entries.append({
+                    "dates": dates, "availability": availability,
+                    "start": start, "end": end, "raw": raw,
+                })
+            else:
+                # 希望内容はわかったが日付が伴わない → 保留せず unparsed へ
+                unparsed_fragments.append(raw)
+            pending_dates, pending_raw = [], []
+        elif seg_dates:
+            pending_dates = pending_dates + seg_dates
+            pending_raw.append(seg)
+        else:
+            # 日付も希望内容も読み取れない小節（雑談・接続語等）
+            unparsed_fragments.append(seg)
+
+    if pending_dates:
+        unparsed_fragments.append(" / ".join(pending_raw))
+
+    return entries, unparsed_fragments
+
+
 def _parse_wish_fallback(text, year_month, staff_names=None):
     """LLM を使わない正規表現ベースの解析。LLM 未設定・失敗時の受け皿。
 
-    行ごとに解析し、日付が1つも取れない行・希望内容が判定できない行は
+    行ごとに解析し、日付が1つも取れない行・希望内容が判定できない行（小節）は
     unparsed に入れる（捨てない）。同じ (availability, start, end, staff_hint)
-    の行は dates をまとめる。
+    の内容は dates をまとめる。全角数字は半角に正規化してから解析する。
     """
     entries_by_key = {}
     entry_order = []
     unparsed = []
 
     for raw_line in (text or "").splitlines():
-        line = raw_line.strip()
+        line = _normalize_wish_text(raw_line).strip()
         if not line:
             continue
 
-        dates = _extract_dates(line, year_month)
-        if not dates:
-            unparsed.append(line)
-            continue
-
-        availability, start, end = _extract_wish_availability(line)
-        if availability is None:
-            unparsed.append(line)
-            continue
-
         staff_hint = _extract_staff_hint(line, staff_names)
-        key = (availability, start, end, staff_hint)
-        if key not in entries_by_key:
-            entries_by_key[key] = {
-                "staff_hint": staff_hint, "dates": [], "availability": availability,
-                "start": start, "end": end, "raw": line,
-            }
-            entry_order.append(key)
-        else:
-            entries_by_key[key]["raw"] += "\n" + line
+        line_entries, line_unparsed = _parse_wish_line(line, year_month)
 
-        for d in dates:
-            if d not in entries_by_key[key]["dates"]:
-                entries_by_key[key]["dates"].append(d)
+        for raw_entry in line_entries:
+            key = (raw_entry["availability"], raw_entry["start"], raw_entry["end"], staff_hint)
+            if key not in entries_by_key:
+                entries_by_key[key] = {
+                    "staff_hint": staff_hint, "dates": [], "availability": raw_entry["availability"],
+                    "start": raw_entry["start"], "end": raw_entry["end"], "raw": raw_entry["raw"],
+                }
+                entry_order.append(key)
+            elif raw_entry["raw"] not in entries_by_key[key]["raw"]:
+                entries_by_key[key]["raw"] += "\n" + raw_entry["raw"]
+
+            for d in raw_entry["dates"]:
+                if d not in entries_by_key[key]["dates"]:
+                    entries_by_key[key]["dates"].append(d)
+
+        unparsed.extend(line_unparsed)
 
     entries = []
     for key in entry_order:

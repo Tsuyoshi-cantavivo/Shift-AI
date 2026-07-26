@@ -63,6 +63,28 @@ class TestParseWishFallback:
         r = ai._parse_wish_fallback("8/3は休み", "2026-08")
         assert r["source"] == "fallback"
 
+    def test_comma_separated_conflicting_conditions_split_into_entries(self):
+        """1行に『休み』と時刻が『、』区切りで並ぶ場合、休みが時刻指定を握りつぶさないこと。
+
+        fix round 1: 「8/3は休み、8/5は17-22」を1行のまま解析すると rest語が
+        先勝ちし、8/5 まで rest として誤登録される事故があった。小節ごとに
+        条件を対応付けることで正しく2エントリに分かれることを保証する。
+        """
+        r = ai._parse_wish_fallback("8/3は休み、8/5は17-22", "2026-08")
+        assert len(r["entries"]) == 2
+        rest_entry = next(e for e in r["entries"] if e["availability"] == "rest")
+        time_entry = next(e for e in r["entries"] if e["availability"] == "time")
+        assert rest_entry["dates"] == ["2026-08-03"]
+        assert time_entry["dates"] == ["2026-08-05"]
+        assert time_entry["start"] == "17:00"
+        assert time_entry["end"] == "22:00"
+
+    def test_fullwidth_digits_are_normalized(self):
+        """全角数字（IME変換でありがち）も日付として認識できること。"""
+        r = ai._parse_wish_fallback("８/５は休みです", "2026-08")
+        assert r["entries"][0]["dates"] == ["2026-08-05"]
+        assert r["entries"][0]["availability"] == "rest"
+
 
 class TestParseWishText:
     """LLM が使えない環境では自動でフォールバックに落ちること。"""
