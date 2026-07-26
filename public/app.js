@@ -2625,8 +2625,22 @@ SCREENS.requests = async function (el) {
         <div class="col-5"><label class="form-label" for="reqEnd">終了</label><input type="date" id="reqEnd" class="form-control" value="${defaultEnd}"></div>
         <div class="col-2 flex items-end"><button class="btn btn-primary w-full" id="reqLoadBtn">表示</button></div>
       </div>
+      <div class="mb-3"><button class="btn btn-light w-full" id="reqImportBtn"><i class="bi bi-clipboard-plus"></i> テキストから取り込む</button></div>
       <div id="reqList"><div class="text-secondary small">「表示」ボタンを押してください</div></div>`);
   document.getElementById('reqLoadBtn')?.addEventListener('click', () => loadReqList());
+  document.getElementById('reqImportBtn')?.addEventListener('click', () => openWishImportModal((range) => {
+    // M-9: 取り込んだ日付が現在の一覧フィルタ範囲外だと、登録成功のトーストが出ても
+    // 一覧に何も表示されず「失敗した」ように見える。フィルタを取り込んだ範囲まで広げる。
+    // range は実際に登録した項目の日付min〜max（対象月ではない。8/31〜9/2のように
+    // 対象月をまたぐ取り込みだと対象月だけでは9月分が一覧から漏れるため）。
+    if (range && range.start && range.end) {
+      const sEl = document.getElementById('reqStart');
+      const eEl = document.getElementById('reqEnd');
+      if (sEl && (!sEl.value || sEl.value > range.start)) sEl.value = range.start;
+      if (eEl && (!eEl.value || eEl.value < range.end)) eEl.value = range.end;
+    }
+    loadReqList();
+  }));
   await loadReqList();
 
   async function loadReqList() {
@@ -2791,6 +2805,797 @@ function openStaffReqDetailModal({ staff, list }) {
         </table>
       </div>`,
     null, { saveLabel: '閉じる' });
+}
+
+/* ---------- Wish text import (希望テキスト取り込み) ----------
+   店長が LINE 等のテキストを貼り付けて、複数スタッフ分の希望を代理入力する。
+   流れ: ステップ1(貼付・解析) → ステップ2(月間カレンダーで確認・修正・登録)。
+   parse は保存しないので何度でもやり直せる。bulk 登録は日付ごとに展開して送る。
+   参考: SCREENS.request のスタッフ希望カレンダー（app.js内 `let wishState`/`wishMonth`
+   の少し下）。見た目・操作感（.wish-cal/.wish-cell/.wmark）をそのまま流用している。
+   ここでの状態は `wishState`/`wishMonth`（スタッフ本人用）とは別物として state object
+   に閉じ込め、干渉しないようにする。 */
+
+/* 対象月セレクトの選択肢: 当月を含む前後（-1〜+2ヶ月）。 */
+function _wtiMonthOptions() {
+  const opts = [];
+  const now = new Date();
+  for (let off = -1; off <= 2; off++) {
+    const d = new Date(now.getFullYear(), now.getMonth() + off, 1);
+    const val = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    opts.push({ value: val, label: `${d.getFullYear()}年${d.getMonth() + 1}月` });
+  }
+  return opts;
+}
+function _wtiLastDayOfMonth(yearMonth) {
+  const [y, m] = yearMonth.split('-').map(Number);
+  return new Date(y, m, 0).getDate();
+}
+
+/* 解析結果 entries（dates配列を持つ）を、日付ごとに1件へ展開したフラットな
+   作業状態に変換する。カレンダーでの個別編集・削除・スタッフ割り当てを
+   単純にするため、以降の画面操作はすべてこのフラット配列を対象に行う。
+   entryIdx は「未割り当て」一覧のグルーピング（元の1文をまとめて振り分ける）に使う。 */
+function _wtiFlatten(entries) {
+  const items = [];
+  (entries || []).forEach((e, idx) => {
+    (e.dates || []).forEach((date) => {
+      items.push({
+        uid: `${idx}-${date}-${Math.random().toString(36).slice(2, 7)}`,
+        entryIdx: idx,
+        staffId: e.staff_id || null,
+        staffHint: e.staff_hint || null,
+        date,
+        availability: e.availability,
+        start: e.start || null,
+        end: e.end || null,
+        raw: e.raw || '',
+        // I-3: raw_verified はサーバが「AIの返した raw が貼り付けテキストに実在するか」
+        // を検証した結果（無ければ undefined＝旧サーバ・検証未実装として扱う。false の
+        // ときだけ警告を出す。true/undefined は警告しない）。
+        rawVerified: e.raw_verified,
+        overwriteConfirmed: false,
+      });
+    });
+  });
+  return items;
+}
+
+async function openWishImportModal(onImported) {
+  let staffs = [];
+  try {
+    const sd = await api('/shop/staffs');
+    staffs = (sd.staffs || []).filter((s) => !s.is_resigned);
+  } catch (e) { toast('スタッフ一覧の取得に失敗しました', 'error'); return; }
+  const state = {
+    staffs, items: [], unparsed: [], source: null, periods: [],
+    // I-4: staff_id|date → 既存希望（配列。中身の availability/時刻を保持する。
+    // 従来は Set で「有無」だけ持ち、詳細モーダルで「何が消えるか」を示せなかった）。
+    existing: {},
+    // I-7: どのスタッフ分の既存希望を取得済みか（差分取得のため）。
+    existingFetchedStaffIds: new Set(),
+    existingRange: null,
+    yearMonth: todayStr().slice(0, 7), explicitStaffId: null, rawText: '',
+    calStaffId: null, calMonth: null, onImported,
+    // I-2: どのスタッフのカレンダーを一度でも表示したかを記録し、
+    // 未確認のまま登録しようとした店長に注意を出すために使う。
+    viewedStaffIds: new Set(),
+    // fix round 3: #wtiSubmitMsg に書いた登録結果メッセージ（成功件数・失敗内容）を
+    // state 側にも持たせる。_wtiRenderStep2 が毎回このHTMLを描くことで、
+    // 再描画（成功済み項目の除去を画面に反映するために必須）が直後に走っても
+    // メッセージが消えないようにする。
+    submitMsg: null,
+    // Minor(3399): 部分失敗→再送を繰り返す間、実際に登録できた日付をここへ累積する。
+    // succeededItems（1回のsubmit呼び出しに閉じたローカル変数）だけを使うと、
+    // 再送のたびに「今回成功した分」しか見えず、一覧側のフィルタ拡張（onImported）が
+    // 過去の成功分の日付を取りこぼす。
+    succeededDates: [],
+  };
+  const wrap = openModal('<i class="bi bi-clipboard-plus"></i> テキストから取り込む',
+    '<div class="text-secondary small">読み込み中...</div>', null, { width: 640 });
+  _wtiRenderStep1(wrap, state);
+}
+
+/* I-7: 指定スタッフ分の既存希望（wish_history）をまだ取得していなければ取得し、
+   state.existing にマージする。既に取得済みのスタッフは飛ばす（差分取得）ので、
+   「未割り当て」から新しいスタッフを振り分けるたびに呼んでも無駄打ちしない。
+   I-4: 中身（availability・時刻）まで保持する必要があるため、has()だけで済む Set
+   ではなく `staff_id|date` → 希望配列 のオブジェクトに詰める（同日複数件もありうる）。
+   staff_id パラメータをサーバが未対応でも、余分なクエリパラメータは無視されるだけ
+   なので落ちない（省略時は現在の挙動のまま）。 */
+async function _wtiEnsureExistingLoaded(state, staffIds) {
+  const missing = [...new Set((staffIds || []).filter((sid) => sid && !state.existingFetchedStaffIds.has(sid)))];
+  if (!missing.length || !state.existingRange) return;
+  missing.forEach((sid) => state.existingFetchedStaffIds.add(sid));
+  const { start, end } = state.existingRange;
+  const staffQS = missing.map((sid) => `&staff_id=${sid}`).join('');
+  try {
+    const d = await api(`/shop/wishes?start=${start}&end=${end}${staffQS}`);
+    (d.wishes || []).forEach((w) => {
+      const key = `${w.staff_id}|${(w.start_datetime || '').slice(0, 10)}`;
+      (state.existing[key] = state.existing[key] || []).push(w);
+    });
+  } catch (e) {
+    // 既存希望の照合ができなくても取り込み自体は続行できるようにする（安全側に倒す：
+    // 印・上書き判定が出ないだけで、登録自体は overwrite:false のためサーバ側の
+    // 重複スキップに委ねられる。既存踏襲の方針）。
+  }
+}
+function _wtiExistingFor(state, staffId, date) { return state.existing[`${staffId}|${date}`] || []; }
+function _wtiHasExisting(state, staffId, date) { return _wtiExistingFor(state, staffId, date).length > 0; }
+
+/* I-4: 既存希望1件を「休み希望 17:00-22:00」のような短い日本語にする。
+   N-1修正: サーバのCritical C-1で「時間指定の希望は shifts/wish_history どちらも
+   availability=NULL」に統一された（既存の /api/staff/requests・実UIの
+   submitWish（public/app.js:4362）が time のとき availability を送らないのと
+   揃えるため）。「time」という文字列値は wish_history には存在しないため、
+   w.availability === 'time' を条件にすると常に外れ、時間指定の既存希望が
+   軒並み「種別不明」になっていた（I-4が守ろうとした「何が消えるか見せる」が
+   最も情報価値の高いケースで機能しない状態だった）。availability が無く
+   start/end があるものを「時間指定」として扱う。 */
+function _wtiExistingLabel(w) {
+  const label = { rest: '休み希望', any: 'いつでも可', morning: '早番希望', evening: '遅番希望' };
+  const isTimeSpecified = !w.availability && w.start_datetime && w.end_datetime;
+  const base = isTimeSpecified ? '時間指定' : (label[w.availability] || w.availability || '種別不明');
+  if (isTimeSpecified) {
+    const st = (w.start_datetime.split('T')[1] || '').slice(0, 5);
+    const et = (w.end_datetime.split('T')[1] || '').slice(0, 5);
+    if (st && et) return `${base} ${st}-${et}`;
+  }
+  return base;
+}
+
+/* ★最優先修正: skipped の内訳を人間可読にする。従来は skipped を無条件に
+   「重複のため」と断定していたが、実際には他店舗/退職スタッフ・enum外の
+   availability・wish_history書き込み失敗によるrollback（データが失われた
+   可能性）も同じ skipped に含まれる。skipped_detail（サーバ未対応なら null）
+   から内訳を組み立て、rollback の有無は hasRollback で呼び出し側に伝える。
+   skipped_detail が無い場合は理由を断定しない表現にフォールバックする。 */
+function _wtiSkippedSummary(skipped, skippedDetail) {
+  if (!skipped) return { phrase: '', hasRollback: false };
+  if (!skippedDetail) return { phrase: `${skipped}件はスキップされました`, hasRollback: false };
+  const duplicate = skippedDetail.duplicate || 0;
+  const invalid = skippedDetail.invalid || 0;
+  const rollback = skippedDetail.rollback || 0;
+  const parts = [];
+  if (duplicate) parts.push(`重複 ${duplicate}件`);
+  if (invalid) parts.push(`不正な入力 ${invalid}件`);
+  if (rollback) parts.push(`書き込みに失敗して取り消し ${rollback}件`);
+  const accounted = duplicate + invalid + rollback;
+  if (accounted < skipped) parts.push(`その他 ${skipped - accounted}件`);
+  const phrase = parts.length ? `${skipped}件はスキップ（${parts.join('・')}）` : `${skipped}件はスキップされました`;
+  return { phrase, hasRollback: rollback > 0 };
+}
+
+/* ステップ1: 貼り付け（対象月・スタッフ・テキスト・解析ボタン） */
+function _wtiRenderStep1(wrap, state) {
+  const titleEl = wrap.querySelector('.modal-title');
+  if (titleEl) titleEl.innerHTML = '<i class="bi bi-clipboard-plus"></i> テキストから取り込む';
+  const body = wrap.querySelector('.modal-body');
+  if (!body) return;
+  const monthOpts = _wtiMonthOptions();
+  const staffOptsHtml = state.staffs.map((s) =>
+    `<option value="${s.id}"${state.explicitStaffId === s.id ? ' selected' : ''}>${esc(s.name)}（${roleLabel(s.role)}）</option>`).join('');
+  safeSetHTML(body, `
+    <div class="row mb-2">
+      <div class="col-6"><label class="form-label" for="wtiMonth">対象月</label>
+        <select id="wtiMonth" class="form-select">${monthOpts.map((o) =>
+          `<option value="${o.value}"${o.value === state.yearMonth ? ' selected' : ''}>${o.label}</option>`).join('')}</select>
+      </div>
+      <div class="col-6"><label class="form-label" for="wtiStaff">スタッフ</label>
+        <select id="wtiStaff" class="form-select"><option value="">自動判定</option>${staffOptsHtml}</select>
+      </div>
+    </div>
+    <label class="form-label" for="wtiText">貼り付けるテキスト</label>
+    <textarea id="wtiText" class="form-control mb-2" rows="7" placeholder="例：8/3は休みたいです&#10;8/5、8/7、8/9は17時から22時まで入れます">${esc(state.rawText || '')}</textarea>
+    <button class="btn btn-primary w-full" id="wtiParseBtn" type="button"><i class="bi bi-magic"></i> 解析する</button>
+    <div id="wtiParseMsg" class="mt-2"></div>`);
+  wrap.querySelector('#wtiParseBtn')?.addEventListener('click', () => _wtiParse(wrap, state));
+}
+
+async function _wtiParse(wrap, state) {
+  const text = (wrap.querySelector('#wtiText')?.value || '').trim();
+  if (!text) { toast('テキストを入力してください', 'error'); return; }
+  state.rawText = text;
+  state.yearMonth = wrap.querySelector('#wtiMonth')?.value || state.yearMonth;
+  const staffSel = wrap.querySelector('#wtiStaff')?.value || '';
+  state.explicitStaffId = staffSel ? +staffSel : null;
+  const msgBox = wrap.querySelector('#wtiParseMsg');
+  if (msgBox) msgBox.innerHTML = '<div class="text-secondary small">解析中...</div>';
+  setLoading(true);
+  try {
+    const body = { text, year_month: state.yearMonth };
+    if (state.explicitStaffId) body.staff_id = state.explicitStaffId;
+    const r = await api('/shop/wishes/parse', { method: 'POST', body: JSON.stringify(body) });
+    state.source = r.source;
+    state.unparsed = r.unparsed || [];
+    state.items = _wtiFlatten(r.entries || []);
+    state.viewedStaffIds = new Set();
+    if (!state.items.length) {
+      // I-4: entries が0件（＝解析が最も失敗しているケース）でも、fallback注記と
+      // unparsed は情報価値が最大なので必ず表示する（設計書§4「unparsedは捨てない」）。
+      const fallbackNote = state.source === 'fallback'
+        ? '<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> 簡易解析で読み取りました。内容をよく確認してください。</div>' : '';
+      if (msgBox) msgBox.innerHTML = fallbackNote +
+        '<div class="alert alert-warning py-2 mb-2">日付や希望内容を読み取れませんでした。文面を見直してください。</div>' +
+        _wtiUnparsedHtml(state);
+      setLoading(false);
+      return;
+    }
+    // I-5: 既存希望の取得範囲は「対象月」固定ではなく、実際に解析で出た日付の
+    // min〜maxで取る。カレンダーは月送りで対象月の外（例:8/31〜9/2をまたぐ解析
+    // 結果の9月側）にも移動できるため、対象月だけに限定すると、その月の印・
+    // 上書きチェックボックスが出ず、サーバ側は黙って重複skipするだけの三重の
+    // 齟齬が起きる。対象月レンジは常に含めておく（相対表現の解決基準のため
+    // items が万一空でも対象月自体は見えるようにする）。
+    const dim = _wtiLastDayOfMonth(state.yearMonth);
+    const itemDates = state.items.map((it) => it.date).sort();
+    const start = [itemDates[0], `${state.yearMonth}-01`].sort()[0];
+    const end = [itemDates[itemDates.length - 1], `${state.yearMonth}-${String(dim).padStart(2, '0')}`].sort().pop();
+    state.existingRange = { start, end };
+    state.existing = {};
+    state.existingFetchedStaffIds = new Set();
+    // I-7: /api/shop/wishes は ORDER BY start_datetime DESC LIMIT 500（src/app.py）。
+    // レンジを広げるほど切り捨てに当たりやすく、DESC順のため切り捨てられるのは
+    // 古い日付側＝対象月そのもの。staff_id で絞ることで、解析結果に出たスタッフ
+    // 分だけを取得し、他スタッフの行で LIMIT を消費させない（11名運用で数ヶ月分
+    // 溜まると顕在化していた問題）。staff_id 未対応のサーバでも余分なクエリ
+    // パラメータは無視されるだけで壊れない（フォールバック不要）。
+    const initialStaffIds = [...new Set(state.items.filter((it) => it.staffId).map((it) => it.staffId))];
+    const [periodsD] = await Promise.all([
+      api('/shop/periods').catch(() => ({ periods: [] })),
+      _wtiEnsureExistingLoaded(state, initialStaffIds),
+    ]);
+    state.periods = periodsD.periods || [];
+    const firstAssigned = state.items.find((it) => it.staffId);
+    state.calStaffId = firstAssigned ? firstAssigned.staffId : null;
+    const [iy, im] = state.yearMonth.split('-').map(Number);
+    state.calMonth = { y: iy, m: im - 1 };
+    _wtiRenderStep2(wrap, state);
+  } catch (e) {
+    if (msgBox) msgBox.innerHTML = `<div class="alert alert-danger py-2">${esc(e.message)}</div>`;
+  } finally { setLoading(false); }
+}
+
+/* 期間外の警告文（対象日付のいずれかが、有効な募集期間のどれにも含まれない場合）。
+   募集期間が1つも無い店舗では警告を出さない（未設定でも取り込めるようにする、設計書§3）。 */
+function _wtiPeriodWarnHtml(state) {
+  const periods = (state.periods || []).filter((p) => p.is_active);
+  if (!periods.length) return '';
+  const inAny = (d) => periods.some((p) => d >= p.start_date && d <= p.end_date);
+  const outDates = [...new Set(state.items.map((it) => it.date))].filter((d) => !inAny(d)).sort();
+  if (!outDates.length) return '';
+  const sample = outDates.slice(0, 5).map((d) => d.slice(5)).join('、') + (outDates.length > 5 ? ' 他' : '');
+  return `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> ${outDates.length}件の日付が募集期間外です（${esc(sample)}）。登録は可能ですが、日付を確認してください。</div>`;
+}
+
+/* I-1: 未割り当て・期間外警告と同格の目立ち方にする（従来は灰色小文字で
+   埋もれていた）。
+   Minor（レビュー指摘）: 件数上限が無く、隣の期間外警告（_wtiPeriodWarnHtml）・
+   重複警告（_wtiDuplicateWarnHtml）が5件＋「他」で打ち切っているのと非対称
+   だった。サーバ側のC-1修正で unparsed に落ちる頻度が上がった（「土日」「平日」
+   等を含む文が丸ごと落ちる）ため、375pxでカレンダーが画面外に押し出される
+   実害があった。同じ「5件＋他」の形に揃える。 */
+function _wtiUnparsedHtml(state) {
+  if (!state.unparsed || !state.unparsed.length) return '';
+  const shown = state.unparsed.slice(0, 5);
+  const rows = shown.map((u) => `<li>${esc(u)}</li>`).join('');
+  const moreNote = state.unparsed.length > 5 ? `<li class="text-secondary">他 ${state.unparsed.length - 5}件</li>` : '';
+  return `<div class="wti-unparsed alert alert-warning py-2 mb-2"><i class="bi bi-question-circle"></i> 読み取れなかった文（${state.unparsed.length}件）。必要であれば手入力で補ってください。<ul class="small mb-0 mt-1">${rows}${moreNote}</ul></div>`;
+}
+
+/* C-1: 同一(スタッフ,日付)に複数の読み取りが残っている状態を検出する。
+   src/ai.py のプロンプトは「内容が違えばentriesを分ける」と明示しており、
+   同日に矛盾する2件が返るのは正常系。未割り当ては対象外（staff_id が
+   定まって初めて「同じ枠の競合」になるため）。表示にも送信ブロックにも使う
+   ため、判定ロジックはここに一本化する。 */
+function _wtiFindDuplicateGroups(state) {
+  const groups = {};
+  state.items.forEach((it) => {
+    if (!it.staffId) return;
+    const key = `${it.staffId}|${it.date}`;
+    (groups[key] = groups[key] || []).push(it);
+  });
+  const dup = {};
+  Object.keys(groups).forEach((k) => { if (groups[k].length > 1) dup[k] = groups[k]; });
+  return dup;
+}
+
+/* カレンダーは後勝ちで1件しか描けないため、店長が気づけるようここで必ず知らせる。
+   期間外警告（_wtiPeriodWarnHtml）と同じく5件＋「他」で打ち切る（375pxでカレンダーが
+   画面外に押し出されるのを防ぐ）。 */
+function _wtiDuplicateWarnHtml(state) {
+  const dupGroups = _wtiFindDuplicateGroups(state);
+  const dupKeys = Object.keys(dupGroups);
+  if (!dupKeys.length) return '';
+  const parts = dupKeys.map((k) => {
+    const [sid, date] = k.split('|');
+    const s = state.staffs.find((x) => x.id === +sid);
+    return `${esc(s ? s.name : '不明')} ${esc(date.slice(5))}`;
+  });
+  const sample = parts.slice(0, 5).join('、') + (parts.length > 5 ? ' 他' : '');
+  return `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> 同じ日に複数の読み取りがあります（${sample}）。日付を開いて、どちらを登録するか確認してください。</div>`;
+}
+
+/* I-2: 「1人目だけ見て登録」を防ぐための内訳表示。未確認（一度もカレンダーを
+   開いていない）スタッフがいれば個別に示す。 */
+function _wtiSummaryInfo(state) {
+  const assignedStaffIds = [...new Set(state.items.filter((it) => it.staffId).map((it) => it.staffId))];
+  const chips = assignedStaffIds.map((sid) => {
+    const s = state.staffs.find((x) => x.id === sid);
+    const cnt = state.items.filter((it) => it.staffId === sid).length;
+    const unseen = !state.viewedStaffIds.has(sid);
+    return badge(`${s ? s.name : '不明#' + sid} ${cnt}件${unseen ? '・未確認' : ''}`, unseen ? 'warning' : 'muted');
+  });
+  const total = state.items.filter((it) => it.staffId).length;
+  return { chipsHtml: chips.join(' '), total };
+}
+
+/* H:MM → 「17-22」のような短縮表記（M-1）。分が :00 なら省略する。 */
+function _wtiShortTime(t) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(t || '');
+  if (!m) return '?';
+  const h = String(Number(m[1]));
+  return m[2] === '00' ? h : `${h}:${m[2]}`;
+}
+
+/* ステップ2: スタッフ切り替え + 月間カレンダー + 未割り当て一覧 + 登録ボタン。
+   何かが変わるたびに（スタッフ切替・月送り・編集・削除・割り当て）この関数を
+   呼び直して全体を再描画する。件数が小さい（1人1ヶ月分）ため、差分更新より
+   単純さを優先した。 */
+function _wtiRenderStep2(wrap, state) {
+  const titleEl = wrap.querySelector('.modal-title');
+  if (titleEl) titleEl.innerHTML = '<i class="bi bi-clipboard-check"></i> 取り込み内容の確認';
+  const body = wrap.querySelector('.modal-body');
+  if (!body) return;
+
+  const sourceWarn = state.source === 'fallback'
+    ? `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> 簡易解析で読み取りました。内容をよく確認してください。</div>`
+    : '';
+
+  const assignedStaffIds = [...new Set(state.items.filter((it) => it.staffId).map((it) => it.staffId))];
+  if (!state.calStaffId || !assignedStaffIds.includes(state.calStaffId)) {
+    state.calStaffId = assignedStaffIds[0] || null;
+  }
+  // I-2: 表示した瞬間に「確認済み」として記録する（未確認スタッフの注意表示に使う）
+  if (state.calStaffId) state.viewedStaffIds.add(state.calStaffId);
+
+  const staffSelectHtml = assignedStaffIds.length
+    ? `<select id="wtiCalStaff" class="form-select mb-2">${assignedStaffIds.map((sid) => {
+        const s = state.staffs.find((x) => x.id === sid);
+        const cnt = state.items.filter((it) => it.staffId === sid).length;
+        return `<option value="${sid}"${sid === state.calStaffId ? ' selected' : ''}>${esc(s ? s.name : '不明#' + sid)}（${cnt}件）</option>`;
+      }).join('')}</select>`
+    : `<div class="info-box mb-2"><i class="bi bi-info-circle"></i> 割り当て済みのスタッフがいません。下の「未割り当て」から振り分けてください。</div>`;
+
+  const summary = _wtiSummaryInfo(state);
+
+  // I-1: unparsed はカレンダーより上（sourceWarn直後）に格上げして配置。
+  // C-1: 同一(スタッフ,日付)の競合警告もカレンダーより上で必ず目に入るようにする。
+  safeSetHTML(body, `
+    ${sourceWarn}
+    ${_wtiUnparsedHtml(state)}
+    ${_wtiDuplicateWarnHtml(state)}
+    ${staffSelectHtml}
+    ${assignedStaffIds.length ? `<div class="cal-toolbar">
+      <button class="cal-nav-btn" id="wtiCalPrev" type="button"><i class="bi bi-chevron-left"></i></button>
+      <div class="cal-title num" id="wtiCalTitle"></div>
+      <button class="cal-nav-btn" id="wtiCalNext" type="button"><i class="bi bi-chevron-right"></i></button>
+    </div>
+    <div class="cal-weekdays"><div class="sun">日</div><div>月</div><div>火</div><div>水</div><div>木</div><div>金</div><div class="sat">土</div></div>
+    <div id="wtiCalGrid" class="wish-cal wti-cal"></div>` : ''}
+    <div id="wtiPeriodWarn">${_wtiPeriodWarnHtml(state)}</div>
+    <div id="wtiUnassigned"></div>
+    ${summary.chipsHtml ? `<div class="wti-summary-chips mb-2">${summary.chipsHtml}</div>` : ''}
+    <div class="flex gap-2 mt-1">
+      <button class="btn btn-light" id="wtiBackBtn" type="button"><i class="bi bi-arrow-left"></i> やり直す</button>
+      <button class="btn btn-primary flex-grow" id="wtiSubmitBtn" type="button"><i class="bi bi-check2-circle"></i> 合計 ${summary.total}件を登録する</button>
+    </div>
+    <div id="wtiSubmitMsg" class="mt-2">${state.submitMsg || ''}</div>`);
+
+  wrap.querySelector('#wtiCalStaff')?.addEventListener('change', (e) => {
+    state.calStaffId = +e.target.value;
+    const [iy, im] = state.yearMonth.split('-').map(Number);
+    state.calMonth = { y: iy, m: im - 1 };
+    _wtiRenderStep2(wrap, state);
+  });
+  wrap.querySelector('#wtiCalPrev')?.addEventListener('click', () => {
+    state.calMonth.m--; if (state.calMonth.m < 0) { state.calMonth.m = 11; state.calMonth.y--; }
+    _wtiRenderStep2(wrap, state);
+  });
+  wrap.querySelector('#wtiCalNext')?.addEventListener('click', () => {
+    state.calMonth.m++; if (state.calMonth.m > 11) { state.calMonth.m = 0; state.calMonth.y++; }
+    _wtiRenderStep2(wrap, state);
+  });
+  wrap.querySelector('#wtiBackBtn')?.addEventListener('click', () => _wtiRenderStep1(wrap, state));
+  wrap.querySelector('#wtiSubmitBtn')?.addEventListener('click', () => _wtiSubmit(wrap, state));
+
+  _wtiRenderCalendar(wrap, state);
+  _wtiRenderUnassigned(wrap, state);
+}
+
+/* カレンダー本体の描画。SCREENS.request の drawWish() と同じ .wish-cal/.wish-cell/.wmark
+   を使い、見た目・操作感を揃える。既存希望がある日には印（アイコン）を付ける。
+   C-1: 同一(スタッフ,日付)に複数項目がありうる（src/ai.py のプロンプトが
+   「内容が違えばentriesを分ける」よう指示しているため、正常系として起こる）。
+   後勝ちで1件だけ描いて矛盾を隠すと、店長が見た画面と送信内容がずれる
+   （プレビューは店長が誤りを捕まえる最後の関門）ため、日付ごとに配列で持つ。 */
+function _wtiRenderCalendar(wrap, state) {
+  const titleEl = wrap.querySelector('#wtiCalTitle');
+  const gridEl = wrap.querySelector('#wtiCalGrid');
+  if (!gridEl) return;
+  if (!state.calStaffId || !state.calMonth) { gridEl.innerHTML = ''; if (titleEl) titleEl.textContent = ''; return; }
+  const { y, m } = state.calMonth;
+  if (titleEl) titleEl.textContent = `${y}年 ${m + 1}月`;
+  const first = new Date(y, m, 1); const startWd = first.getDay();
+  const dim = new Date(y, m + 1, 0).getDate();
+  const label = { any: '終日', morning: '早', evening: '遅', rest: '休' };
+  // Minor: it.availability は _wtiFlatten 経由でサーバ（AI）由来の値を素通しして
+  // いるため、enum を矯正しているのは現状サーバ側の1箇所のみ。ここでも既知の値
+  // 以外はクラス名として使わない（属性注入経路を1つに依存させない）。
+  const knownAvail = { any: 1, morning: 1, evening: 1, rest: 1, time: 1 };
+  const byDate = {};
+  state.items.filter((it) => it.staffId === state.calStaffId).forEach((it) => {
+    (byDate[it.date] = byDate[it.date] || []).push(it);
+  });
+  let cells = '';
+  for (let i = 0; i < startWd; i++) cells += '<div class="wish-cell empty"></div>';
+  for (let d = 1; d <= dim; d++) {
+    const ds = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    const dayItems = byDate[ds] || [];
+    const wd = new Date(ds + 'T00:00:00').getDay();
+    const wdCls = wd === 0 ? 'sun' : (wd === 6 ? 'sat' : '');
+    const hasExisting = _wtiHasExisting(state, state.calStaffId, ds);
+    // I-3: raw が貼り付けテキストに実在しない（AIの要約・創作の疑い）警告。
+    // 開かないと気づけないため、詳細モーダルだけでなくカレンダーにも印を付ける。
+    const hasUnverified = dayItems.some((it) => it.rawVerified === false);
+    let mark = '';
+    if (dayItems.length === 1) {
+      const it = dayItems[0];
+      const availCls = knownAvail[it.availability] ? it.availability : 'time';
+      const markText = it.availability === 'time' ? `${_wtiShortTime(it.start)}-${_wtiShortTime(it.end)}` : (label[it.availability] || it.availability);
+      mark = `<div class="wmark ${availCls}">${esc(markText)}</div>`;
+    } else if (dayItems.length > 1) {
+      mark = `<div class="wmark wti-conflict">競合${dayItems.length}</div>`;
+    }
+    const flag = hasExisting ? '<i class="bi bi-exclamation-circle-fill wti-existing-flag" title="既存の希望があります"></i>' : '';
+    const unverifiedFlag = hasUnverified
+      ? '<i class="bi bi-patch-exclamation-fill wti-raw-unverified-flag" title="AIが要約・創作した可能性がある文があります"></i>' : '';
+    // M-3: 項目のない日は押しても何も起きないので、期間外セルと同じ .disabled で見た目も抑える。
+    // ただし既存希望の印（wti-existing-flag）がある日は disabled にしない
+    // （disabled の opacity:.35 が、意図的に目立たせたい警告アイコンまで薄めてしまうため）。
+    // Minor(3161): 項目が無く既存希望の印だけがある日はクリックしても no-op なので、
+    // 目立たせたい（=薄くしない）まま cursor だけ default に戻す（別クラス）。
+    let cellCls;
+    if (dayItems.length) cellCls = 'wish-cell';
+    else if (hasExisting) cellCls = 'wish-cell wti-existing-only';
+    else cellCls = 'wish-cell disabled';
+    cells += `<div class="${cellCls}" data-day="${ds}"><div class="wd ${wdCls}">${d}</div>${mark}${flag}${unverifiedFlag}</div>`;
+  }
+  gridEl.innerHTML = cells;
+  gridEl.querySelectorAll('.wish-cell[data-day]').forEach((c) => {
+    c?.addEventListener('click', () => {
+      const has = state.items.some((it) => it.staffId === state.calStaffId && it.date === c.dataset.day);
+      if (has) _wtiOpenDetail(wrap, state, c.dataset.day);
+    });
+  });
+}
+
+/* 日付クリックで開く詳細: 読み取り内容・【元の文】の対比表示(必須)・修正・削除。
+   既存希望がある日は「上書きする」チェックを出す（既定オフ＝スキップ側）。
+   C-1: 同日に複数の読み取りが残っている場合は全件を列挙し、個別に編集・削除
+   できるようにする（1件だけ見せて他方を隠すとプレビューと送信内容がずれる）。 */
+function _wtiOpenDetail(wrap, state, date) {
+  const idxs = [];
+  state.items.forEach((it, i) => { if (it.staffId === state.calStaffId && it.date === date) idxs.push(i); });
+  if (!idxs.length) return;
+  const existingList = _wtiExistingFor(state, state.calStaffId, date);
+  const hasExisting = existingList.length > 0;
+  const availLabelMap = { rest: '休み希望', any: '終日OK', morning: '早番希望', evening: '遅番希望', time: '時間指定' };
+  const overwriteChecked = idxs.some((i) => state.items[i].overwriteConfirmed);
+  const entryBlocks = idxs.map((idx, n) => {
+    const it = state.items[idx];
+    const availLabel = availLabelMap[it.availability] || it.availability;
+    // I-3: raw がAIの要約・言い換え・幻覚である可能性（raw_verified===false）を
+    // 明示する。これが無いと店長は「捏造された元の文」と照合することになり、
+    // カレンダープレビューという最後の関門が無効化される。
+    const unverifiedWarn = it.rawVerified === false
+      ? `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> ⚠ この文は貼り付けたテキストに見つかりませんでした。AIが要約または創作した可能性があります。</div>`
+      : '';
+    return `<div class="wti-detail-entry" data-idx="${idx}">
+      ${idxs.length > 1 ? `<div class="small text-secondary mb-1">読み取り ${n + 1}/${idxs.length}</div>` : ''}
+      <div class="mb-2">${badge('読み取り: ' + availLabel, it.availability === 'rest' ? 'danger' : 'info')}</div>
+      <div class="small text-secondary mb-1">元の文</div>
+      <div class="wti-raw-quote mb-2">${esc(it.raw || '（元の文なし）')}</div>
+      ${unverifiedWarn}
+      <label class="form-label" for="wtiDetailAvail-${idx}">内容を修正</label>
+      <select id="wtiDetailAvail-${idx}" class="form-select mb-2" data-role="avail">
+        <option value="rest"${it.availability === 'rest' ? ' selected' : ''}>休み</option>
+        <option value="any"${it.availability === 'any' ? ' selected' : ''}>いつでも可</option>
+        <option value="morning"${it.availability === 'morning' ? ' selected' : ''}>早番</option>
+        <option value="evening"${it.availability === 'evening' ? ' selected' : ''}>遅番</option>
+        <option value="time"${it.availability === 'time' ? ' selected' : ''}>時間指定</option>
+      </select>
+      <div id="wtiDetailTimeRow-${idx}" class="row mb-2" style="${it.availability === 'time' ? '' : 'display:none'}">
+        <div class="col-6"><input type="time" id="wtiDetailStart-${idx}" class="form-control" value="${esc(it.start || '')}"></div>
+        <div class="col-6"><input type="time" id="wtiDetailEnd-${idx}" class="form-control" value="${esc(it.end || '')}"></div>
+      </div>
+      <button type="button" class="btn btn-outline-danger btn-sm" data-del-idx="${idx}"><i class="bi bi-trash"></i> この項目を削除</button>
+    </div>`;
+  }).join('');
+  // I-4: 「既存の希望があります」としか出さないと、店長は何が消えるか分からない
+  // まま上書きチェックを入れることになる。上書きすると wish_history の当該
+  // (staff_id, date) の行は全件消える（複数行あっても全部）ため、中身を列挙する。
+  const existingListHtml = hasExisting
+    ? `<div class="small mt-1">現在の登録: ${existingList.map((w) => esc(_wtiExistingLabel(w))).join(' / ')}（${existingList.length}件）</div>` : '';
+  const body = `
+    <div class="mb-2"><strong class="num">${esc(date)}</strong>（${wdName(date)}）</div>
+    <div id="wtiDetailErr"></div>
+    ${entryBlocks}
+    ${hasExisting ? `<div class="alert alert-warning py-2 mt-2 mb-1"><i class="bi bi-exclamation-triangle"></i> この日は既に希望が登録されています。${existingListHtml}<label class="flex items-center gap-2 mt-1" style="font-weight:400"><input type="checkbox" id="wtiDetailOverwrite"${overwriteChecked ? ' checked' : ''}> 既存を上書きして登録する（上記${existingList.length}件を削除して置き換えます）</label></div>` : ''}`;
+  const dm = openModal(`<i class="bi bi-calendar-event"></i> ${esc(date)}の希望`, body, (w2, close) => {
+    // I-6: time なのに時刻未入力の項目があれば、保存せず・閉じずにエラーを出す。
+    // 同日に複数項目があるときは、どれが問題かを「読み取り n/件数」で示す（Minor指摘対応）
+    for (let n = 0; n < idxs.length; n++) {
+      const idx = idxs[n];
+      const selEl = w2.querySelector(`#wtiDetailAvail-${idx}`);
+      if (!selEl) continue;
+      if (selEl.value === 'time') {
+        const st = w2.querySelector(`#wtiDetailStart-${idx}`)?.value;
+        const et = w2.querySelector(`#wtiDetailEnd-${idx}`)?.value;
+        if (!st || !et) {
+          const errBox = w2.querySelector('#wtiDetailErr');
+          const posText = idxs.length > 1 ? `（読み取り ${n + 1}/${idxs.length}）` : '';
+          if (errBox) errBox.innerHTML = `<div class="alert alert-danger py-2 mb-2">時間指定の場合は開始・終了の両方を入力してください${posText}。</div>`;
+          return;
+        }
+      }
+    }
+    idxs.forEach((idx) => {
+      const selEl = w2.querySelector(`#wtiDetailAvail-${idx}`);
+      if (!selEl) return;
+      const it = state.items[idx];
+      it.availability = selEl.value;
+      if (it.availability === 'time') {
+        it.start = w2.querySelector(`#wtiDetailStart-${idx}`)?.value || null;
+        it.end = w2.querySelector(`#wtiDetailEnd-${idx}`)?.value || null;
+      } else {
+        it.start = null; it.end = null;
+      }
+    });
+    if (hasExisting) {
+      const confirmed = !!w2.querySelector('#wtiDetailOverwrite')?.checked;
+      idxs.forEach((idx) => { if (state.items[idx]) state.items[idx].overwriteConfirmed = confirmed; });
+    }
+    close();
+    _wtiRenderStep2(wrap, state);
+  }, { saveLabel: '保存' });
+  idxs.forEach((idx) => {
+    dm.querySelector(`#wtiDetailAvail-${idx}`)?.addEventListener('change', (e) => {
+      const row = dm.querySelector(`#wtiDetailTimeRow-${idx}`);
+      if (row) row.style.display = e.target.value === 'time' ? 'flex' : 'none';
+    });
+  });
+  // 削除は即座に確定（複数件を一括で消す操作は想定しないため、1件消したら
+  // モーダルを閉じて再描画する。他の項目を消したい場合は開き直せばよい）
+  dm.querySelectorAll('[data-del-idx]').forEach((btn) => btn?.addEventListener('click', () => {
+    const delIdx = +btn.dataset.delIdx;
+    state.items.splice(delIdx, 1);
+    dm.remove();
+    _wtiRenderStep2(wrap, state);
+  }));
+}
+
+/* 未割り当て一覧: staff_id が null のエントリを、元の1文（entryIdx）単位でまとめて
+   表示する。スタッフを選ぶまでは登録対象に入らない（推測で割り当てない）。 */
+function _wtiRenderUnassigned(wrap, state) {
+  const box = wrap.querySelector('#wtiUnassigned');
+  if (!box) return;
+  const groups = {};
+  state.items.forEach((it) => { if (!it.staffId) (groups[it.entryIdx] = groups[it.entryIdx] || []).push(it); });
+  const entryIdxs = Object.keys(groups);
+  if (!entryIdxs.length) { box.innerHTML = ''; return; }
+  const label = { rest: '休み', any: 'いつでも可', morning: '早番', evening: '遅番', time: '時間指定' };
+  const staffOpts = state.staffs.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+  const rows = entryIdxs.map((eidx) => {
+    const grp = groups[eidx];
+    const raw = grp[0].raw;
+    const datesTxt = grp.map((g) => g.date.slice(5)).join('、');
+    const availTxt = label[grp[0].availability] || grp[0].availability;
+    const hintTxt = grp[0].staffHint ? `（候補: ${esc(grp[0].staffHint)}）` : '';
+    return `<div class="wti-unassigned-row">
+      <div class="wti-unassigned-info">
+        <div class="small text-secondary">${esc(datesTxt)} ・ ${esc(availTxt)}${hintTxt}</div>
+        <div class="wti-raw-quote">${esc(raw)}</div>
+      </div>
+      <select class="form-select wti-unassigned-select" data-entry="${eidx}">
+        <option value="">誰の希望か選ぶ</option>${staffOpts}
+      </select>
+    </div>`;
+  }).join('');
+  box.innerHTML = `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-person-exclamation"></i> 未割り当て ${entryIdxs.length}件（スタッフを選ぶまで登録されません）</div>${rows}`;
+  box.querySelectorAll('[data-entry]').forEach((sel) => sel?.addEventListener('change', async () => {
+    const eidx = sel.dataset.entry;
+    const sid = +sel.value || null;
+    if (!sid) return;
+    state.items.forEach((it) => { if (String(it.entryIdx) === eidx && !it.staffId) it.staffId = sid; });
+    state.calStaffId = sid;
+    buzz(10);
+    // I-7: 未割り当てから新たにスタッフへ振り分けたときは、そのスタッフ分の既存希望が
+    // まだ未取得（初回parse時点では staffId が null で対象外だった）なので取得する。
+    await _wtiEnsureExistingLoaded(state, [sid]);
+    _wtiRenderStep2(wrap, state);
+  }));
+}
+
+/* 登録: staff_id が付いた項目のみ対象。overwrite は API 全体に一括で効くフラグの
+   ため、明示的に「上書きする」を選んだ日だけを分けて別リクエストで送る
+   （選んでいない日を巻き込んで消してしまわないようにするため）。
+   I-3: 2回に分けて送る以上、片方だけ失敗する部分失敗が起こりうる。その場合
+   「成功した分は何件か」を必ず示し、成功済み項目は state.items から取り除いて
+   二重送信を防ぐ（uid で照合。配列の index は再描画のたびにずれるため使わない）。 */
+async function _wtiSubmit(wrap, state) {
+  const msgBox = wrap.querySelector('#wtiSubmitMsg');
+  const assignable = state.items.filter((it) => it.staffId);
+  if (!assignable.length) { toast('登録できる希望がありません（未割り当てのみです）', 'error'); return; }
+  // Important（再レビュー指摘）: 同一(スタッフ,日付)の競合が残ったまま overwrite を
+  // チェックすると、1つの overwriteConfirmed が両エントリに共有されて overwriteGroup に
+  // まとめて入る。サーバの DELETE は希望1件ごとのループの中で走るため、
+  // entry1をINSERT→entry2のDELETEがentry1を消す→entry2をINSERTとなり、
+  // 最終的に1行しか残らないのに created は2を返す（店長には「2件登録」と見える）。
+  // 競合が残っている限り、どちらのグループにも入れず送信をブロックして
+  // 店長に解消（片方を削除）させる方が、送信内容とプレビューの一致を保証できる。
+  const dupGroups = _wtiFindDuplicateGroups(state);
+  if (Object.keys(dupGroups).length) {
+    // Minor(3323): 「どちらか一方に」は2件競合の言い回し。AIは同日3件以上の
+    // 競合も返しうる（実際に受け入れテストで確認済み）ため、件数に依らず正しい
+    // 表現にする。
+    toast('同じ日に複数の読み取りが残っています。日付を開いて、1件だけ残してから登録してください。', 'error');
+    return;
+  }
+  // I-6: time なのに時刻未入力のまま送信されるのを送信直前でも弾く（詳細モーダルの
+  // バリデーションをすり抜けるケースは無いはずだが、最終防衛線として置く）
+  const badTime = assignable.find((it) => it.availability === 'time' && (!it.start || !it.end));
+  if (badTime) {
+    toast(`時刻が未入力の項目があります（${badTime.date.slice(5)}）。日付を開いて時刻を入力してください。`, 'error');
+    return;
+  }
+  const toWish = (it) => ({ staff_id: it.staffId, date: it.date, availability: it.availability, start: it.start, end: it.end, raw: it.raw });
+  const overwriteGroup = assignable.filter((it) => _wtiHasExisting(state, it.staffId, it.date) && it.overwriteConfirmed);
+  const normalGroup = assignable.filter((it) => !(_wtiHasExisting(state, it.staffId, it.date) && it.overwriteConfirmed));
+  setLoading(true);
+  state.submitMsg = '<div class="text-secondary small">登録中...</div>';
+  if (msgBox) msgBox.innerHTML = state.submitMsg;
+  let created = 0, skipped = 0;
+  // ★最優先修正: skipped_detail（サーバ未対応なら null 扱い）の内訳を合算する。
+  // 片方のリクエストだけ detail を返さない（サーバ未対応の過渡期）ケースに備え、
+  // skipped>0 なのに detail が無いリクエストが1つでもあれば全体を「内訳不明」
+  // 扱いにし、理由を断定した表示をしない（skippedDetailKnown）。
+  const skippedDetail = { duplicate: 0, invalid: 0, rollback: 0 };
+  let skippedDetailKnown = true;
+  const succeededItems = [];
+  const errors = [];
+  const mergeResult = (r) => {
+    created += r.created || 0;
+    const sk = r.skipped || 0;
+    skipped += sk;
+    if (r.skipped_detail) {
+      skippedDetail.duplicate += r.skipped_detail.duplicate || 0;
+      skippedDetail.invalid += r.skipped_detail.invalid || 0;
+      skippedDetail.rollback += r.skipped_detail.rollback || 0;
+    } else if (sk > 0) {
+      skippedDetailKnown = false;
+    }
+  };
+  if (normalGroup.length) {
+    try {
+      const r1 = await api('/shop/wishes/bulk', { method: 'POST', body: JSON.stringify({ wishes: normalGroup.map(toWish), overwrite: false }) });
+      mergeResult(r1);
+      succeededItems.push(...normalGroup);
+    } catch (e) { errors.push(`新規分: ${e.message}`); }
+  }
+  if (overwriteGroup.length) {
+    try {
+      const r2 = await api('/shop/wishes/bulk', { method: 'POST', body: JSON.stringify({ wishes: overwriteGroup.map(toWish), overwrite: true }) });
+      mergeResult(r2);
+      succeededItems.push(...overwriteGroup);
+    } catch (e) { errors.push(`上書き分: ${e.message}`); }
+  }
+  setLoading(false);
+  const skSummary = _wtiSkippedSummary(skipped, skippedDetailKnown ? skippedDetail : null);
+  // N-2（レビュー指摘）: 「HTTPリクエストが成功した（例外を投げなかった）」ことと
+  // 「実際に created された」ことは別。succeededItems は前者の単位（グループ全体）
+  // でしか分からず、サーバは個々の項目のうちどれが created/skipped/rollback
+  // だったかを返さない。以前はここで無条件に state.items から取り除いていたため、
+  // created===0（全件スキップ）でもカレンダーの元になる項目が消え、セルをクリック
+  // しても無反応になり、再送しようとすると「登録できる希望がありません」という
+  // 画面と矛盾するトーストが出た。rollback>0（一部だけ書き込み失敗）でも同様に、
+  // 失敗した項目を再送する手段が失われていた。
+  // → 以下の各分岐は、state.items から取り除いてよい（＝グループがまるごと
+  //   成功したと言える）場合を created>0 かつ rollback が無い場合に限定する
+  //   （下の「全件成功」分岐のみが該当。created===0 / rollback>0 の分岐は
+  //   state.items に一切触れず、店長がカレンダーを操作し続けられる・
+  //   再送できる状態を保つ）。
+
+  if (errors.length) {
+    // 部分失敗: 正常系では normalGroup/overwriteGroup の一方しか失敗しえないため、
+    // 成功した側のグループは「HTTP成功＝概ね意図通り送れた」とみなして取り除く
+    // （失敗した側だけを再送できるようにする。既存のテストが前提にしている挙動）。
+    const succeededUids = new Set(succeededItems.map((it) => it.uid));
+    state.items = state.items.filter((it) => !succeededUids.has(it.uid));
+    state.succeededDates.push(...succeededItems.map((it) => it.date));
+    // Minor（レビュー指摘）: successPart にサーバの message をそのまま使うと、
+    // その message 自体がスキップ理由（例:「1件は既存の希望と重複のためスキップ」）
+    // を含んでいる場合があり、skippedPart（skipped_detailベースの自前の内訳）と
+    // 同じ内容が2回・別の言い回しで出てしまう。created件数だけを自前で述べ、
+    // スキップの理由説明は skippedPart に一本化する。
+    const successPart = created > 0 ? `${created}件を登録しました。` : '';
+    const skippedPart = skSummary.phrase ? `${skSummary.phrase}。` : '';
+    // fix round 3: #wtiSubmitMsg への直書きは、この2行下の _wtiRenderStep2 が
+    // #wtiSubmitMsg ごと再描画するため直後に消えてしまう（e2e が実機で検出）。
+    // 再描画自体は succeededItems 除去後の state を画面（カレンダー・合計件数）に
+    // 反映するために必須なので削らず、メッセージを state 側に持たせて
+    // _wtiRenderStep2 に描かせることで、再描画後も残るようにする。
+    state.submitMsg = `<div class="alert alert-danger py-2">${esc(successPart)}${esc(skippedPart)}失敗: ${esc(errors.join(' / '))}</div>`;
+    toast(created > 0 ? `一部登録できませんでした（${created}件は登録済み）` : '登録に失敗しました', 'error');
+    _wtiRenderStep2(wrap, state);
+    return;
+  }
+
+  if (created === 0) {
+    // M-2: 全件スキップは成功ではない。緑トーストにせず、モーダルも閉じずに内容を
+    // 見直せるようにする。★最優先修正: 以前は skipped を無条件に「重複のため」と
+    // 決め打ちしていたが、他店舗/退職スタッフ・enum外のavailability・
+    // wish_history書き込み失敗によるrollback（データが失われた可能性）も同じ
+    // skipped に含まれるため、実際には書き込みエラーでも「重複のため」と表示
+    // されてしまっていた。skipped_detail に基づく正確な内訳に直す。
+    // N-2: shouldDiscardSucceeded は false（created===0）なので state.items には
+    // 触れていない。画面（カレンダー・合計件数）も変わっていないので再描画不要。
+    const msg = skSummary.phrase ? `登録できる項目がありませんでした。${skSummary.phrase}` : '登録できる項目がありませんでした';
+    // rollback（書き込み失敗による取り消し＝データ消失の可能性）は通常のスキップより
+    // 一段強い警告色（alert-danger）で目立たせる。
+    state.submitMsg = `<div class="alert ${skSummary.hasRollback ? 'alert-danger' : 'alert-warning'} py-2 mb-0">${esc(msg)}</div>`;
+    if (msgBox) msgBox.innerHTML = state.submitMsg;
+    toast(msg, skSummary.hasRollback ? 'error' : 'warning');
+    return;
+  }
+
+  if (skSummary.hasRollback) {
+    // N-2: created>0 でも、rollback（書き込み失敗による取り消し）した項目が
+    // どれかはサーバから分からない。グループ全体を state.items から取り除くと、
+    // 実際には失敗した分を二度と再送できなくなる。最低限の安全策として、ここでも
+    // state.items には触れない（黙って閉じないだけでなく、再送できる状態を保つ。
+    // 再送すれば、既にcreated済みの分はサーバ側の重複判定で無害にスキップされる）。
+    // 一覧側の背景更新は今回createdできたと分かっている分の日付だけを使う
+    // （state.succeededDates には積まない＝「確定した」ことにはしない）。
+    const optimisticDates = succeededItems.map((it) => it.date).sort();
+    const optimisticRange = optimisticDates.length
+      ? { start: optimisticDates[0], end: optimisticDates[optimisticDates.length - 1] } : null;
+    if (typeof state.onImported === 'function') state.onImported(optimisticRange);
+    state.submitMsg = `<div class="alert alert-danger py-2"><i class="bi bi-exclamation-octagon"></i> ${esc(`${created}件を登録しました。${skSummary.phrase}`)}</div>`;
+    if (msgBox) msgBox.innerHTML = state.submitMsg;
+    toast(`${created}件を登録しましたが、一部は書き込みに失敗して取り消されました`, 'error');
+    return;
+  }
+
+  // 全件成功（スキップがあっても重複・不正な入力のみ）。created>0 かつ
+  // rollback 無しと確認できたのはこの分岐だけなので、ここでのみ
+  // succeededItems を state.items から取り除く。
+  const succeededUids = new Set(succeededItems.map((it) => it.uid));
+  state.items = state.items.filter((it) => !succeededUids.has(it.uid));
+  // Minor(3399): 部分失敗→再送を繰り返しても、過去に成功した分の日付を失わないよう
+  // state 側に累積する（onImported へ渡す一覧フィルタ拡張レンジの計算に使う）。
+  state.succeededDates.push(...succeededItems.map((it) => it.date));
+  // M-9（再レビュー指摘）: I-5で月またぎ取り込みが可能になったため、フィルタ拡張は
+  // state.yearMonth（対象月）ではなく、実際に登録できた項目の日付min〜maxを渡す
+  // （8/31〜9/2のように対象月をまたぐ場合、対象月だけでは9月分の日付が一覧に出ない）。
+  const submittedDates = state.succeededDates.slice().sort();
+  const range = submittedDates.length
+    ? { start: submittedDates[0], end: submittedDates[submittedDates.length - 1] }
+    : null;
+  if (typeof state.onImported === 'function') state.onImported(range);
+  wrap.remove();
+  toast(`${created}件を登録しました${skSummary.phrase ? `。${skSummary.phrase}` : ''}`, 'success');
 }
 
 /* ---------- Analytics (人件費分析) ---------- */

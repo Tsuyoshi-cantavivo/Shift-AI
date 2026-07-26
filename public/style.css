@@ -1448,3 +1448,44 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
   margin-top: 6px;
   font-size: .75rem;
 }
+
+/* ---------- 34. Wish text import (希望テキスト取り込み) ---------- */
+/* カレンダー本体は .wish-cal/.wish-cell/.wmark（セクション26）をそのまま流用。
+   ここでは「既存希望あり」の印と、元の文の対比表示に必要な分だけ追加する。 */
+.wti-cal .wish-cell { position: relative; }
+/* .disabled の見た目は section 26 の .wish-cell.disabled（opacity:.35）をそのまま
+   継承するため、ここでの再定義は不要（レビュー指摘: バイト単位で同一のデッドCSS）。 */
+.wti-existing-flag {
+  position: absolute; top: 3px; right: 3px; font-size: .62rem; color: var(--warning);
+}
+/* I-3: raw が貼り付けテキストに実在しない（AIの要約・創作の疑い）ことを示す印。
+   既存希望フラグ（右上）と同時に出ても重ならないよう反対側（左上）に置く。 */
+.wti-raw-unverified-flag {
+  position: absolute; top: 3px; left: 3px; font-size: .62rem; color: var(--danger);
+}
+/* Minor: 項目は無いが既存希望の印だけがある日は、クリックしても何も起きない
+   （no-op）。.disabled のように暗くはしたくない（印を目立たせたい）ので、
+   opacity はそのままに cursor だけ既定へ戻す別クラス。 */
+.wti-cal .wish-cell.wti-existing-only { cursor: default; }
+/* 同一(スタッフ,日付)に複数の読み取りが残っている日のマーク（レビュー C-1）。
+   .wmark.morning と同じ配色（--warning地に--paper文字）を流用し、コントラストは
+   既に検証済みの組み合わせのまま新規トークンを増やさない。 */
+.wti-cal .wmark.wti-conflict { background: var(--warning); }
+/* 引用（--paper）が親の未割り当て行（--paper）と同化しないよう、地を一段変える。
+   ink-2 on surface のコントラストは光量子測定済み（レビュー M-5）。 */
+.wti-raw-quote {
+  background: var(--surface); border-left: 3px solid var(--info); border-radius: var(--radius-sm);
+  padding: 6px 10px; font-size: .82rem; line-height: 1.5; color: var(--ink-2);
+  white-space: pre-wrap; word-break: break-word;
+}
+.wti-unassigned-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 12px; background: var(--paper); border: 1px solid var(--rule);
+  border-radius: var(--radius); margin-bottom: 8px;
+}
+.wti-unassigned-info { flex: 1 1 220px; min-width: 0; }
+.wti-unassigned-select { flex: 0 0 auto; width: auto; min-width: 160px; }
+.wti-unparsed ul { padding-left: 18px; margin: 0; }
+/* 日付詳細モーダル: 同日に複数の読み取りが並ぶ場合の区切り */
+.wti-detail-entry + .wti-detail-entry { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--rule); }
+.wti-summary-chips { display: flex; flex-wrap: wrap; gap: 4px; }
