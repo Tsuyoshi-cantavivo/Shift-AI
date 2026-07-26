@@ -2839,6 +2839,9 @@ def shop_shifts_post():
     body = request.get_json(silent=True) or {}
     auto_adjust = bool(body.get("auto_adjust"))
     staff_id = body["staff_id"]
+    # 自店舗の shop_id を持ちながら他店舗スタッフを指す行を作らせない。
+    # /api/shop/wishes/bulk (src/app.py:3711-3720 付近) と同じ防御。
+    _assert_staff_in_shop(staff_id, shop_id)
     start_dt = body["start_datetime"]
     end_dt = body["end_datetime"]
     # 隣接する同一スタッフの confirmed があれば自動的に統合（17-18 + 18-22 → 17-22）
@@ -2968,6 +2971,11 @@ def shop_shifts_put(sid):
     if not existing:
         abort(404, description="シフトが見つかりません")
     staff_id = body.get("staff_id") or existing["staff_id"]
+    # 自店舗の shop_id を持ちながら他店舗スタッフへ付け替えられないようにする。
+    # staff_id 省略時は既存値を維持するだけなので検証不要（値があるときだけ検証）。
+    # /api/shop/wishes/bulk (src/app.py:3711-3720 付近) と同じ防御。
+    if body.get("staff_id") is not None:
+        _assert_staff_in_shop(body.get("staff_id"), shop_id)
     # 確定シフトのロック：確定済みシフトの時間・担当変更は直接編集できない。
     # 変更はスタッフの「変更申請」を承認して反映する（時刻・担当が変わらない再保存や
     # requested/modifying からの確定は許可）。UI もメモ以外を編集不可にしている。

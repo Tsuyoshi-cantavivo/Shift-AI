@@ -659,7 +659,9 @@ class TestErrorHandling:
             "end_datetime": f"{MON}T18:00:00",
         }, headers=auth(token))
         # JSON レスポンス（HTML stack trace ではない）
-        assert r.status_code in (400, 500)
+        # 404: staff_id="not_a_number" は所属店舗検証(_assert_staff_in_shop)で
+        # 「スタッフが見つかりません」として先に弾かれる（型エラーより前段）。
+        assert r.status_code in (400, 404, 500)
         data = r.get_json()
         assert "error" in data
         # HTML が混入していないこと

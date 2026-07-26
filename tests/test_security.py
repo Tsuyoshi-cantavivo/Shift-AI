@@ -612,3 +612,51 @@ class TestFixedShiftsAuth:
         # 他店舗のデータが残っていること
         from db import query_one as qo
         assert qo("SELECT id FROM fixed_shifts WHERE id=?", (fid,)) is not None
+
+
+class TestShiftStaffScope:
+    def _login_shop_a(self, client):
+        shop_a = insert_shop("SHOPA", "pw12345678")
+        insert_staff(shop_a, "mgrA", "店長A", role="manager", password="pw12345678")
+        r = client.post("/api/login", json={"shop_code": "SHOPA", "user_code": "mgrA",
+                                            "password": "pw12345678"})
+        assert r.status_code == 200
+        return shop_a, r.get_json()["token"]
+
+    def test_shift_create_rejects_other_shop_staff(self, client):
+        """他店舗スタッフを指すシフトを作成できないこと。"""
+        shop_a, token = self._login_shop_a(client)
+        shop_b = insert_shop("SHOPB", "pw12345678")
+        staff_b = insert_staff(shop_b, "p1", "他店の人")
+
+        # NOTE: /api/shop/shifts の実際のリクエスト形は staff_id/start_datetime/
+        # end_datetime（brief 記載の date/start_time/end_time ではない。
+        # public/app.js の実呼び出しおよび tests/test_admin_staff_apis.py で確認済み）。
+        r = client.post("/api/shop/shifts",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"staff_id": staff_b,
+                              "start_datetime": "2026-08-03T09:00:00",
+                              "end_datetime": "2026-08-03T17:00:00"})
+        assert r.status_code == 404, "他店舗スタッフのシフトが作れてしまう"
+
+    def test_shift_update_rejects_other_shop_staff(self, client):
+        """自店舗のシフトを他店舗スタッフに付け替えられないこと。"""
+        shop_a, token = self._login_shop_a(client)
+        staff_a = insert_staff(shop_a, "p1", "自店の人")
+        shop_b = insert_shop("SHOPB", "pw12345678")
+        staff_b = insert_staff(shop_b, "p2", "他店の人")
+
+        r = client.post("/api/shop/shifts",
+                        headers={"Authorization": f"Bearer {token}"},
+                        json={"staff_id": staff_a,
+                              "start_datetime": "2026-08-03T09:00:00",
+                              "end_datetime": "2026-08-03T17:00:00"})
+        assert r.status_code == 200
+        shift_id = r.get_json().get("id")
+
+        r = client.put(f"/api/shop/shifts/{shift_id}",
+                       headers={"Authorization": f"Bearer {token}"},
+                       json={"staff_id": staff_b,
+                             "start_datetime": "2026-08-03T09:00:00",
+                             "end_datetime": "2026-08-03T17:00:00"})
+        assert r.status_code == 404, "他店舗スタッフに付け替えできてしまう"
