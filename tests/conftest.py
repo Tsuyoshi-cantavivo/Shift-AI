@@ -30,6 +30,8 @@ _TABLES = [
     "audit_logs",
     # 消し忘れると、あるテストのログイン失敗が次のテストにロック状態として漏れる
     "login_attempts",
+    # migrator.py が遅延作成するテーブル。消し忘れると適用状態がテスト間で漏れる
+    "schema_migrations",
     "change_requests",
     "shifts",
     "wish_history",
@@ -52,6 +54,14 @@ def db_reset():
     dbmod.init_schema(SCHEMA_PATH)
     conn = dbmod.get_conn()
     try:
+        # schema_migrations は schema.sql ではなく migrator.py が遅延作成する
+        # テーブルなので、DELETE 対象にする前に無害に存在保証しておく
+        # （migrator が一度も呼ばれていないテストで DELETE が「no such table」で
+        # 落ちるのを防ぐ。DDL は migrator._ensure_table() と同一内容）。
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations ("
+                     "filename TEXT NOT NULL, stmt_index INTEGER NOT NULL, "
+                     "applied_at TEXT DEFAULT (datetime('now')), "
+                     "PRIMARY KEY (filename, stmt_index))")
         for t in _TABLES:
             conn.execute(f"DELETE FROM {t}")
         # AUTOINCREMENT の連番をリセット（表が存在しなければ無害）
