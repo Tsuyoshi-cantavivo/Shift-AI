@@ -86,6 +86,51 @@ class TestParseWishFallback:
         assert r["entries"][0]["dates"] == ["2026-08-05"]
         assert r["entries"][0]["availability"] == "rest"
 
+    def test_date_before_kara_is_not_read_as_hour(self):
+        """fix round 2: 「8/5からは休みです」の『5』が『N時から』パターンに
+        誤って時刻として拾われ、休みだけの文が rest/time 混在の競合と
+        誤判定されて unparsed に落ちていた回帰。日付トークンを取り除いてから
+        時刻の有無を判定することで、正しく rest として抽出されること。
+        """
+        r = ai._parse_wish_fallback("8/5からは休みです", "2026-08")
+        assert r["unparsed"] == []
+        assert len(r["entries"]) == 1
+        assert r["entries"][0]["dates"] == ["2026-08-05"]
+        assert r["entries"][0]["availability"] == "rest"
+
+    def test_date_before_made_is_not_read_as_hour(self):
+        """fix round 2: 「8/9までNGです」の『9』が『N時まで』パターンに
+        誤って時刻として拾われ unparsed に落ちていた回帰。
+        """
+        r = ai._parse_wish_fallback("8/9までNGです", "2026-08")
+        assert r["unparsed"] == []
+        assert len(r["entries"]) == 1
+        assert r["entries"][0]["dates"] == ["2026-08-09"]
+        assert r["entries"][0]["availability"] == "rest"
+
+    def test_made_kara_split_across_comma_is_not_falsely_unparsed(self):
+        """fix round 2: 「8/3までは休み、8/9からは出れます」の前半が
+        『まで』により日番号3を時刻と誤読され、小節分割後も unparsed に
+        落ちていた回帰。前半は正しく rest/8-3 の1エントリになること。
+        """
+        r = ai._parse_wish_fallback("8/3までは休み、8/9からは出れます", "2026-08")
+        assert r["unparsed"] == []
+        assert len(r["entries"]) == 2
+        rest_entry = next(e for e in r["entries"] if e["availability"] == "rest")
+        assert rest_entry["dates"] == ["2026-08-03"]
+
+    def test_single_segment_conflicting_signals_still_goes_to_unparsed(self):
+        """(b) 最終防衛線の単一小節（カンマ分割を経由しない）経路の専用テスト。
+
+        「8/3は休みだけど17-22なら」はカンマを含まないため _parse_wish_line が
+        小節を1つしか作らない。日付トークン除去後も『休み』と有効な時刻範囲が
+        同一小節に残る本物の競合であり、rest/time どちらかを黙って確定せず
+        unparsed に送られ続けること（fix round 2 のリグレッション防止に対する回帰）。
+        """
+        r = ai._parse_wish_fallback("8/3は休みだけど17-22なら", "2026-08")
+        assert r["entries"] == []
+        assert r["unparsed"] == ["8/3は休みだけど17-22なら"]
+
 
 class TestParseWishText:
     """LLM が使えない環境では自動でフォールバックに落ちること。"""

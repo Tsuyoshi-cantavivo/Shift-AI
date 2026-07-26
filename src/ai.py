@@ -1010,9 +1010,16 @@ def _wish_has_conflicting_signals(segment):
     17-22 が握りつぶされ、休みでない日が休みとして誤登録される事故が起きる。
     小節分割で大半は解消するが、万一1小節内に両方の語が残った場合は
     誤ったavailabilityを黙って確定するより unparsed に送って人に渡す。
+
+    時刻の有無は、日付トークン（8/5 等）を取り除いた文字列に対して判定する。
+    `_parse_explicit_time_range` の「N時から/以降/まで/迄」系パターンは
+    1〜2桁の数字が区切り語に直接続けばそれだけでマッチするため、除去せずに
+    判定すると「8/5からは休みです」のような日付の日番号が時刻として誤読され、
+    休みだけの小節が誤って競合と判定されてしまう（fix round 2）。
     """
     has_rest = any(w in segment for w in _WISH_REST_WORDS)
-    has_time = _parse_explicit_time_range(segment) is not None
+    without_dates = _WISH_DATE_TOKEN_RE.sub("", segment)
+    has_time = _parse_explicit_time_range(without_dates) is not None
     return has_rest and has_time
 
 
