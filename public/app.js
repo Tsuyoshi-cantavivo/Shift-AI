@@ -882,7 +882,7 @@ function buildStaticTimelineHtml(list, anchorDate) {
   for (let h = minH; h <= maxH; h++) {
     const lbl = _extHourLabel(h);
     const isNextDay = h >= 24;
-    hours.push(`<div class="tl-hour${isNextDay ? ' tl-hour-next' : ''}">${isNextDay ? '(翌)' : ''}${lbl}</div>`);
+    hours.push(`<div class="tl-hour${isNextDay ? ' tl-hour-next' : ''}">${lbl}</div>`);
   }
 
   // 配置帯のグリッド用: 表示時間数と、24:00 の位置（範囲外なら線を出さない）
@@ -1225,7 +1225,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
   for (let h = minH; h <= maxH; h++) {
     const lbl = _extHourLabel(h);
     const isNextDay = h >= 24;
-    hours.push(`<div class="tl-hour${isNextDay ? ' tl-hour-next' : ''}">${isNextDay ? '(翌)' : ''}${lbl}</div>`);
+    hours.push(`<div class="tl-hour${isNextDay ? ' tl-hour-next' : ''}">${lbl}</div>`);
   }
   // 配置帯のグリッド用: 表示時間数と、24:00 の位置（範囲外なら線を出さない）
   const tlHours = Math.max(1, maxH - minH);
