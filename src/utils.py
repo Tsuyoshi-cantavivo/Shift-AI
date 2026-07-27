@@ -440,6 +440,75 @@ _BUSINESS_HOURS_RE = re.compile(
     r"^([01]?[0-9]|[2-3][0-9]|4[0-7]):[0-5][0-9]-([01]?[0-9]|[2-3][0-9]|4[0-7]):[0-5][0-9]$")
 
 
+# "YYYY-MM-DD"。<input type="date"> の値と calc_next_period() の出力がこの形。
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def validate_numeric_field(value, label, default=None):
+    """数値であるべきフィールドを検証し、数値（int / float）にして返す。
+
+    【なぜ必要か】shops.settings と同じクラスの保存型XSSが、数値のはずの列に
+    残っていた。SQLite の INTEGER affinity は数値として解釈できない TEXT を
+    そのまま保持するため、staffs.hourly_wage に
+    `" onfocus="alert(1)" autofocus x="` を保存でき、管理コンソールの
+    スタッフ編集モーダル（無エスケープの `value="${s.hourly_wage}"`）で
+    value 属性を抜けて独立した属性としてパースされ、ハンドラが実行された。
+    店舗ユーザー → 運営管理者への権限昇格になる。
+    描画側の esc() だけでなく、そもそも数値以外を保存させない「入口」も塞ぐ。
+
+    None / "" は「未指定」として default を返す（既存の
+    `body.get("hourly_wage") or 1000` 形式のフォールバックを保つため）。
+    数値として読める文字列は数値に変換して受け入れる
+    （<input type="number"> の値を文字列のまま送るクライアントを壊さない）。
+    bool は Python では int のサブクラスなので明示的に弾く
+    （validate_known_settings_values と同じ扱い）。
+    """
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{label} は数値で指定してください")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{label} は数値で指定してください")
+        return value
+    if isinstance(value, str):
+        try:
+            # int を先に試す（"1100" を 1100.0 にせず整数のまま保つ）
+            return int(value.strip())
+        except ValueError:
+            pass
+        try:
+            n = float(value.strip())
+        except ValueError:
+            raise ValueError(f"{label} は数値で指定してください")
+        if not math.isfinite(n):
+            raise ValueError(f"{label} は数値で指定してください")
+        return n
+    raise ValueError(f"{label} は数値で指定してください")
+
+
+def validate_date_field(value, label, default=None):
+    """日付であるべきフィールドを "YYYY-MM-DD" として検証して返す。
+
+    数値フィールドと同じ理由（保存型XSS の入口封じ）。
+    shift_request_periods の start_date / end_date / deadline は
+    public/app.js の複数箇所で無エスケープの `value="${p.start_date}"` として
+    描画されるため、日付以外を保存させない。
+    形だけでなく実在する日付であることまで見る（"2026-02-30" を弾く）。
+    """
+    if value is None or value == "":
+        return default
+    if not isinstance(value, str) or not _DATE_RE.match(value):
+        raise ValueError(f"{label} は YYYY-MM-DD 形式で指定してください")
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"{label} に存在しない日付が指定されています")
+    return value
+
+
 def validate_known_settings_values(patch):
     """shops.settings に部分更新でマージする patch のうち、既知キー（SETTINGS_KEYS）
     だけを値の型で検証する。不正なら ValueError を送出する

@@ -623,7 +623,7 @@ function openAdminStaffEditModal(shopId, s, onDone) {
      <label class="form-label" for="aeRole">ロール</label>
      <select id="aeRole" class="form-select mb-2">${roles.map((o) => `<option value="${o.v}" ${o.v === s.role ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>
      <label class="form-label" for="aeWage">時給</label>
-     <input id="aeWage" type="number" class="form-control mb-2" value="${s.hourly_wage != null ? s.hourly_wage : ''}">
+     <input id="aeWage" type="number" class="form-control mb-2" value="${esc(s.hourly_wage != null ? s.hourly_wage : '')}">
      <div class="flex items-center gap-2 mb-1"><input id="aeResigned" type="checkbox" ${s.is_resigned ? 'checked' : ''}><label for="aeResigned" class="form-label mb-0">退職として扱う</label></div>
      <div class="small text-secondary mb-2"><i class="bi bi-info-circle"></i> 学生アルバイトは月80h上限が自動適用されます。ロール変更でセッションは無効化されません（軽微編集用）。</div>
      <div class="form-error mt-1" id="aeErr"></div>`,

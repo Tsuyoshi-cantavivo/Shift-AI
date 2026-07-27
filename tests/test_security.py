@@ -547,18 +547,42 @@ class TestOpenRedirect:
 # Information Disclosure (CWE-209)
 # ============================================================
 class TestInfoDisclosure:
-    def test_500_error_does_not_leak_stacktrace(self, client):
-        """サーバエラー時のレスポンスに Python スタックトレースを含めない。"""
+    def test_500_error_does_not_leak_stacktrace(self, client, monkeypatch):
+        """サーバエラー時のレスポンスに Python スタックトレース・ソースの場所を含めない。
+
+        【旧テストが何も見ていなかったこと】（レビュー指摘）
+          1. 誘発しようとしていた `staff_id: 1` は他店舗のスタッフなので
+             _assert_staff_in_shop が先に 404 を返しており、500 ハンドラに
+             一度も到達していなかった。
+          2. 最後の assert は演算子の優先順位が
+             `(A and B) or (status == 500)` になっており、500 のときは A/B が
+             どうであろうと真になる。つまり「500 のときの中身」を見るための
+             assert が、まさに 500 のときだけ空振りしていた。
+          結果として「生エラー露出を守っているはずのテスト」が、露出を一度も
+          観測していなかった。ここでは確実に 500 ハンドラへ到達させ、
+          到達したこと自体もアサートする。
+        """
+        import db as _db
+
         shop_id = insert_shop()
         tok = make_session("shop", shop_id, shop_id)
-        # わざと不正な datetime を送信して 500 を誘発
-        r = client.post("/api/shop/shifts", json={
-            "staff_id": 1, "start_datetime": "INVALID", "end_datetime": "ALSO_INVALID",
-        }, headers=auth(tok))
+
+        # 500 を確実に誘発する（ValueError は 400 ハンドラに吸われるので使わない）。
+        # 例外メッセージにファイルパス・行番号らしき文字列を混ぜ、それが
+        # そのままクライアントに出ていかないことまで見る。
+        def boom(sql, params=()):
+            raise RuntimeError('File "/srv/app/src/app.py", line 4242, in boom')
+
+        monkeypatch.setattr(_db, "query_all", boom)
+        r = client.get("/api/shop/staffs", headers=auth(tok))
+
+        assert r.status_code == 500, (
+            f"500 ハンドラに到達していない（このテストの前提が崩れている）: {r.status_code}")
         body = r.get_data(as_text=True)
-        # スタックトレース ("Traceback (most recent call last)") が含まれないこと
-        assert "Traceback" not in body
-        assert ".py\"、" not in body and "line " not in body.lower() or r.status_code == 500
+        assert "Traceback" not in body, body
+        assert 'File "' not in body, f"ソースファイルの位置が漏れている: {body}"
+        assert "line 4242" not in body, f"行番号が漏れている: {body}"
+        assert ".py" not in body, f"ソースファイル名が漏れている: {body}"
 
     def test_dotenv_not_served(self, client):
         """.env ファイルが静的配信されないこと。"""

@@ -24,7 +24,7 @@ from db import query_all, query_one, execute, insert_row
 from auth import hash_password, verify_password, strip_password
 from utils import (calc_next_period, jst_now, parse_settings, validate_password,
                     sanitize_login_code, LOGIN_CODE_MAX, validate_known_settings_values,
-                    SETTINGS_KEYS)
+                    validate_numeric_field, SETTINGS_KEYS)
 import json
 import re
 import secrets
@@ -810,13 +810,17 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
         dup = query_one("SELECT id FROM staffs WHERE shop_id=? AND staff_code=?", (sid, body["staff_code"]))
         if dup:
             abort(400, description=f"ユーザーコード '{body['staff_code']}' は既に存在します")
+        # 数値フィールドの型検証（保存型XSS の入口封じ）。店舗側の
+        # POST /api/shop/staffs と同じ穴がここにもあった。
+        wage = validate_numeric_field(body.get("hourly_wage"), "時給")
+        max_in = validate_numeric_field(body.get("max_hours_per_month"), "月間上限時間")
         # 学生アルバイトは80h上限
-        max_hours = 80 if role == "student" else (body.get("max_hours_per_month") or 160)
+        max_hours = 80 if role == "student" else (max_in or 160)
         meta = execute(
             "INSERT INTO staffs (shop_id, staff_code, password_hash, name, role, hourly_wage, "
             "min_hours_per_month, max_hours_per_month) VALUES (?,?,?,?,?,?,?,?)",
             (sid, body["staff_code"], hash_password(pw), body["name"], role,
-             body.get("hourly_wage") or 1000, 0, max_hours))
+             wage or 1000, 0, max_hours))
         audit("staff.create", target_type="staff", target_id=meta["last_row_id"], shop_id=sid,
               detail=body.get("name"))
         return jsonify({"ok": True, "id": meta["last_row_id"], "role": role,

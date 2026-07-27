@@ -964,7 +964,7 @@ function shiftDetailHtml(s, editable) {
   const statusBadge = s.status === 'confirmed' ? badge('確定', 'success') : s.status === 'requested' ? badge('調整待ち', 'warning') : badge('調整中', 'info');
   const edit = editable ? `<button class="btn btn-sm btn-light edit-shift"><i class="bi bi-pencil"></i></button>` : '';
   return `<div class="shift-line">
-    <div><span class="dot ${sc}"></span><span class="time">${hm(s.start_datetime)} - ${hm(s.end_datetime)}</span>${s.break_time_minutes ? `<span class="who">・休憩${s.break_time_minutes}分</span>` : ''} ${statusBadge}</div>
+    <div><span class="dot ${sc}"></span><span class="time">${hm(s.start_datetime)} - ${hm(s.end_datetime)}</span>${s.break_time_minutes ? `<span class="who">・休憩${esc(s.break_time_minutes)}分</span>` : ''} ${statusBadge}</div>
     <div class="flex items-center gap-2"><span class="who">${esc(s.staff_name || '')}</span>${edit}</div>
   </div>`;
 }
@@ -1399,7 +1399,9 @@ function openDayTimeline(date, allShifts, editable, onChange) {
       const overCap = !!s.over_cap_flag;
       const overCapCls = overCap ? ' tl-bar-overcap' : '';
       const overCapMark = overCap ? '<span class="tl-bar-overcap-mark" aria-hidden="true">⚠️</span>' : '';
-      const noteTitle = s.note ? `\nメモ: ${s.note}` : '';
+      // shifts.note はスタッフが希望提出時に自由入力できる。title 属性に生で
+      // 入れると " で属性を抜けられるため、必ず esc() を通す。
+      const noteTitle = s.note ? `\nメモ: ${esc(s.note)}` : '';
       const overCapTitle = overCap ? '\n⚠必要人数超過の時間帯を含みます' : '';
       const dragAttrs = editable && isDraft ? ' data-draft-editable="true"' : '';
       const handles = editable && isDraft ? '<span class="tl-drag-handle tl-drag-handle-start" aria-hidden="true"></span><span class="tl-drag-handle tl-drag-handle-end" aria-hidden="true"></span>' : '';
@@ -1652,8 +1654,8 @@ function showEditModal(s) {
     return wl;
   }
   const w = openModal(`<i class="bi bi-pencil-square"></i> シフト編集${s.staff_name ? ' — ' + esc(s.staff_name) : ''}`,
-    `${overCapBanner}<label class="form-label" for="mStart">開始</label><input type="datetime-local"  id="mStart" class="form-control mb-2" value="${toLocal(s.start_datetime)}">
-     <label class="form-label" for="mEnd">終了</label><input type="datetime-local"  id="mEnd" class="form-control mb-3" value="${toLocal(s.end_datetime)}">
+    `${overCapBanner}<label class="form-label" for="mStart">開始</label><input type="datetime-local"  id="mStart" class="form-control mb-2" value="${esc(toLocal(s.start_datetime))}">
+     <label class="form-label" for="mEnd">終了</label><input type="datetime-local"  id="mEnd" class="form-control mb-3" value="${esc(toLocal(s.end_datetime))}">
      <label class="form-label" for="mStatus">ステータス</label><select id="mStatus" class="form-select mb-3">
        <option value="confirmed" ${s.status === 'confirmed' ? 'selected' : ''}>確定</option>
        <option value="modifying" ${s.status === 'modifying' ? 'selected' : ''}>調整中</option>
@@ -1930,8 +1932,8 @@ function renderGenerateTab(body, p) {
   body.innerHTML =
     card(sectionTitle('bi-calendar-range', '作成期間') +
       `<div class="row">
-        <div class="col-6"><label class="form-label" for="genStart">開始日</label><input type="date"  id="genStart" class="form-control" value="${p.start_date}"></div>
-        <div class="col-6"><label class="form-label" for="genEnd">終了日</label><input type="date"  id="genEnd" class="form-control" value="${p.end_date}"></div>
+        <div class="col-6"><label class="form-label" for="genStart">開始日</label><input type="date"  id="genStart" class="form-control" value="${esc(p.start_date)}"></div>
+        <div class="col-6"><label class="form-label" for="genEnd">終了日</label><input type="date"  id="genEnd" class="form-control" value="${esc(p.end_date)}"></div>
       </div>`) +
     `<div id="genConditions"></div>` +
     card(`<div class="text-center" style="padding:8px 0">
@@ -2124,8 +2126,8 @@ SCREENS.shifts = function (el) {
   el.innerHTML = pageHead('シフト管理', 'bi-calendar3') +
     card(sectionTitle('bi-magic', '自動作成・手動操作') +
       `<div class="row mb-2">
-        <div class="col-6 col-sm-5"><label class="form-label" for="sStart">開始</label><input type="date" id="sStart" class="form-control" value="${p.start_date}"></div>
-        <div class="col-6 col-sm-5"><label class="form-label" for="sEnd">終了</label><input type="date" id="sEnd" class="form-control" value="${p.end_date}"></div>
+        <div class="col-6 col-sm-5"><label class="form-label" for="sStart">開始</label><input type="date" id="sStart" class="form-control" value="${esc(p.start_date)}"></div>
+        <div class="col-6 col-sm-5"><label class="form-label" for="sEnd">終了</label><input type="date" id="sEnd" class="form-control" value="${esc(p.end_date)}"></div>
         <div class="col-12 col-sm-2 mt-2 mt-sm-0"><label class="form-label d-none d-sm-block">&nbsp;</label><button class="btn btn-ai w-full" id="autoGen" title="AI自動作成"><i class="bi bi-stars"></i> AI生成</button></div>
       </div>
       <div class="flex gap-2 flex-wrap">
@@ -2354,7 +2356,7 @@ async function loadStaffList() {
           <span class="dot ${roleClass(s.role)}"></span>
           <div>
             <strong>${esc(s.name)}</strong> <span class="text-secondary">${esc(s.staff_code)}</span>${s.is_resigned ? badge('退職', 'warning') : ''}
-            <div class="small text-secondary">${roleLabel(s.role)} ・ 時給${s.hourly_wage}円 ・ 月${s.min_hours_per_month}-${s.max_hours_per_month}h</div>
+            <div class="small text-secondary">${roleLabel(s.role)} ・ 時給${esc(s.hourly_wage)}円 ・ 月${esc(s.min_hours_per_month)}-${esc(s.max_hours_per_month)}h</div>
           </div>
         </div>
         <div class="flex gap-1">
@@ -2382,9 +2384,9 @@ function showStaffForm(s) {
     </div>
     <label class="form-label mt-2">ロール</label><select id="f_role" class="form-select"><option value="part_time" ${s && s.role === 'part_time' ? 'selected' : ''}>アルバイト</option><option value="student" ${s && s.role === 'student' ? 'selected' : ''}>学生アルバイト（月${STUDENT_MAX_HOURS}h上限）</option><option value="employee" ${s && s.role === 'employee' ? 'selected' : ''}>社員</option><option value="manager" ${s && s.role === 'manager' ? 'selected' : ''}>店舗管理者（店舗権限）</option></select>
     <div class="row mt-2">
-      <div class="col-4"><label class="form-label" for="f_wage">時給</label><input id="f_wage" type="number" class="form-control" value="${s ? s.hourly_wage : 1100}"></div>
-      <div class="col-4"><label class="form-label" for="f_min">最低h</label><input id="f_min" type="number" class="form-control" value="${s ? s.min_hours_per_month : 0}"></div>
-      <div class="col-4"><label class="form-label" for="f_max">上限h ${isStudent ? `<span class="text-danger small">(学生は${STUDENT_MAX_HOURS})</span>` : ''}</label><input id="f_max" type="number" class="form-control" value="${s ? s.max_hours_per_month : 160}" ${isStudent ? 'max="' + STUDENT_MAX_HOURS + '"' : ''}></div>
+      <div class="col-4"><label class="form-label" for="f_wage">時給</label><input id="f_wage" type="number" class="form-control" value="${esc(s ? s.hourly_wage : 1100)}"></div>
+      <div class="col-4"><label class="form-label" for="f_min">最低h</label><input id="f_min" type="number" class="form-control" value="${esc(s ? s.min_hours_per_month : 0)}"></div>
+      <div class="col-4"><label class="form-label" for="f_max">上限h ${isStudent ? `<span class="text-danger small">(学生は${STUDENT_MAX_HOURS})</span>` : ''}</label><input id="f_max" type="number" class="form-control" value="${esc(s ? s.max_hours_per_month : 160)}" ${isStudent ? 'max="' + STUDENT_MAX_HOURS + '"' : ''}></div>
     </div>
     <div class="small text-secondary mt-1" id="f_role_hint" style="display:${isStudent ? 'block' : 'none'}"><i class="bi bi-info-circle"></i> 学生アルバイトは月間${STUDENT_MAX_HOURS}時間上限・学生のみのシフトは作成できません。</div>
     <label class="form-label mt-2">ステータス</label><select id="f_resign" class="form-select"><option value="0" ${!s || !s.is_resigned ? 'selected' : ''}>在籍</option><option value="1" ${s && s.is_resigned ? 'selected' : ''}>退職</option></select>
@@ -2515,14 +2517,14 @@ function showFixedShiftModal(staffId, staffName) {
       w.querySelector('#fxList').innerHTML = mine.length ? mine.map((f) => `
         <div class="list-row"><div>${badge(WD[f.weekday] + '曜', 'info')} ${esc(f.start_time)} - ${esc(f.end_time)}</div>
         <div class="flex gap-1">
-          <button class="btn btn-sm btn-light" data-edit="${f.id}" data-wd="${f.weekday}" data-st="${f.start_time}" data-et="${f.end_time}"><i class="bi bi-pencil"></i></button>
+          <button class="btn btn-sm btn-light" data-edit="${f.id}" data-wd="${esc(f.weekday)}" data-st="${esc(f.start_time)}" data-et="${esc(f.end_time)}"><i class="bi bi-pencil"></i></button>
           <button class="btn btn-sm btn-outline-danger" data-del="${f.id}"><i class="bi bi-x"></i></button>
         </div></div>`).join('') : '<div class="small text-secondary">固定シフト未設定</div>';
       w.querySelectorAll('[data-del]').forEach((b) => b?.addEventListener('click', async () => { await api(`/shop/fixed-shifts/${b.dataset.del}`, { method: 'DELETE' }); mine = mine.filter((m) => m.id != b.dataset.del); render(w); }));
       w.querySelectorAll('[data-edit]').forEach((b) => {
         b?.addEventListener('click', () => openModal('<i class="bi bi-pencil"></i> 固定シフト編集',
           `<label class="form-label" for="eWd">曜日</label><select id="eWd" class="form-select mb-2">${WD.map((n, i) => `<option value="${i}" ${i == b.dataset.wd ? 'selected' : ''}>${n}曜</option>`).join('')}</select>
-           <div class="row"><div class="col-6"><label class="form-label" for="eSt">開始</label><input id="eSt" class="form-control" value="${b.dataset.st}"></div><div class="col-6"><label class="form-label" for="eEt">終了</label><input id="eEt" class="form-control" value="${b.dataset.et}"></div></div>`,
+           <div class="row"><div class="col-6"><label class="form-label" for="eSt">開始</label><input id="eSt" class="form-control" value="${esc(b.dataset.st)}"></div><div class="col-6"><label class="form-label" for="eEt">終了</label><input id="eEt" class="form-control" value="${esc(b.dataset.et)}"></div></div>`,
           async (w2, close2) => {
             try { await api(`/shop/fixed-shifts/${b.dataset.edit}`, { method: 'PUT', body: JSON.stringify({ weekday: +w2.querySelector('#eWd').value, start_time: w2.querySelector('#eSt').value, end_time: w2.querySelector('#eEt').value }) });
               const m = mine.find((x) => x.id == b.dataset.edit); if (m) { m.weekday = +w2.querySelector('#eWd').value; m.start_time = w2.querySelector('#eSt').value; m.end_time = w2.querySelector('#eEt').value; }
@@ -2600,7 +2602,7 @@ SCREENS.myshift = async function (el) {
         });
         return;
       }
-      safeSetHTML(infoBox, `<div class="my-info-row"><i class="bi bi-person-badge"></i> <strong>${esc(me.staff.name)}</strong> (${esc(me.staff.staff_code)}) ・ ${roleLabel(me.staff.role)} ・ 時給${me.staff.hourly_wage}円</div>`);
+      safeSetHTML(infoBox, `<div class="my-info-row"><i class="bi bi-person-badge"></i> <strong>${esc(me.staff.name)}</strong> (${esc(me.staff.staff_code)}) ・ ${roleLabel(me.staff.role)} ・ 時給${esc(me.staff.hourly_wage)}円</div>`);
     }
     // 確定シフト（+ AIドラフトも確認用に表示）
     const shiftsBox = document.getElementById('myShifts');
@@ -4109,14 +4111,14 @@ async function loadMatrix(body) {
         const wr = p.weekday_required || {};
         return `<tr data-pid="${p.id}">
           <td><div class="matrix-pat-name">${esc(p.pattern_name)}</div><div class="matrix-pat-time">${esc(p.start_time)} - ${esc(p.end_time)}</div></td>
-          <td><input type="number" class="matrix-input matrix-default" data-pid="${p.id}" value="${p.required_staff}" min="0" title="基本必要人数"></td>
+          <td><input type="number" class="matrix-input matrix-default" data-pid="${p.id}" value="${esc(p.required_staff)}" min="0" title="基本必要人数"></td>
           ${[0,1,2,3,4,5,6].map((w) => {
             const val = wr[String(w)];
             const has = val !== undefined && val !== null;
-            return `<td><input type="number" class="matrix-input matrix-wd ${has?'has-override':''}" data-pid="${p.id}" data-wd="${w}" value="${has?val:''}" placeholder="${p.required_staff}" min="0"></td>`;
+            return `<td><input type="number" class="matrix-input matrix-wd ${has?'has-override':''}" data-pid="${p.id}" data-wd="${w}" value="${esc(has?val:'')}" placeholder="${esc(p.required_staff)}" min="0"></td>`;
           }).join('')}
           <td><div class="matrix-row-actions">
-            <button data-edit="${p.id}" data-n="${esc(p.pattern_name)}" data-st="${p.start_time}" data-et="${p.end_time}" data-req="${p.required_staff}" title="編集"><i class="bi bi-pencil"></i></button>
+            <button data-edit="${p.id}" data-n="${esc(p.pattern_name)}" data-st="${esc(p.start_time)}" data-et="${esc(p.end_time)}" data-req="${esc(p.required_staff)}" title="編集"><i class="bi bi-pencil"></i></button>
             <button data-del="${p.id}" title="削除"><i class="bi bi-trash"></i></button>
           </div></td>
         </tr>`;
@@ -4159,10 +4161,10 @@ async function loadMatrix(body) {
 function openPatternModal(data, onDone) {
   const isEdit = !!data;
   openModal(`<i class="bi bi-clock-history"></i> ${isEdit ? '時間帯の編集' : '新しい時間帯'}`,
-    `<label class="form-label" for="pName">時間帯名</label><input id="pName" class="form-control mb-2" value="${data?.n || ''}" placeholder="例: 夜">
-     <div class="row"><div class="col-6"><label class="form-label" for="pSt">開始</label><input id="pSt" class="form-control" value="${data?.st || '17:00'}"></div>
-     <div class="col-6"><label class="form-label" for="pEt">終了</label><input id="pEt" class="form-control" value="${data?.et || '22:00'}"></div></div>
-     <label class="form-label mt-2">基本必要人数</label><input id="pReq" type="number" class="form-control" value="${data?.req || 2}">
+    `<label class="form-label" for="pName">時間帯名</label><input id="pName" class="form-control mb-2" value="${esc(data?.n || '')}" placeholder="例: 夜">
+     <div class="row"><div class="col-6"><label class="form-label" for="pSt">開始</label><input id="pSt" class="form-control" value="${esc(data?.st || '17:00')}"></div>
+     <div class="col-6"><label class="form-label" for="pEt">終了</label><input id="pEt" class="form-control" value="${esc(data?.et || '22:00')}"></div></div>
+     <label class="form-label mt-2">基本必要人数</label><input id="pReq" type="number" class="form-control" value="${esc(data?.req || 2)}">
      <div class="small text-secondary mt-2">作成後、マトリクスで曜日別の人数を設定できます。</div>`,
     async (w, close) => {
       try {
@@ -4232,8 +4234,8 @@ function renderPeriodsTab(body) {
   document.getElementById('addPer')?.addEventListener('click', async () => {
     let np = window._nextPeriod; if (!np) { try { np = await api('/shop/periods/next'); } catch { np = { start_date: '', end_date: '', deadline: '' }; } }
     openModal('<i class="bi bi-plus-lg"></i> 募集期間追加',
-      `<div class="row"><div class="col-6"><label class="form-label" for="peStart">開始</label><input type="date"  id="peStart" class="form-control" value="${np.start_date}"></div><div class="col-6"><label class="form-label" for="peEnd">終了</label><input type="date"  id="peEnd" class="form-control" value="${np.end_date}"></div></div>
-       <label class="form-label mt-2">締切</label><input type="date" id="peDeadline" class="form-control" value="${np.deadline}">`,
+      `<div class="row"><div class="col-6"><label class="form-label" for="peStart">開始</label><input type="date"  id="peStart" class="form-control" value="${esc(np.start_date)}"></div><div class="col-6"><label class="form-label" for="peEnd">終了</label><input type="date"  id="peEnd" class="form-control" value="${esc(np.end_date)}"></div></div>
+       <label class="form-label mt-2">締切</label><input type="date" id="peDeadline" class="form-control" value="${esc(np.deadline)}">`,
       async (w, close) => { try { await api('/shop/periods', { method: 'POST', body: JSON.stringify({ start_date: w.querySelector('#peStart').value, end_date: w.querySelector('#peEnd').value, deadline: w.querySelector('#peDeadline').value }) }); close(); toast('追加しました', 'success'); load(); } catch (e) { toast(e.message, 'error'); } });
   });
 }
@@ -4259,7 +4261,7 @@ function openChangeRequestModal(s) {
   const w = openModal('<i class="bi bi-pencil"></i> シフト変更申請',
     `<div class="small text-secondary mb-2">対象: ${esc(s.start_datetime.slice(0, 16))} 〜 ${esc(s.end_datetime.slice(11, 16))}</div>
      <label class="form-label" for="crType">申請種別</label><select id="crType" class="form-select mb-3"><option value="change">時間変更</option><option value="cancel">休みにする</option></select>
-     <div id="crTime"><label class="form-label" for="crStart">希望時間</label><div class="row mb-2"><div class="col-6"><input type="datetime-local" id="crStart" class="form-control" value="${sl(s.start_datetime)}"></div><div class="col-6"><input type="datetime-local" id="crEnd" class="form-control" value="${sl(s.end_datetime)}"></div></div></div>
+     <div id="crTime"><label class="form-label" for="crStart">希望時間</label><div class="row mb-2"><div class="col-6"><input type="datetime-local" id="crStart" class="form-control" value="${esc(sl(s.start_datetime))}"></div><div class="col-6"><input type="datetime-local" id="crEnd" class="form-control" value="${esc(sl(s.end_datetime))}"></div></div></div>
      <label class="form-label" for="crReason">理由</label><input id="crReason" class="form-control mb-2" placeholder="例: 用事のため変更希望">
      <div class="small text-secondary">※店長の承認後にシフトへ反映されます</div>`,
     async (w2, close) => {
@@ -4279,7 +4281,7 @@ SCREENS.staffDashboard = async function (el) {
     const periods = await api('/staff/periods');
     const ap = (periods.periods || []).filter((p) => p.is_active).sort((a, b) => b.end_date.localeCompare(a.end_date))[0];
     if (ap) {
-      periodBanner = `<div class="kpi-card kpi-indigo mb-3"><div class="kpi-label"><i class="bi bi-megaphone"></i> シフト希望受付中</div><div class="kpi-value num" style="font-size:1.05rem">${ap.start_date} 〜 ${ap.end_date}</div><div class="kpi-sub">締切: ${ap.deadline}</div><button class="btn btn-primary btn-sm mt-2" id="goRequest"><i class="bi bi-pencil-square"></i> 希望を提出する</button></div>`;
+      periodBanner = `<div class="kpi-card kpi-indigo mb-3"><div class="kpi-label"><i class="bi bi-megaphone"></i> シフト希望受付中</div><div class="kpi-value num" style="font-size:1.05rem">${esc(ap.start_date)} 〜 ${esc(ap.end_date)}</div><div class="kpi-sub">締切: ${esc(ap.deadline)}</div><button class="btn btn-primary btn-sm mt-2" id="goRequest"><i class="bi bi-pencil-square"></i> 希望を提出する</button></div>`;
     }
   } catch {}
 
@@ -4408,7 +4410,7 @@ SCREENS.request = async function (el) {
   }
 
   const periodBanner = wishPeriod
-    ? `<div class="kpi-card kpi-indigo" style="margin-bottom:12px"><div class="kpi-label">募集期間</div><div class="kpi-value num" style="font-size:1.1rem">${wishPeriod.start_date} 〜 ${wishPeriod.end_date}</div><div class="kpi-sub">締切: ${wishPeriod.deadline}</div></div>`
+    ? `<div class="kpi-card kpi-indigo" style="margin-bottom:12px"><div class="kpi-label">募集期間</div><div class="kpi-value num" style="font-size:1.1rem">${esc(wishPeriod.start_date)} 〜 ${esc(wishPeriod.end_date)}</div><div class="kpi-sub">締切: ${esc(wishPeriod.deadline)}</div></div>`
     : `<div class="kpi-card kpi-red" style="margin-bottom:12px"><div class="kpi-label"><i class="bi bi-exclamation-triangle"></i> 募集期間外</div><div class="kpi-sub">現在シフト希望を提出できる期間ではありません。店長にお問い合わせください。</div></div>`;
 
   el.innerHTML = pageHead('シフト希望入力', 'bi-pencil-square') + periodBanner +
@@ -4524,11 +4526,13 @@ SCREENS.request = async function (el) {
     try {
       const d = await api('/staff/ai/parse', { method: 'POST', body: JSON.stringify({ text }) });
       const ng = (d.ng_weekdays || []).map((x) => WD[x]).join('・');
-      const slotTxt = d.preferred_slot === 'time' ? `${d.preferred_start}-${d.preferred_end}` : (d.preferred_slot === 'morning' ? '朝' : d.preferred_slot === 'evening' ? '夜' : '指定なし');
+      // preferred_start / preferred_end / need_hours は LLM が本人の入力文から
+      // 抽出した値で、形式が保証されない。描画前に必ず esc() を通す。
+      const slotTxt = d.preferred_slot === 'time' ? `${esc(d.preferred_start)}-${esc(d.preferred_end)}` : (d.preferred_slot === 'morning' ? '朝' : d.preferred_slot === 'evening' ? '夜' : '指定なし');
       fillWishesFromAI(d);
       box.innerHTML = `<div class="ai-card p-3"><div class="flex gap-2 flex-wrap mb-2">${badge(d.source === 'llm' ? 'AI(API)' : 'ルールベース', d.source === 'llm' ? 'success' : 'warning')}
         ${d.target_income ? `<span class="stat-pill">目標 ${yen(d.target_income)}</span>` : ''}
-        ${d.need_hours ? `<span class="stat-pill">必要 ${d.need_hours}h</span>` : ''}
+        ${d.need_hours ? `<span class="stat-pill">必要 ${esc(d.need_hours)}h</span>` : ''}
         ${ng ? `<span class="stat-pill">NG ${ng}</span>` : ''}
         <span class="stat-pill">希望時間帯 ${slotTxt}</span></div>
         <div style="font-size:.88rem;line-height:1.7;white-space:pre-wrap">${esc(d.reason)}</div></div>`;

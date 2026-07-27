@@ -27,10 +27,12 @@ role="shop" に化ける）経由で同じ問題が public/app.js 側の2箇所
 import json
 import re
 import subprocess
+from html.parser import HTMLParser
 from pathlib import Path
 
 import db as dbmod
-from helpers import auth, insert_admin, insert_shop, make_session
+from helpers import (auth, insert_admin, insert_pattern, insert_shop, insert_staff,
+                     make_session)
 
 ROOT = Path(__file__).resolve().parents[1]
 ADMIN_JS = (ROOT / "public" / "admin.js").read_text(encoding="utf-8")
@@ -449,3 +451,366 @@ class TestShopSettingsValueValidation:
         assert r.status_code == 200
         r2 = client.get("/api/me", headers=auth(tok))
         assert r2.get_json()["role"] == "shop"
+
+
+# ============================================================
+# C-1 層1: 描画側のエスケープ（実ファイルのテンプレートを Node で評価する）
+# ============================================================
+def _render(template, context, extra_src=""):
+    """public/*.js から抜き出した実テンプレートを Node で評価し、生成HTMLを返す。
+
+    テンプレートをテスト側で手書きすると本体が変わっても気づけないため、
+    必ず実ファイルから正規表現で抜き出したものを渡す。
+    """
+    esc_src = _extract_function(APP_JS, "esc")
+    decls = "\n".join(f"const {k} = {json.dumps(v, ensure_ascii=False)};"
+                       for k, v in context.items())
+    script = f"""
+{esc_src}
+{extra_src}
+{decls}
+const html = `{template}`;
+process.stdout.write(html);
+"""
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, f"Node実行に失敗: {result.stderr}"
+    return result.stdout
+
+
+def _grab(source, pattern, what):
+    m = re.search(pattern, source)
+    assert m, f"{what} のテンプレートが見つかりません（JSの構造が変わった？）"
+    return m.group(0)
+
+
+class _TagAttrCollector(HTMLParser):
+    """生成HTMLを実際にHTMLとしてパースし、タグごとの属性名を集める。
+
+    レビュアーはヘッドレスChromiumで「value="" を抜けて onfocus / autofocus が
+    独立属性としてパースされ、ハンドラが実行された」ことを実測している。
+    単純な文字列検索では、エスケープ済みの `&quot; onfocus=&quot;` と
+    属性として生えた onfocus= を区別できない。パーサに判定させる。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.tags = []
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append((tag, [a[0] for a in attrs]))
+
+    handle_startendtag = handle_starttag
+
+
+def _assert_attribute_is_not_escapable(html):
+    """ATTR_ESCAPE_PAYLOAD が value 属性の外へ出ていないこと。
+
+    ペイロード `" onfocus="alert(1)" autofocus x="` を流し込んだ結果をHTMLとして
+    パースし、onfocus / autofocus / x が属性として生えていないことを確認する。
+    """
+    p = _TagAttrCollector()
+    p.feed(html)
+    names = set()
+    for _tag, attr_names in p.tags:
+        names.update(attr_names)
+    injected = names & {"onfocus", "autofocus", "x"}
+    assert not injected, f"属性として注入されている {sorted(injected)}:\n{html}\n{p.tags}"
+    assert len(p.tags) == 1, f"タグが増えている（値がタグを閉じている）:\n{html}\n{p.tags}"
+
+
+class TestStaffNumericRenderEscaping:
+    """レビュアーが実測した経路: 管理者が店舗詳細→スタッフ→編集を押すだけで発火。
+    代理閲覧すら不要な、店舗ユーザー→運営管理者の権限昇格。"""
+
+    def test_admin_staff_edit_wage_input_is_escaped(self):
+        tpl = _grab(ADMIN_JS, r'<input id="aeWage"[^>]*>', "admin.js スタッフ編集の時給")
+        html = _render(tpl, {"s": {"hourly_wage": ATTR_ESCAPE_PAYLOAD}})
+        _assert_attribute_is_not_escapable(html)
+
+    def test_admin_staff_edit_wage_normal_value_unchanged(self):
+        tpl = _grab(ADMIN_JS, r'<input id="aeWage"[^>]*>', "admin.js スタッフ編集の時給")
+        assert 'value="1200"' in _render(tpl, {"s": {"hourly_wage": 1200}})
+
+    def test_shop_staff_form_wage_input_is_escaped(self):
+        tpl = _grab(APP_JS, r'<input id="f_wage"[^>]*>', "app.js スタッフフォームの時給")
+        html = _render(tpl, {"s": {"hourly_wage": ATTR_ESCAPE_PAYLOAD}})
+        _assert_attribute_is_not_escapable(html)
+
+    def test_shop_staff_form_min_hours_input_is_escaped(self):
+        tpl = _grab(APP_JS, r'<input id="f_min"[^>]*>', "app.js スタッフフォームの最低h")
+        html = _render(tpl, {"s": {"min_hours_per_month": ATTR_ESCAPE_PAYLOAD}})
+        _assert_attribute_is_not_escapable(html)
+
+    def test_shop_staff_list_text_context_is_escaped(self):
+        """一覧のテキストコンテキスト（時給◯円 ・ 月◯-◯h）。"""
+        tpl = _grab(APP_JS, r'<div class="small text-secondary">\$\{roleLabel\(s\.role\)\}[^<]*</div>',
+                    "app.js スタッフ一覧の時給表示")
+        html = _render(tpl, {"s": {"role": "part_time",
+                                   "hourly_wage": '1000<img src=x onerror=alert(1)>',
+                                   "min_hours_per_month": 0, "max_hours_per_month": 160}},
+                       extra_src=_extract_function(APP_JS, "roleLabel"))
+        assert "<img" not in html, f"タグが注入されている:\n{html}"
+        assert "&lt;img" in html
+
+
+class TestPatternRequiredStaffRenderEscaping:
+    def test_matrix_default_input_is_escaped(self):
+        tpl = _grab(APP_JS, r'<input type="number" class="matrix-input matrix-default"[^>]*>',
+                    "app.js 必要人数マトリクスの基本人数")
+        html = _render(tpl, {"p": {"id": 1, "required_staff": ATTR_ESCAPE_PAYLOAD}})
+        _assert_attribute_is_not_escapable(html)
+
+    def test_matrix_default_normal_value_unchanged(self):
+        tpl = _grab(APP_JS, r'<input type="number" class="matrix-input matrix-default"[^>]*>',
+                    "app.js 必要人数マトリクスの基本人数")
+        assert 'value="3"' in _render(tpl, {"p": {"id": 1, "required_staff": 3}})
+
+    def test_pattern_edit_modal_inputs_are_escaped(self):
+        """dataset 経由で pattern_name / start_time が生のまま戻ってくる経路。"""
+        tpl = _grab(APP_JS, r'<input id="pName"[^>]*>', "app.js 時間帯編集の名称")
+        html = _render(tpl, {"data": {"n": ATTR_ESCAPE_PAYLOAD}})
+        _assert_attribute_is_not_escapable(html)
+
+    def test_pattern_edit_modal_req_is_escaped(self):
+        tpl = _grab(APP_JS, r'<input id="pReq"[^>]*>', "app.js 時間帯編集の必要人数")
+        html = _render(tpl, {"data": {"req": ATTR_ESCAPE_PAYLOAD}})
+        _assert_attribute_is_not_escapable(html)
+
+
+class TestPeriodDateRenderEscaping:
+    def test_generate_tab_start_date_is_escaped(self):
+        tpl = _grab(APP_JS, r'<input type="date"  id="genStart"[^>]*>', "app.js AI作成の開始日")
+        html = _render(tpl, {"p": {"start_date": ATTR_ESCAPE_PAYLOAD}})
+        _assert_attribute_is_not_escapable(html)
+
+    def test_shifts_tab_start_date_is_escaped(self):
+        tpl = _grab(APP_JS, r'<input type="date" id="sStart"[^>]*>', "app.js シフト管理の開始日")
+        html = _render(tpl, {"p": {"start_date": ATTR_ESCAPE_PAYLOAD}})
+        _assert_attribute_is_not_escapable(html)
+
+    def test_shifts_tab_start_date_normal_value_unchanged(self):
+        tpl = _grab(APP_JS, r'<input type="date" id="sStart"[^>]*>', "app.js シフト管理の開始日")
+        assert 'value="2026-08-01"' in _render(tpl, {"p": {"start_date": "2026-08-01"}})
+
+
+class TestFixedShiftRenderEscaping:
+    def test_fixed_shift_edit_start_time_is_escaped(self):
+        tpl = _grab(APP_JS, r'<input id="eSt"[^>]*>', "app.js 固定シフト編集の開始時刻")
+        html = _render(tpl, {"b": {"dataset": {"st": ATTR_ESCAPE_PAYLOAD}}})
+        _assert_attribute_is_not_escapable(html)
+
+
+# ============================================================
+# C-1: shops.settings と同型の穴が、別フィールドに残っていた
+# ============================================================
+# Task 11 は shops.settings について「入口で型検証＋描画で esc()」の2層で塞いだが、
+# 同じクラスの穴が staffs.hourly_wage / min_hours_per_month / max_hours_per_month、
+# shift_patterns.required_staff、shift_request_periods の日付に残っていた。
+# SQLite の INTEGER affinity は非数値 TEXT をそのまま保持するため、
+# `hourly_wage='" onfocus="alert(1)" autofocus x="'` が 200 で保存でき、
+# 管理者が店舗詳細→スタッフ→編集を押すだけで value="" を抜けて
+# onfocus / autofocus が独立属性としてパースされ、ハンドラが実行された
+# （代理閲覧すら不要な、店舗ユーザー→運営管理者の権限昇格）。
+ATTR_ESCAPE_PAYLOAD = '" onfocus="alert(1)" autofocus x="'
+
+
+def _shop_token(shop_id):
+    return make_session("shop", shop_id, shop_id)
+
+
+class TestStaffNumericFieldValidation:
+    """POST/PUT /api/shop/staffs（店舗管理者が日常的に使う経路）。"""
+
+    NUMERIC_KEYS = ("hourly_wage", "min_hours_per_month", "max_hours_per_month")
+
+    def _create(self, client, tok, **extra):
+        payload = {"staff_code": "X1", "name": "太郎", "password": "Password1"}
+        payload.update(extra)
+        return client.post("/api/shop/staffs", json=payload, headers=auth(tok))
+
+    def test_attr_escape_payload_in_hourly_wage_is_rejected_on_create(self, client):
+        """レビュアーが実測したペイロードそのもの。"""
+        shop_id = insert_shop(code="S1")
+        r = self._create(client, _shop_token(shop_id), hourly_wage=ATTR_ESCAPE_PAYLOAD)
+        assert r.status_code == 400, r.get_data(as_text=True)
+        assert dbmod.query_one("SELECT id FROM staffs WHERE staff_code='X1'") is None, \
+            "拒否されたはずの行が作られている"
+
+    def test_all_numeric_keys_reject_strings_on_create(self, client):
+        shop_id = insert_shop(code="S1")
+        tok = _shop_token(shop_id)
+        for i, key in enumerate(self.NUMERIC_KEYS):
+            r = self._create(client, tok, staff_code=f"C{i}",
+                             **{key: '1<img src=x onerror=alert(1)>'})
+            assert r.status_code == 400, f"{key} が文字列を受理してしまう"
+
+    def test_all_numeric_keys_reject_strings_on_update(self, client):
+        shop_id = insert_shop(code="S1")
+        tok = _shop_token(shop_id)
+        sid = insert_staff(shop_id, "U1", "太郎")
+        for key in self.NUMERIC_KEYS:
+            body = {"name": "太郎", "hourly_wage": 1000, "min_hours_per_month": 0,
+                    "max_hours_per_month": 160}
+            body[key] = ATTR_ESCAPE_PAYLOAD
+            r = client.put(f"/api/shop/staffs/{sid}", json=body, headers=auth(tok))
+            assert r.status_code == 400, f"{key} が文字列を受理してしまう（更新）"
+            row = dbmod.query_one("SELECT * FROM staffs WHERE id=?", (sid,))
+            assert row[key] != ATTR_ESCAPE_PAYLOAD, f"{key} に文字列が保存されている"
+
+    def test_bool_is_rejected(self, client):
+        """bool は Python では int のサブクラス。settings 側と同じく明示的に弾く。"""
+        shop_id = insert_shop(code="S1")
+        r = self._create(client, _shop_token(shop_id), hourly_wage=True)
+        assert r.status_code == 400
+
+    def test_admin_staff_create_also_validates(self, client):
+        """運営管理者の POST /api/admin/shops/<id>/staffs も同じ入口で塞ぐこと。"""
+        t = _admin_token(client)
+        sid = insert_shop("ADM1", name="店")
+        r = client.post(f"/api/admin/shops/{sid}/staffs", headers=auth(t),
+                        json={"staff_code": "a1", "name": "太郎", "password": "Password1",
+                              "hourly_wage": ATTR_ESCAPE_PAYLOAD})
+        assert r.status_code == 400
+        assert dbmod.query_one("SELECT id FROM staffs WHERE staff_code='a1'") is None
+
+    # ---- 既存の正常系（public/app.js が実際に送る形）が壊れていないこと ----
+    def test_normal_ui_payload_still_works_on_create(self, client):
+        """public/app.js showStaffForm が送る形（+g('#f_wage') は JS の number）。"""
+        shop_id = insert_shop(code="S1")
+        r = self._create(client, _shop_token(shop_id), role="part_time",
+                         hourly_wage=1100, min_hours_per_month=0, max_hours_per_month=160)
+        assert r.status_code == 200, r.get_data(as_text=True)
+        row = dbmod.query_one("SELECT * FROM staffs WHERE staff_code='X1'")
+        assert row["hourly_wage"] == 1100 and row["max_hours_per_month"] == 160
+
+    def test_normal_ui_payload_still_works_on_update(self, client):
+        shop_id = insert_shop(code="S1")
+        tok = _shop_token(shop_id)
+        sid = insert_staff(shop_id, "U1", "太郎")
+        r = client.put(f"/api/shop/staffs/{sid}", headers=auth(tok), json={
+            "name": "太郎", "hourly_wage": 1250, "min_hours_per_month": 20,
+            "max_hours_per_month": 120, "is_resigned": False})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        row = dbmod.query_one("SELECT * FROM staffs WHERE id=?", (sid,))
+        assert row["hourly_wage"] == 1250 and row["min_hours_per_month"] == 20
+
+    def test_omitted_numeric_fields_still_fall_back_to_defaults(self, client):
+        """未指定のときの既存の既定値フォールバックを壊していないこと。"""
+        shop_id = insert_shop(code="S1", settings={"default_hourly_wage": 1300})
+        r = self._create(client, _shop_token(shop_id))
+        assert r.status_code == 200, r.get_data(as_text=True)
+        row = dbmod.query_one("SELECT * FROM staffs WHERE staff_code='X1'")
+        assert row["hourly_wage"] == 1300
+        assert row["min_hours_per_month"] == 0
+        assert row["max_hours_per_month"] == 160
+
+    def test_numeric_string_from_a_form_is_accepted(self, client):
+        """<input type="number"> の値を文字列のまま送るクライアントも壊さない。
+        「数値として読める文字列」は数値に変換して受け入れる（描画の安全は保たれる）。"""
+        shop_id = insert_shop(code="S1")
+        r = self._create(client, _shop_token(shop_id), hourly_wage="1150")
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert dbmod.query_one("SELECT hourly_wage FROM staffs WHERE staff_code='X1'"
+                               )["hourly_wage"] == 1150
+
+
+class TestPatternRequiredStaffValidation:
+    def test_required_staff_string_is_rejected_on_create(self, client):
+        shop_id = insert_shop(code="S1")
+        r = client.post("/api/shop/patterns", headers=auth(_shop_token(shop_id)),
+                        json={"pattern_name": "早番", "start_time": "09:00",
+                              "end_time": "17:00", "required_staff": ATTR_ESCAPE_PAYLOAD})
+        assert r.status_code == 400
+        assert dbmod.query_one("SELECT id FROM shift_patterns WHERE shop_id=?",
+                               (shop_id,)) is None
+
+    def test_required_staff_string_is_rejected_on_update(self, client):
+        shop_id = insert_shop(code="S1")
+        pid = insert_pattern(shop_id, "早番", "09:00", "17:00", 2)
+        r = client.put(f"/api/shop/patterns/{pid}", headers=auth(_shop_token(shop_id)),
+                       json={"pattern_name": "早番", "start_time": "09:00",
+                             "end_time": "17:00", "required_staff": ATTR_ESCAPE_PAYLOAD})
+        assert r.status_code == 400
+        assert dbmod.query_one("SELECT required_staff FROM shift_patterns WHERE id=?",
+                               (pid,))["required_staff"] == 2
+
+    def test_normal_pattern_payload_still_works(self, client):
+        """public/app.js openPatternModal が送る形（required_staff は number）。"""
+        shop_id = insert_shop(code="S1")
+        r = client.post("/api/shop/patterns", headers=auth(_shop_token(shop_id)),
+                        json={"pattern_name": "夜", "start_time": "17:00",
+                              "end_time": "22:00", "required_staff": 2})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert dbmod.query_one("SELECT required_staff FROM shift_patterns WHERE shop_id=?",
+                               (shop_id,))["required_staff"] == 2
+
+    def test_omitted_required_staff_defaults_to_one(self, client):
+        shop_id = insert_shop(code="S1")
+        r = client.post("/api/shop/patterns", headers=auth(_shop_token(shop_id)),
+                        json={"pattern_name": "夜", "start_time": "17:00", "end_time": "22:00"})
+        assert r.status_code == 200
+        assert dbmod.query_one("SELECT required_staff FROM shift_patterns WHERE shop_id=?",
+                               (shop_id,))["required_staff"] == 1
+
+
+class TestPeriodDateValidation:
+    def test_non_date_start_date_is_rejected(self, client):
+        shop_id = insert_shop(code="S1")
+        r = client.post("/api/shop/periods", headers=auth(_shop_token(shop_id)),
+                        json={"start_date": '2026-08-01" autofocus onfocus="alert(1)',
+                              "end_date": "2026-08-31", "deadline": "2026-07-25"})
+        assert r.status_code == 400
+        assert dbmod.query_one("SELECT id FROM shift_request_periods WHERE shop_id=?",
+                               (shop_id,)) is None
+
+    def test_all_date_fields_are_validated(self, client):
+        shop_id = insert_shop(code="S1")
+        tok = _shop_token(shop_id)
+        base = {"start_date": "2026-08-01", "end_date": "2026-08-31",
+                "deadline": "2026-07-25"}
+        for key in ("start_date", "end_date", "deadline"):
+            body = dict(base)
+            body[key] = "<img src=x onerror=alert(1)>"
+            r = client.post("/api/shop/periods", headers=auth(tok), json=body)
+            assert r.status_code == 400, f"{key} が非日付を受理してしまう"
+
+    def test_impossible_date_is_rejected(self, client):
+        """形だけ YYYY-MM-DD でも実在しない日付は弾く（2026-02-30 等）。"""
+        shop_id = insert_shop(code="S1")
+        r = client.post("/api/shop/periods", headers=auth(_shop_token(shop_id)),
+                        json={"start_date": "2026-02-30", "end_date": "2026-08-31",
+                              "deadline": "2026-07-25"})
+        assert r.status_code == 400
+
+    def test_deadline_on_update_is_validated(self, client):
+        shop_id = insert_shop(code="S1")
+        pid = dbmod.execute(
+            "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline) "
+            "VALUES (?,?,?,?)", (shop_id, "2026-08-01", "2026-08-31", "2026-07-25")
+        )["last_row_id"]
+        r = client.put(f"/api/shop/periods/{pid}", headers=auth(_shop_token(shop_id)),
+                       json={"is_active": True, "deadline": '2026-07-25"><img src=x>'})
+        assert r.status_code == 400
+        assert dbmod.query_one("SELECT deadline FROM shift_request_periods WHERE id=?",
+                               (pid,))["deadline"] == "2026-07-25"
+
+    def test_normal_period_payload_still_works(self, client):
+        """public/app.js の #addPer が送る形（<input type="date"> の値）。"""
+        shop_id = insert_shop(code="S1")
+        r = client.post("/api/shop/periods", headers=auth(_shop_token(shop_id)),
+                        json={"start_date": "2026-08-01", "end_date": "2026-08-31",
+                              "deadline": "2026-07-25"})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        row = dbmod.query_one("SELECT * FROM shift_request_periods WHERE shop_id=?", (shop_id,))
+        assert row["start_date"] == "2026-08-01" and row["deadline"] == "2026-07-25"
+
+    def test_period_update_without_deadline_still_works(self, client):
+        """締切を送らずに有効/終了だけ切り替える既存操作（#addPer 以外の導線）。"""
+        shop_id = insert_shop(code="S1")
+        pid = dbmod.execute(
+            "INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline) "
+            "VALUES (?,?,?,?)", (shop_id, "2026-08-01", "2026-08-31", "2026-07-25")
+        )["last_row_id"]
+        r = client.put(f"/api/shop/periods/{pid}", headers=auth(_shop_token(shop_id)),
+                       json={"is_active": False})
+        assert r.status_code == 200, r.get_data(as_text=True)

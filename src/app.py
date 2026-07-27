@@ -7,6 +7,7 @@ import os
 import json
 import re
 import secrets
+import traceback
 import unicodedata
 from datetime import datetime, timedelta
 from flask import (Flask, request, jsonify, abort, Response, send_file, g)
@@ -25,6 +26,7 @@ from utils import (
     night_minutes, validate_password, parse_settings, build_ics, parse_iso, normalize_iso,
     norm_hhmm, norm_dt_iso, add_days, build_staff_tendency, combine_dt_overnight,
     sanitize_login_code, LOGIN_CODE_MAX, validate_known_settings_values,
+    validate_numeric_field, validate_date_field,
 )
 import shift_engine
 import ai
@@ -85,9 +87,23 @@ def handle_ve(e):
 
 @app.errorhandler(Exception)
 def handle_exc(e):
+    """捕捉されなかった例外の最終防衛線。
+
+    【なぜ str(e) を返さないのか】ここに来るのは「想定していない例外」だけで、
+    その文字列は生の SQL 文・列名・ファイルパス・行番号を含み得る
+    （例: sqlite3 の "no such column: sh.is_archived"、ライブラリが
+    'File "/srv/app/src/app.py", line N' を含む形で送出する例外）。
+    しかもこの経路は未認証クライアントにも返るため、内部構造をそのまま
+    外に出すことになる。運用に必要な詳細はサーバのログにだけ残し、
+    クライアントには固定文言を返す。
+
+    意図的な 500（abort(500, description="...") ）は HTTPException なので
+    上の handle_http に流れ、description はこれまでどおり利用者に届く。
+    """
     if isinstance(e, HTTPException):
         return jsonify({"error": e.description}), e.code
-    return jsonify({"error": "サーバーエラー: " + str(e)}), 500
+    traceback.print_exc()
+    return jsonify({"error": "サーバーエラーが発生しました。時間をおいて再度お試しください。"}), 500
 
 
 @app.before_request
@@ -1745,25 +1761,25 @@ def shop_staffs_post():
     role = body.get("role") or "part_time"
     if role not in ("employee", "part_time", "manager", "student"):
         abort(400, description="ロールは employee / part_time / manager / student のいずれかを指定してください")
+    # 数値フィールドの型検証（保存型XSS の入口封じ）。SQLite の INTEGER affinity は
+    # 数値として解釈できない TEXT をそのまま保持するため、ここで弾かないと
+    # `" onfocus="alert(1)" autofocus x="` のような値が時給として保存でき、
+    # 管理コンソールのスタッフ編集モーダルを開いた運営管理者の権限で実行される。
+    max_hours = validate_numeric_field(body.get("max_hours_per_month"), "月間上限時間")
     # 学生アルバイト: 月80h上限を強制（ロール固有ルール）
-    max_hours = body.get("max_hours_per_month")
     if role == "student":
-        try:
-            mh = int(max_hours) if max_hours is not None else 80
-        except (ValueError, TypeError):
-            mh = 80
+        mh = int(max_hours) if max_hours is not None else 80
         if mh > 80:
             abort(400, description="学生アルバイトの月間上限は80時間です（80時間を超える設定はできません）")
         max_hours = min(mh, 80)
     else:
-        try:
-            max_hours = int(max_hours) if max_hours is not None else 160
-        except (ValueError, TypeError):
-            max_hours = 160
+        max_hours = int(max_hours) if max_hours is not None else 160
+    wage = validate_numeric_field(body.get("hourly_wage"), "時給")
+    min_hours = validate_numeric_field(body.get("min_hours_per_month"), "月間下限時間")
     meta = execute("INSERT INTO staffs (shop_id, staff_code, password_hash, name, role, hourly_wage, min_hours_per_month, max_hours_per_month) VALUES (?,?,?,?,?,?,?,?)",
                    (shop_id, body["staff_code"], hash_password(pw), body["name"], role,
-                    body.get("hourly_wage") or settings.get("default_hourly_wage") or 1000,
-                    body.get("min_hours_per_month") or 0, max_hours))
+                    wage or settings.get("default_hourly_wage") or 1000,
+                    min_hours or 0, max_hours))
     return jsonify({"ok": True, "id": meta["last_row_id"]})
 
 
@@ -1772,19 +1788,24 @@ def shop_staffs_put(sid):
     shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
     # 学生アルバイト上限のバリデーション
-    cur_staff = query_one("SELECT role FROM staffs WHERE id=? AND shop_id=?", (sid, shop_id))
+    cur_staff = query_one("SELECT role, hourly_wage, min_hours_per_month "
+                          "FROM staffs WHERE id=? AND shop_id=?", (sid, shop_id))
     role = cur_staff["role"] if cur_staff else "part_time"
-    max_hours = body.get("max_hours_per_month")
-    try:
-        mh = int(max_hours) if max_hours is not None else None
-    except (ValueError, TypeError):
-        mh = None
+    # 作成時と同じ入口の型検証（保存型XSS 対策）。ここが抜けていると、作成時に
+    # 弾いた値を更新経由でそのまま入れられる。
+    max_hours = validate_numeric_field(body.get("max_hours_per_month"), "月間上限時間")
+    mh = int(max_hours) if max_hours is not None else None
     if role == "student" and mh is not None and mh > 80:
         abort(400, description="学生アルバイトの月間上限は80時間です（80時間を超える設定はできません）")
     if mh is None:
         mh = 80 if role == "student" else 160
+    # 未指定のキーは現在値を保つ（NULL で上書きして時給を失わせないため）
+    wage = validate_numeric_field(body.get("hourly_wage"), "時給",
+                                  default=(cur_staff or {}).get("hourly_wage"))
+    min_hours = validate_numeric_field(body.get("min_hours_per_month"), "月間下限時間",
+                                       default=(cur_staff or {}).get("min_hours_per_month"))
     execute("UPDATE staffs SET name=?, hourly_wage=?, min_hours_per_month=?, max_hours_per_month=?, is_resigned=? WHERE id=? AND shop_id=?",
-            (body["name"], body["hourly_wage"], body["min_hours_per_month"], mh,
+            (body["name"], wage, min_hours, mh,
              1 if body.get("is_resigned") else 0, sid, shop_id))
     if body.get("password"):
         err = validate_password(body["password"])
@@ -1874,8 +1895,11 @@ def shop_patterns_post():
     ok, warning = _validate_pattern_hours(body.get("start_time"), body.get("end_time"))
     if not ok:
         abort(400, description=warning)
+    # required_staff は必要人数マトリクスで無エスケープの value 属性として描画される。
+    # 数値以外を保存させない（保存型XSS の入口封じ）。
+    req = validate_numeric_field(body.get("required_staff"), "必要人数")
     meta = execute("INSERT INTO shift_patterns (shop_id, pattern_name, start_time, end_time, required_staff) VALUES (?,?,?,?,?)",
-                   (shop_id, body["pattern_name"], body["start_time"], body["end_time"], body.get("required_staff") or 1))
+                   (shop_id, body["pattern_name"], body["start_time"], body["end_time"], req or 1))
     return jsonify({"ok": True, "id": meta["last_row_id"], "warning": warning})
 
 
@@ -1886,8 +1910,9 @@ def shop_patterns_put(pid):
     ok, warning = _validate_pattern_hours(body.get("start_time"), body.get("end_time"))
     if not ok:
         abort(400, description=warning)
+    req = validate_numeric_field(body.get("required_staff"), "必要人数")
     execute("UPDATE shift_patterns SET pattern_name=?, start_time=?, end_time=?, required_staff=? WHERE id=? AND shop_id=?",
-            (body["pattern_name"], body["start_time"], body["end_time"], body.get("required_staff") or 1, pid, shop_id))
+            (body["pattern_name"], body["start_time"], body["end_time"], req or 1, pid, shop_id))
     return jsonify({"ok": True, "warning": warning})
 
 
@@ -1991,9 +2016,18 @@ def shop_periods_next():
 def shop_periods_post():
     shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
+    # 募集期間の3つの日付は public/app.js の複数箇所で無エスケープの
+    # `value="${p.start_date}"` として描画される。日付以外を保存させない
+    # （保存型XSS の入口封じ）。
+    start_date = validate_date_field(body.get("start_date"), "開始日")
+    end_date = validate_date_field(body.get("end_date"), "終了日")
+    deadline = validate_date_field(body.get("deadline"), "締切日")
+    for label, v in (("開始日", start_date), ("終了日", end_date), ("締切日", deadline)):
+        if v is None:
+            raise ValueError(f"{label}を指定してください")
     meta = execute("INSERT INTO shift_request_periods (shop_id, start_date, end_date, deadline, is_active) VALUES (?,?,?,?,?)",
-                   (shop_id, body["start_date"], body["end_date"], body["deadline"], 0 if body.get("is_active") is False else 1))
-    notify(shop_id, None, "info", "募集期間を作成", f"{body['start_date']}〜{body['end_date']}（締切{body['deadline']}）")
+                   (shop_id, start_date, end_date, deadline, 0 if body.get("is_active") is False else 1))
+    notify(shop_id, None, "info", "募集期間を作成", f"{start_date}〜{end_date}（締切{deadline}）")
     return jsonify({"ok": True, "id": meta["last_row_id"]})
 
 
@@ -2001,8 +2035,15 @@ def shop_periods_post():
 def shop_periods_put(pid):
     shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
+    cur = query_one("SELECT deadline FROM shift_request_periods WHERE id=? AND shop_id=?",
+                    (pid, shop_id))
+    # 締切を省略したときは現在値を保つ。deadline は NOT NULL なので None を
+    # そのまま書くと 500 になる（募集期間タブの「終了/再開」ボタンは
+    # {"is_active": bool} だけを送るため、この経路が実際に踏まれていた）。
+    deadline = validate_date_field(body.get("deadline"), "締切日",
+                                   default=(cur or {}).get("deadline"))
     execute("UPDATE shift_request_periods SET is_active=?, deadline=? WHERE id=? AND shop_id=?",
-            (1 if body.get("is_active") else 0, body.get("deadline"), pid, shop_id))
+            (1 if body.get("is_active") else 0, deadline, pid, shop_id))
     return jsonify({"ok": True})
 
 
