@@ -62,6 +62,11 @@
   --header-h:    56px;
   --side-w:      248px;
   --bottom-h:    64px;
+  /* 代理閲覧バーの高さ。JS(renderImpersonationBar)が実測して上書きする（既定=非表示なので0）。
+     side-nav/side-overlay の上端オフセットはこれを含む --content-top を使うことで、
+     バー表示中もヘッダ直下に正しく積み重なり重ならないようにする。 */
+  --imp-bar-h:   0px;
+  --content-top: var(--header-h);
 
   /* 形 */
   --radius-xs:   3px;   /* ロールバッジなど小さなラベル */
@@ -80,6 +85,13 @@
 
   /* ヘッダー背景 */
   --header-bg:   rgba(251,250,246,.85);
+}
+
+/* 代理閲覧バー表示中は --content-top にバーの高さぶんを足す。
+   JS が bar.offsetHeight を実測して --imp-bar-h を書き換え、このクラスを付け外しする
+   （フォント環境やボタンの実高さで #impersonation-bar のサイズが変わっても崩れないようにするため）。 */
+html.has-impersonation-bar {
+  --content-top: calc(var(--header-h) + var(--imp-bar-h));
 }
 
 /* ---------- 1b. Dark Theme（ライトからの派生） ----------
@@ -216,11 +228,13 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
 /* Sidebar */
 .side-nav {
   width: var(--side-w); flex: 0 0 var(--side-w);
-  min-height: calc(100vh - var(--header-h));
+  min-height: calc(100vh - var(--content-top));
   background: var(--surface);
   border-right: 1px solid var(--rule);
   padding: 16px 10px;
-  position: sticky; top: var(--header-h);
+  /* --content-top は代理閲覧バー表示中はその高さぶん増える（バーと重ならないように）。
+     非表示時は --header-h と同値なので見た目は変わらない。 */
+  position: sticky; top: var(--content-top);
   display: flex; flex-direction: column;
   gap: 2px;
   overflow-y: auto;
@@ -259,14 +273,14 @@ h1,h2,h3,h4,h5,h6 { font-weight: 700; color: var(--ink); letter-spacing: -.01em;
 }
 @media (max-width: 991px) {
   .side-nav {
-    position: fixed; top: var(--header-h); left: 0; bottom: 0;
+    position: fixed; top: var(--content-top); left: 0; bottom: 0;
     transform: translateX(-100%); transition: transform var(--dur) var(--ease);
     box-shadow: var(--sh-card);
   }
   .side-nav.open { transform: translateX(0); }
 }
 .side-overlay {
-  position: fixed; inset: var(--header-h) 0 0 0;
+  position: fixed; inset: var(--content-top) 0 0 0;
   background: rgba(0,0,0,.5);
   z-index: 998; cursor: pointer;
 }
@@ -1194,7 +1208,7 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 
   /* 画面アプリ全体を隠す */
   #appView, #loginView, .app-header, .bottom-nav, .side-nav, .side-overlay,
-  #notifBtn, #logoutBtn, #menuToggle, #themeToggleBtn, .no-print, .toast-wrap { display: none !important; }
+  .impersonation-bar, #notifBtn, #logoutBtn, #menuToggle, #themeToggleBtn, .no-print, .toast-wrap { display: none !important; }
 
   /* 印刷ビューだけ表示 */
   .print-view { display: block !important; }
@@ -1491,7 +1505,10 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 .wti-summary-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 
 /* 代理閲覧バー — 誤操作防止のため常時可視にする。
-   意味色ベタ地の抜き文字は #fff ではなく var(--paper) を使う規約に従う。 */
+   意味色ベタ地の抜き文字は #fff ではなく var(--paper) を使う規約に従う。
+   .app-header（sticky top:0）のすぐ下に自身も sticky で貼り付ける。
+   side-nav/side-overlay 側は --content-top（このバーの実測高さを含む）を
+   使っているので、スクロールしても重ならずに積み重なる。 */
 .impersonation-bar {
   display: flex;
   align-items: center;
@@ -1501,6 +1518,9 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
   background: var(--warning);
   color: var(--paper);
   font-size: 0.875rem;
+  position: sticky;
+  top: var(--header-h);
+  z-index: 999;
 }
 .impersonation-bar .btn {
   flex-shrink: 0;

@@ -313,20 +313,20 @@ function showApp() {
   renderNav();
   // 自分の権限情報を正確に取得（非同期・画面遷移は待たない）
   refreshMyStaffInfo();
-  // 店舗の場合は期間・営業時間を事前取得してから画面へ
-  if (currentRole === 'shop') {
+  // 店舗の場合（代理閲覧中も含む）は期間・営業時間を事前取得してから画面へ
+  if (effectiveRole() === 'shop') {
     Promise.all([ensurePeriod(), ensureBusinessHours()]).then(() => navigateTo(defaultScreen()));
   } else {
     navigateTo(defaultScreen());
   }
 }
 function defaultScreen() {
-  // 代理閲覧中は role が admin のままでも店舗のダッシュボードを開く
+  // 代理閲覧中は currentRole が admin のままでも店舗のダッシュボードを開く
   // （リロード直後にナビだけ店舗用でホームが管理者画面のままになるのを防ぐ）
-  if (window._impersonating) return 'dashboard';
-  if (currentRole === 'shop') return 'dashboard';
-  if (currentRole === 'staff') return 'staffDashboard';
-  if (currentRole === 'admin') return 'adminHome';
+  const role = effectiveRole();
+  if (role === 'shop') return 'dashboard';
+  if (role === 'staff') return 'staffDashboard';
+  if (role === 'admin') return 'adminHome';
   return 'dashboard';
 }
 
@@ -403,9 +403,23 @@ document.getElementById('sideOverlay')?.addEventListener('click', () => {
    ============================================================ */
 window._impersonating = null;
 
+/* 代理閲覧中は currentRole が 'admin' のままでも実際には店舗として振る舞う
+   （Task 6 の設計：/api/admin/* と /api/me を管理者のまま動かすため）。
+   ナビ・デフォルト画面・通知・営業時間取得など「今どの役割として動くか」を
+   判定する箇所は currentRole を直接見ず、必ずこちらを使うこと。
+   【背景】レビューで、この判定漏れにより営業時間9-22時のダミー値が代理閲覧中の
+   ダッシュボードに表示される・通知バッジが常に管理者の空スタブを見てしまう、
+   という実害が具体的に確認された。 */
+function effectiveRole() {
+  return window._impersonating ? 'shop' : currentRole;
+}
+
 function renderImpersonationBar() {
   const existing = document.getElementById('impersonationBar');
   if (existing) existing.remove();
+  // 高さオフセットも一旦リセット（非表示時は --header-h と同値に戻す）
+  document.documentElement.classList.remove('has-impersonation-bar');
+  document.documentElement.style.removeProperty('--imp-bar-h');
   const info = window._impersonating;
   if (!info) return;
   const header = document.querySelector('.app-header');
@@ -417,6 +431,10 @@ function renderImpersonationBar() {
     `<button class="btn btn-sm btn-light" id="stopImpersonateBtn">管理者に戻る</button>`;
   header.insertAdjacentElement('afterend', bar);
   document.getElementById('stopImpersonateBtn')?.addEventListener('click', stopImpersonation);
+  // side-nav / side-overlay がこのバーと重ならないよう、実測した高さで --imp-bar-h を
+  // 上書きする（フォント環境・ボタンの実高さで変わりうる値を決め打ちしないため）。
+  document.documentElement.style.setProperty('--imp-bar-h', bar.offsetHeight + 'px');
+  document.documentElement.classList.add('has-impersonation-bar');
 }
 
 async function stopImpersonation() {
@@ -452,8 +470,11 @@ async function stopImpersonation() {
    ============================================================ */
 async function refreshNotifBadge() {
   if (!currentRole) return;
+  // 代理閲覧中は 'admin' ではなく 'shop' の通知APIを見る（管理者向けは常に空の
+  // スタブを返すため、代理中のままだと店舗の実際の未読件数が拾えない）。
+  const role = effectiveRole();
   try {
-    const d = await api(`/${currentRole}/notifications`);
+    const d = await api(`/${role}/notifications`);
     const badge = document.getElementById('notifBadge');
     const btn = document.getElementById('notifBtn');
     if (btn) btn.classList.remove('d-none');
@@ -466,7 +487,7 @@ async function refreshNotifBadge() {
       else { sideBadge.style.display = 'none'; }
     }
     // 希望休管理のバッジ
-    if (currentRole === 'shop') {
+    if (role === 'shop') {
       try {
         const shifts = await api(`/shop/shifts?start=${todayStr().slice(0,8)+'01'}&end=${plusMonths(2)}`);
         const reqCount = (shifts.shifts || []).filter((s) => s.status === 'requested').length;
@@ -480,7 +501,8 @@ async function refreshNotifBadge() {
   } catch {}
 }
 function openNotifications() {
-  api(`/${currentRole}/notifications`).then((d) => {
+  const role = effectiveRole();
+  api(`/${role}/notifications`).then((d) => {
     const renderList = (notifs) => notifs.length ? notifs.map((n) => `
       <div class="notif-item ${n.is_read ? '' : 'unread'}">
         <div class="nt-title">${esc(n.title)}</div>
@@ -490,7 +512,7 @@ function openNotifications() {
     const w = openModal('<i class="bi bi-bell"></i> 通知', renderList(d.notifications) + (d.notifications.length ? '<button class="btn btn-light w-full mt-3" id="readAllBtn">すべて既読にする</button>' : ''), null);
     if (d.notifications.length) {
       w.querySelector('#readAllBtn')?.addEventListener('click', async () => {
-        await api(`/${currentRole}/notifications/read-all`, { method: 'PUT' });
+        await api(`/${role}/notifications/read-all`, { method: 'PUT' });
         // モーダル内のリストを既読状態で再描画
         const updated = d.notifications.map((n) => ({ ...n, is_read: 1 }));
         w.querySelector('.modal-body').innerHTML = renderList(updated) + '<div class="small text-success mt-2"><i class="bi bi-check-circle"></i> すべて既読にしました</div>';
@@ -531,8 +553,7 @@ const NAV_DEFS = {
 
 function renderNav() {
   // 代理閲覧中は店舗のナビを出す。管理者に戻るのは警告バーのボタンから。
-  const navKey = window._impersonating ? 'shop' : currentRole;
-  const defs = NAV_DEFS[navKey] || [];
+  const defs = NAV_DEFS[effectiveRole()] || [];
   // Sidebar (PC)
   const side = document.getElementById('sideNav');
   side.innerHTML = `
@@ -561,9 +582,8 @@ function renderNav() {
 
 function setActiveNav() {
   document.querySelectorAll('.side-item, .bn-item').forEach((b) => b.classList.toggle('active', b.dataset.screen === currentScreen));
-  // renderNav() と同じ navKey を使う（代理閲覧中は店舗画面のキーで画面タイトルを引く）
-  const navKey = window._impersonating ? 'shop' : currentRole;
-  const defs = NAV_DEFS[navKey] || [];
+  // renderNav() と同じ effectiveRole() を使う（代理閲覧中は店舗画面のキーで画面タイトルを引く）
+  const defs = NAV_DEFS[effectiveRole()] || [];
   const label = defs.find((i) => i.key === currentScreen)?.label || 'ShiftAI';
   const titleEl = document.getElementById('headerTitle');
   if (titleEl) {
@@ -677,7 +697,12 @@ async function ensureBusinessHours() {
   // パターン編集後にキャッシュが古くなり「9-19」等の古い表示に固定される
   // デグレを防ぐため。API は軽量なので毎回呼び出しでも実用上問題ない。
   const fallback = { start: 9, end: 22 };
-  if (currentRole !== 'shop' && currentRole !== 'staff') return fallback;
+  // currentRole ではなく effectiveRole() で判定する。代理閲覧中は currentRole が
+  // 'admin' のままのため、ここを currentRole のままにすると /shop/patterns を
+  // 一切呼ばずに 9-22時のダミー値を返してしまい、代理閲覧中のダッシュボード・
+  // シフトカレンダーのタイムライン軸が実際の営業時間からずれる（レビューで実機確認済み）。
+  const role = effectiveRole();
+  if (role !== 'shop' && role !== 'staff') return fallback;
   try {
     const d = await api('/shop/patterns');
     const pats = d.patterns || [];
