@@ -187,6 +187,13 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         err = validate_password(shop_pw)
         if err:
             abort(400, description="店舗パスワード: " + err)
+        # settings の値の型検証（保存型XSS対策）。ここは PUT /api/admin/shops/<id>/settings
+        # と違い未知キーは拒否しない ——
+        # tests/test_admin_staff_apis.py::test_admin_create_and_update_shop が
+        # settings={"x": 1}（未知キー）の作成を 200 で期待する既存契約があるため。
+        # 既知キーの値だけ型を締めれば、汚染レコードは作れなくなる。
+        if body.get("settings"):
+            validate_known_settings_values(body["settings"])
         # 重複チェック
         dup = query_one("SELECT id FROM shops WHERE shop_code=?", (body["shop_code"],))
         if dup:

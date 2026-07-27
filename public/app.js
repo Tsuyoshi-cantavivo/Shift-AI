@@ -1914,6 +1914,10 @@ function renderGenerateTab(body, p) {
     const [patsD, settingsD] = await Promise.all([api('/shop/patterns'), api('/shop/settings')]);
     const active = (staffsD.staffs || []).filter((s) => !s.is_resigned);
     const s = settingsD.settings || {};
+    // s.xxx（下の gen-condition-value）は shops.settings 由来。サーバ側の型検証
+    // （utils.validate_known_settings_values）は新規保存にしか効かず、代理閲覧中は
+    // このコードが別テナントのデータを管理者のブラウザで描画し得るため、
+    // 描画側でも esc() を通す（保存型XSS対策の多層防御）。
     // シフト時間設定から代表的な時間帯を表示（bulk_mode優先、無ければ月-金の平均）
     let shiftHoursLabel = '未設定';
     try {
@@ -1930,9 +1934,9 @@ function renderGenerateTab(body, p) {
       card(sectionTitle('bi-clipboard-data', 'AIに考慮させる条件') +
         `<div class="gen-condition"><span class="gen-condition-label">稼働スタッフ</span><span class="gen-condition-value">${active.length}名</span></div>
          <div class="gen-condition"><span class="gen-condition-label">　社員 / アルバイト</span><span class="gen-condition-value">${active.filter((x) => x.role === 'employee').length}名 / ${active.filter((x) => x.role === 'part_time' || x.role === 'student').length}名</span></div>
-         <div class="gen-condition"><span class="gen-condition-label">1日最低勤務時間</span><span class="gen-condition-value">${s.min_daily_hours || 4}時間</span></div>
-         <div class="gen-condition"><span class="gen-condition-label">最大連勤（推奨）</span><span class="gen-condition-value">${s.max_consecutive_days || 6}日</span></div>
-         <div class="gen-condition"><span class="gen-condition-label">深夜割増率</span><span class="gen-condition-value">${s.night_premium_rate || 1.25}倍</span></div>
+         <div class="gen-condition"><span class="gen-condition-label">1日最低勤務時間</span><span class="gen-condition-value">${esc(String(s.min_daily_hours || 4))}時間</span></div>
+         <div class="gen-condition"><span class="gen-condition-label">最大連勤（推奨）</span><span class="gen-condition-value">${esc(String(s.max_consecutive_days || 6))}日</span></div>
+         <div class="gen-condition"><span class="gen-condition-label">深夜割増率</span><span class="gen-condition-value">${esc(String(s.night_premium_rate || 1.25))}倍</span></div>
          <div class="gen-condition"><span class="gen-condition-label">シフト時間（代表）</span><span class="gen-condition-value">${esc(shiftHoursLabel)}</span></div>
          <div class="gen-condition"><span class="gen-condition-label">シフト時間帯</span><span class="gen-condition-value">${(patsD.patterns || []).length}枠</span></div>`);
   }).catch(() => {});
@@ -4143,18 +4147,23 @@ function renderShopTab(body) {
   body.innerHTML = card('<div class="text-secondary small">読み込み中...</div>');
   api('/shop/settings').then((d) => {
     const s = d.settings || {};
+    // 数値項目は shops.settings 由来。サーバ側の型検証は新規保存にしか効かず、
+    // 代理閲覧中はこの画面が別テナントのデータを管理者のブラウザで描画し得るため、
+    // value 属性に入れる前に必ず esc() する（保存型XSS対策の多層防御。
+    // public/admin.js の renderShopSettingsTab の num() と同じパターン）。
+    const num = (v, dflt) => esc(String(v ?? dflt));
     body.innerHTML = card(sectionTitle('bi-shop', '店舗情報') +
       `<label class="form-label" for="setShopName">店舗名</label><input id="setShopName" class="form-control mb-2" value="${esc(d.shop_name)}">
        <label class="form-label" for="setShopCode">店舗コード</label><input id="setShopCode" class="form-control mb-3" value="${esc(d.shop_code)}" disabled>
        <hr style="border-color:var(--rule);margin:16px 0">
        ${sectionTitle('bi-gear', '運用設定')}
        <div class="row">
-         <div class="col-6"><label class="form-label" for="setWage">デフォルト時給(円)</label><input id="setWage" type="number" class="form-control" value="${s.default_hourly_wage ?? 1000}"></div>
-         <div class="col-6"><label class="form-label" for="setMinDaily">1日最低勤務(h)</label><input id="setMinDaily" type="number" class="form-control" value="${s.min_daily_hours ?? 4}"></div>
-         <div class="col-6"><label class="form-label" for="setMaxDaily">1日最大勤務(h)</label><input id="setMaxDaily" type="number" class="form-control" value="${s.max_daily_hours ?? 9}"></div>
-         <div class="col-6"><label class="form-label" for="setMaxConsec">最大連勤（推奨）</label><input id="setMaxConsec" type="number" class="form-control" value="${s.max_consecutive_days ?? 6}"></div>
-         <div class="col-6"><label class="form-label" for="setNightRate">深夜割増率</label><input id="setNightRate" type="number" step="0.05" class="form-control" value="${s.night_premium_rate ?? 1.25}"></div>
-         <div class="col-6"><label class="form-label" for="setTransport">1日交通費(円)</label><input id="setTransport" type="number" class="form-control" value="${s.transport_per_day ?? 0}"></div>
+         <div class="col-6"><label class="form-label" for="setWage">デフォルト時給(円)</label><input id="setWage" type="number" class="form-control" value="${num(s.default_hourly_wage, 1000)}"></div>
+         <div class="col-6"><label class="form-label" for="setMinDaily">1日最低勤務(h)</label><input id="setMinDaily" type="number" class="form-control" value="${num(s.min_daily_hours, 4)}"></div>
+         <div class="col-6"><label class="form-label" for="setMaxDaily">1日最大勤務(h)</label><input id="setMaxDaily" type="number" class="form-control" value="${num(s.max_daily_hours, 9)}"></div>
+         <div class="col-6"><label class="form-label" for="setMaxConsec">最大連勤（推奨）</label><input id="setMaxConsec" type="number" class="form-control" value="${num(s.max_consecutive_days, 6)}"></div>
+         <div class="col-6"><label class="form-label" for="setNightRate">深夜割増率</label><input id="setNightRate" type="number" step="0.05" class="form-control" value="${num(s.night_premium_rate, 1.25)}"></div>
+         <div class="col-6"><label class="form-label" for="setTransport">1日交通費(円)</label><input id="setTransport" type="number" class="form-control" value="${num(s.transport_per_day, 0)}"></div>
          <div class="col-12"><label class="form-label">シフト時間設定</label><div class="info-box"><i class="bi bi-info-circle"></i> シフト作成可能な時間帯は <strong>「シフト時間設定」タブ</strong> で管理しています（曜日別・祝日対応）。</div></div>
          <div class="col-6"><label class="form-label" for="setPeriodMode">デフォルト期間</label><select id="setPeriodMode" class="form-select"><option value="half" ${(s.period_mode || 'half') === 'half' ? 'selected' : ''}>半月ごと</option><option value="month" ${s.period_mode === 'month' ? 'selected' : ''}>1ヶ月ごと</option></select></div>
        </div>
