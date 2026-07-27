@@ -23,77 +23,10 @@
 
 SCREENS.adminHome = function (el) {
   el.innerHTML = pageHead('システム管理者', 'bi-shield-lock', currentUser.name) +
-    card(`<button class="btn btn-primary btn-lg w-full mb-2" id="goShops"><i class="bi bi-shop"></i> 店舗一覧へ</button>
-      <button class="btn btn-light btn-lg w-full" id="dbMaintBtn"><i class="bi bi-database-check"></i> データベース状態確認・更新</button>`);
+    card(`<button class="btn btn-primary btn-lg w-full" id="goShops"><i class="bi bi-shop"></i> 店舗一覧へ</button>`);
   document.getElementById('goShops')?.addEventListener('click', () => navigateTo('adminShops'));
-  document.getElementById('dbMaintBtn')?.addEventListener('click', () => openDbMaintenanceModal());
 };
 
-function openDbMaintenanceModal() {
-  const w = openModal('<i class="bi bi-database-check"></i> データベース状態確認・更新',
-    `<div id="dbStatus"><div class="text-secondary small">確認中...</div></div>`,
-    null, { saveLabel: '閉じる' });
-  // 状態取得
-  api('/admin/debug/db-schema').then((d) => {
-    const box = w.querySelector('#dbStatus');
-    if (!box) return;
-    const student = d.supports_student_role;
-    const holidays = d.has_shop_holidays_table;
-    const allOk = student && holidays;
-    safeSetHTML(box, `
-      <div class="${allOk ? 'info-box' : 'info-box'}" style="border-color:${allOk ? 'var(--success)' : 'var(--danger)'}">
-        <div class="mb-2"><strong>現在のデータベース状態</strong></div>
-        <div>• student ロール対応: ${student ? '<span class="text-success">✓ 対応済み</span>' : '<span class="text-danger">✗ 未対応（要更新）</span>'}</div>
-        <div>• shop_holidays テーブル: ${holidays ? '<span class="text-success">✓ 存在</span>' : '<span class="text-danger">✗ 未作成</span>'}</div>
-      </div>
-      ${!allOk ? `
-        <div class="alert alert-warning mt-3">
-          <strong>⚠ データベースが古い状態です。</strong><br>
-          新機能（学生アルバイト・祝日機能等）が使えません。<br>
-          下の「スキーマを最新化」ボタンで修正できます。
-        </div>
-        <button class="btn btn-primary w-full mt-2" id="runMigrationBtn"><i class="bi bi-arrow-repeat"></i> スキーマを最新化する</button>
-        <div id="migrationResult" class="mt-2"></div>
-      ` : `
-        <div class="alert alert-success mt-3">
-          ✓ データベースは最新です。追加の操作は不要です。
-        </div>
-      `}
-      <details class="mt-3">
-        <summary class="small text-secondary cursor-pointer">技術詳細</summary>
-        <pre class="small mt-2" style="white-space:pre-wrap;word-break:break-all">${esc(d.staffs_schema || '')}</pre>
-        <div class="small mt-2">role 分布:</div>
-        <pre class="small">${esc(JSON.stringify(d.role_distribution, null, 2))}</pre>
-      </details>`);
-    const btn = w.querySelector('#runMigrationBtn');
-    if (btn) {
-      btn.addEventListener('click', async () => {
-        btn.disabled = true;
-        btn.innerHTML = '<i class="bi bi-hourglass-split"></i> 実行中...';
-        const resultBox = w.querySelector('#migrationResult');
-        try {
-          const r = await api('/admin/db/migrate', { method: 'POST', body: JSON.stringify({}) });
-          if (resultBox) {
-            safeSetHTML(resultBox, `
-              <div class="alert alert-success">
-                <strong>✓ マイグレーション完了</strong>
-                <pre class="small mt-2" style="white-space:pre-wrap">${esc((r.log || []).join('\n'))}</pre>
-              </div>`);
-          }
-          toast('データベースを最新化しました', 'success');
-        } catch (e) {
-          if (resultBox) {
-            safeSetHTML(resultBox, `<div class="alert alert-danger">エラー: ${esc(e.message)}</div>`);
-          }
-          toast(e.message, 'error');
-        }
-      });
-    }
-  }).catch((e) => {
-    const box = w.querySelector('#dbStatus');
-    if (box) safeSetHTML(box, `<div class="text-danger small">${esc(e.message)}</div>`);
-  });
-}
 SCREENS.adminShops = async function (el) {
   el.innerHTML = pageHead('店舗一覧', 'bi-shop') +
     card(`<div class="flex justify-between items-center mb-3">${sectionTitle('bi-shop', '店舗一覧')}<button class="btn btn-primary btn-sm" id="addShopBtn"><i class="bi bi-plus-lg"></i></button></div><div id="shopList"></div>`);
@@ -540,4 +473,188 @@ function openAdminMigrateModal(shopId, shop, onDone) {
         onDone?.();
       } catch (e) { showErr(e.message || '昇格に失敗しました'); }
     });
+}
+
+/* ---------- システム画面（管理者アカウント / マイグレーション / DB診断） ---------- */
+let adminSystemTab = 'admins';
+
+SCREENS.adminSystem = async function (el) {
+  el.innerHTML = pageHead('システム', 'bi-gear') +
+    `<div class="tabs no-print">
+       <button class="tab ${adminSystemTab === 'admins' ? 'active' : ''}" data-tab="admins">管理者アカウント</button>
+       <button class="tab ${adminSystemTab === 'migrations' ? 'active' : ''}" data-tab="migrations">マイグレーション</button>
+       <button class="tab ${adminSystemTab === 'diagnostic' ? 'active' : ''}" data-tab="diagnostic">DB診断</button>
+     </div><div id="sysBody"></div>`;
+  el.querySelectorAll('.tab').forEach((t) => t?.addEventListener('click', () => {
+    adminSystemTab = t.dataset.tab;
+    el.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === adminSystemTab));
+    renderAdminSystemTab(document.getElementById('sysBody'));
+  }));
+  renderAdminSystemTab(document.getElementById('sysBody'));
+};
+
+function renderAdminSystemTab(body) {
+  ({ admins: renderAdminAccountsTab, migrations: renderMigrationsTab,
+     diagnostic: renderDiagnosticTab }[adminSystemTab])(body);
+}
+
+async function renderAdminAccountsTab(body) {
+  const tok = navToken();
+  body.innerHTML = card(sectionTitle('bi-person-badge', '管理者アカウント',
+    '<button class="btn btn-primary btn-sm" id="addAdminBtn"><i class="bi bi-plus-lg"></i></button>') +
+    '<div id="adminList"></div>') +
+    card(sectionTitle('bi-key', '自分のパスワード') +
+      '<button class="btn btn-light btn-sm" id="chgPwBtn"><i class="bi bi-key"></i> パスワードを変更</button>');
+  const d = await api('/admin/admins');
+  if (!isAlive(tok)) return;
+  const list = document.getElementById('adminList');
+  if (!list) return;
+  list.innerHTML = d.admins.length ? d.admins.map((a) => `
+    <div class="list-row">
+      <div><strong>${esc(a.name || '')}</strong> <span class="text-secondary">${esc(a.admin_id)}</span>
+        <div class="small text-secondary">作成 ${esc((a.created_at || '').replace('T', ' '))}</div></div>
+      <button class="btn btn-sm btn-outline-danger" data-deladmin="${a.id}" data-name="${esc(a.admin_id)}"><i class="bi bi-trash"></i></button>
+    </div>`).join('') : emptyState('bi-person-badge', '管理者がいません');
+  list.querySelectorAll('[data-deladmin]').forEach((b) => b?.addEventListener('click', () =>
+    openModal('<i class="bi bi-trash text-danger"></i> 管理者の削除',
+      `<div class="text-center py-2">
+         <div class="mb-2"><i class="bi bi-exclamation-triangle-fill text-danger" style="font-size:2.2rem"></i></div>
+         <p class="mb-1"><strong>${esc(b.dataset.name)}</strong> を削除しますか？</p>
+         <p class="small text-secondary mb-0">この管理者のセッションは即座に無効になります。</p>
+       </div>`,
+      async (w, close) => {
+        try {
+          await api(`/admin/admins/${b.dataset.deladmin}`, { method: 'DELETE' });
+          close(); toast('削除しました', 'success'); renderAdminAccountsTab(body);
+        } catch (e) { toast(e.message, 'error'); }
+      }, { saveLabel: '削除する', btnClass: 'btn-danger' })));
+
+  document.getElementById('addAdminBtn')?.addEventListener('click', () => {
+    openModal('<i class="bi bi-plus-lg"></i> 管理者を追加',
+      `<label class="form-label" for="naId">管理者ID <span class="text-danger">*</span></label>
+       <input id="naId" class="form-control mb-2" placeholder="例: ops2" autocomplete="username">
+       <label class="form-label" for="naName">氏名</label>
+       <input id="naName" class="form-control mb-2" placeholder="例: 運営 花子">
+       <label class="form-label" for="naPw">パスワード <span class="text-danger">*</span></label>
+       <input id="naPw" type="password" class="form-control" autocomplete="new-password">
+       <div class="pw-rules mt-2" id="naPwRules">
+         <span class="pw-rule" data-rule="len"><i class="bi bi-circle"></i>8文字以上</span>
+         <span class="pw-rule" data-rule="alpha"><i class="bi bi-circle"></i>英字を含む</span>
+         <span class="pw-rule" data-rule="digit"><i class="bi bi-circle"></i>数字を含む</span>
+       </div>
+       <div class="form-error" id="naErr"></div>`,
+      async (w, close) => {
+        const err = w.querySelector('#naErr');
+        try {
+          await api('/admin/admins', { method: 'POST', body: JSON.stringify({
+            admin_id: w.querySelector('#naId').value.trim(),
+            name: w.querySelector('#naName').value.trim(),
+            password: w.querySelector('#naPw').value }) });
+          close(); toast('追加しました', 'success'); renderAdminAccountsTab(body);
+        } catch (e) { if (err) err.textContent = e.message; }
+      }, { saveLabel: '追加する' });
+    wirePasswordRuleCheck('naPw', 'naPwRules');
+  });
+
+  document.getElementById('chgPwBtn')?.addEventListener('click', () => {
+    openModal('<i class="bi bi-key"></i> パスワード変更',
+      `<label class="form-label" for="cpCur">現在のパスワード</label>
+       <input id="cpCur" type="password" class="form-control mb-2" autocomplete="current-password">
+       <label class="form-label" for="cpNew">新しいパスワード</label>
+       <input id="cpNew" type="password" class="form-control" autocomplete="new-password">
+       <div class="pw-rules mt-2" id="cpPwRules">
+         <span class="pw-rule" data-rule="len"><i class="bi bi-circle"></i>8文字以上</span>
+         <span class="pw-rule" data-rule="alpha"><i class="bi bi-circle"></i>英字を含む</span>
+         <span class="pw-rule" data-rule="digit"><i class="bi bi-circle"></i>数字を含む</span>
+       </div>
+       <p class="small text-secondary mt-2 mb-0">変更すると、他の端末のログインは無効になります。</p>
+       <div class="form-error" id="cpErr"></div>`,
+      async (w, close) => {
+        const err = w.querySelector('#cpErr');
+        try {
+          await api('/admin/password', { method: 'PUT', body: JSON.stringify({
+            current_password: w.querySelector('#cpCur').value,
+            new_password: w.querySelector('#cpNew').value }) });
+          close(); toast('パスワードを変更しました', 'success');
+        } catch (e) { if (err) err.textContent = e.message; }
+      }, { saveLabel: '変更する' });
+    wirePasswordRuleCheck('cpNew', 'cpPwRules');
+  });
+}
+
+// 各所のパスワード入力欄で使っている「8文字以上・英字・数字」のリアルタイム表示を
+// この画面の3箇所（管理者追加・パスワード変更）でも同じ見た目に揃えるための共通処理。
+function wirePasswordRuleCheck(inputId, rulesId) {
+  setTimeout(() => {
+    const wrap = document.querySelector('.modal-overlay:last-child');
+    if (!wrap) return;
+    const pwInput = wrap.querySelector(`#${inputId}`);
+    const ruleEls = wrap.querySelectorAll(`#${rulesId} .pw-rule`);
+    if (!pwInput || !ruleEls.length) return;
+    const updateRules = () => {
+      const v = pwInput.value || '';
+      const checks = { len: v.length >= 8, alpha: /[A-Za-z]/.test(v), digit: /[0-9]/.test(v) };
+      ruleEls.forEach((el) => {
+        const ok = checks[el.dataset.rule];
+        el.classList.toggle('ok', !!ok && v.length > 0);
+        el.classList.toggle('ng', !ok && v.length > 0);
+        el.querySelector('i').className = ok ? 'bi bi-check-circle-fill' : 'bi bi-x-circle-fill';
+      });
+    };
+    pwInput.addEventListener('input', updateRules);
+  }, 50);
+}
+
+async function renderMigrationsTab(body) {
+  const tok = navToken();
+  body.innerHTML = card(sectionTitle('bi-database-gear', 'マイグレーション') +
+    '<div id="migSummary" class="mb-2"></div><div id="migList"></div>' +
+    '<button class="btn btn-primary btn-sm mt-3" id="migApplyBtn"><i class="bi bi-play-fill"></i> 未適用を適用</button>');
+  const d = await api('/admin/migrations');
+  if (!isAlive(tok)) return;
+  const summary = document.getElementById('migSummary');
+  if (!summary) return;
+  summary.innerHTML = d.pending
+    ? badge(`未適用 ${d.pending} 件`, 'warning')
+    : badge('すべて適用済み', 'success');
+  document.getElementById('migList').innerHTML =
+    `<div class="table-wrap"><table class="data-table"><thead><tr><th>状態</th><th>ファイル</th><th class="t-num">#</th><th>SQL</th></tr></thead><tbody>` +
+    d.migrations.map((m) => `<tr>
+      <td>${badge(m.applied ? '適用済み' : '未適用', m.applied ? 'success' : 'warning')}</td>
+      <td class="small">${esc(m.filename)}</td>
+      <td class="t-num num">${m.stmt_index}</td>
+      <td class="small">${esc((m.sql || '').slice(0, 80))}</td>
+    </tr>`).join('') + '</tbody></table></div>';
+
+  document.getElementById('migApplyBtn')?.addEventListener('click', () =>
+    openModal('<i class="bi bi-database-gear"></i> マイグレーションの適用',
+      `<p class="mb-1">未適用のステートメントを順に実行します。</p>
+       <p class="small text-secondary mb-0">失敗した時点で中断します。成功した分は記録されるため、再実行すれば失敗箇所から再開します。</p>`,
+      async (w, close) => {
+        try {
+          const r = await api('/admin/migrations/apply', { method: 'POST' });
+          close();
+          if (r.failed) {
+            toast(`${r.applied.length}件適用後、${r.failed.filename}#${r.failed.stmt_index} で失敗: ${r.failed.error}`, 'error');
+          } else {
+            toast(`${r.applied.length}件を適用しました`, 'success');
+          }
+          renderMigrationsTab(body);
+        } catch (e) { toast(e.message, 'error'); }
+      }, { saveLabel: '適用する' }));
+}
+
+async function renderDiagnosticTab(body) {
+  const tok = navToken();
+  body.innerHTML = card(sectionTitle('bi-clipboard-pulse', 'DB診断') + '<div id="diagBody">読み込み中…</div>');
+  const d = await api('/admin/debug/db-schema');
+  if (!isAlive(tok)) return;
+  const target = document.getElementById('diagBody');
+  if (!target) return;
+  // キー名は admin_debug_db_schema (src/admin_api.py) の実装に合わせる
+  // （supports_student_role / has_shop_holidays_table。student_supported 等ではない）。
+  target.innerHTML =
+    `<div class="mb-2">${badge(d.supports_student_role ? 'student ロール対応済み' : 'student ロール未対応', d.supports_student_role ? 'success' : 'warning')}
+      ${badge(d.has_shop_holidays_table ? 'shop_holidays あり' : 'shop_holidays なし', d.has_shop_holidays_table ? 'success' : 'warning')}</div>
+     <details><summary class="small text-secondary">技術詳細</summary><pre class="small" style="white-space:pre-wrap">${esc(JSON.stringify(d, null, 2))}</pre></details>`;
 }

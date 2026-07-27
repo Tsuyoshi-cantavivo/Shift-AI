@@ -18,6 +18,7 @@ from auth import hash_password, verify_password, strip_password
 from utils import (calc_next_period, jst_now, parse_settings, validate_password,
                     sanitize_login_code, LOGIN_CODE_MAX)
 import json
+import migrator
 
 
 def db_module_get_conn():
@@ -926,4 +927,22 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         audit("admin.delete", target_type="system_admin", target_id=aid,
               detail=f"admin_id={target['admin_id']}")
         return jsonify({"ok": True})
+
+    @app.get("/api/admin/migrations")
+    def admin_migrations_status():
+        """マイグレーションの適用状況一覧（ファイル×ステートメント単位）。"""
+        require_auth(["admin"])
+        rows = migrator.status()
+        return jsonify({"migrations": rows,
+                        "pending": sum(1 for r in rows if not r["applied"])})
+
+    @app.post("/api/admin/migrations/apply")
+    def admin_migrations_apply():
+        """未適用のマイグレーションを順に適用する（失敗時はそこで中断）。"""
+        require_auth(["admin"])
+        result = migrator.apply_pending()
+        detail = (f"applied={len(result['applied'])} skipped={len(result['skipped'])}"
+                  f" failed={'yes' if result['failed'] else 'no'}")
+        audit("admin.migrate", target_type="schema", detail=detail)
+        return jsonify(result)
 

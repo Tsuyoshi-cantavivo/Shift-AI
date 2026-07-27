@@ -575,6 +575,7 @@ const NAV_DEFS = {
     { key: 'adminHome', icon: 'bi-house-door', label: 'ホーム', mobile: true },
     { key: 'adminShops', icon: 'bi-shop', label: '店舗', mobile: true },
     { key: 'adminAudit', icon: 'bi-clipboard-data', label: '監査ログ', mobile: true },
+    { key: 'adminSystem', icon: 'bi-gear', label: 'システム', mobile: true },
   ],
 };
 
