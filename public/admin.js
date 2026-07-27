@@ -27,20 +27,33 @@ SCREENS.adminHome = function (el) {
   document.getElementById('goShops')?.addEventListener('click', () => navigateTo('adminShops'));
 };
 
+// アーカイブ済み店舗は既定で一覧から隠す（運営が普段見るのは稼働中の店舗だけのため）。
+// トグルで一時的に表示できる。画面遷移をまたいで状態を覚えておく用途なのでモジュール変数。
+let adminShowArchived = false;
 SCREENS.adminShops = async function (el) {
   el.innerHTML = pageHead('店舗一覧', 'bi-shop') +
-    card(`<div class="flex justify-between items-center mb-3">${sectionTitle('bi-shop', '店舗一覧')}<button class="btn btn-primary btn-sm" id="addShopBtn"><i class="bi bi-plus-lg"></i></button></div><div id="shopList"></div>`);
+    card(`<div class="flex justify-between items-center mb-3">${sectionTitle('bi-shop', '店舗一覧')}
+      <div class="flex gap-2">
+        <button class="btn btn-light btn-sm" id="toggleArchivedBtn"><i class="bi bi-archive"></i> ${adminShowArchived ? 'アーカイブ済みを隠す' : 'アーカイブ済みも表示'}</button>
+        <button class="btn btn-primary btn-sm" id="addShopBtn"><i class="bi bi-plus-lg"></i></button>
+      </div></div><div id="shopList"></div>`);
   const load = async () => {
-    const d = await api('/admin/shops');
+    const d = await api('/admin/shops' + (adminShowArchived ? '?include_archived=1' : ''));
     document.getElementById('shopList').innerHTML = d.shops.length ? (await Promise.all(d.shops.map(async (s) => {
       let st = { staff_count: '-', confirmed_count: '-' };
       try { st = await api(`/admin/shops/stats/${s.id}`); } catch {}
-      return `<div class="list-row" style="cursor:pointer" data-detail="${s.id}"><div><strong>${esc(s.shop_name)}</strong> <span class="text-secondary">${esc(s.shop_code)}</span> ${badge(s.is_active ? '有効' : '無効', s.is_active ? 'success' : 'warning')}<div class="small text-secondary">スタッフ${st.staff_count}名 / 確定${st.confirmed_count}件</div></div><button class="btn btn-sm btn-light" data-toggle="${s.id}" data-active="${s.is_active}">${s.is_active ? '無効化' : '有効化'}</button></div>`;
+      // アーカイブ済みは「有効/無効」ではなく「アーカイブ済み」バッジのみ出す。
+      // 有効化/無効化トグルは（archive() が is_active=0 に固定するので）
+      // アーカイブ中に押しても意味が無く、混乱の元になるため出さない。
+      const statusBadge = s.is_archived ? badge('アーカイブ済み', 'warning') : badge(s.is_active ? '有効' : '無効', s.is_active ? 'success' : 'warning');
+      const toggleBtn = s.is_archived ? '' : `<button class="btn btn-sm btn-light" data-toggle="${s.id}" data-active="${s.is_active}">${s.is_active ? '無効化' : '有効化'}</button>`;
+      return `<div class="list-row" style="cursor:pointer" data-detail="${s.id}"><div><strong>${esc(s.shop_name)}</strong> <span class="text-secondary">${esc(s.shop_code)}</span> ${statusBadge}<div class="small text-secondary">スタッフ${st.staff_count}名 / 確定${st.confirmed_count}件</div></div>${toggleBtn}</div>`;
     }))).join('') : emptyState('bi-shop', '店舗がありません');
     document.getElementById('shopList').querySelectorAll('[data-detail]').forEach((b) => b?.addEventListener('click', (ev) => { if (ev.target.closest('[data-toggle]')) return; window._adminShopId = +b.dataset.detail; navigateTo('adminShopDetail'); }));
     document.getElementById('shopList').querySelectorAll('[data-toggle]').forEach((b) => b?.addEventListener('click', async (ev) => { ev.stopPropagation(); await api(`/admin/shops/${b.dataset.toggle}`, { method: 'PUT', body: JSON.stringify({ is_active: b.dataset.active !== '1' }) }); load(); }));
   };
   load();
+  document.getElementById('toggleArchivedBtn')?.addEventListener('click', () => { adminShowArchived = !adminShowArchived; navigateTo('adminShops'); });
   document.getElementById('addShopBtn')?.addEventListener('click', () =>
     openModal('<i class="bi bi-plus-lg"></i> 店舗追加',
       `<p class="small text-secondary mb-3">店舗情報と、ログイン用の店舗責任者アカウントを同時に作成します。店舗責任者は作成直後から <strong>店舗コード + ユーザーID + パスワード</strong> でログインできます。</p>
@@ -109,22 +122,62 @@ SCREENS.adminShops = async function (el) {
     }));
   }, 50);
 };
+// 店舗詳細のタブ状態。settingsTab（app.js）と同じ理由でモジュール変数にして
+// タブ切替のたびに再生成せず、画面再訪時も直前のタブを覚えておく。
+let adminShopTab = 'overview';
+
 SCREENS.adminShopDetail = async function (el) {
+  const tok = navToken();
   const sid = window._adminShopId;
-  const shop = (await api('/admin/shops')).shops.find((x) => x.id === sid) || { shop_name: '店舗#' + sid, shop_code: '' };
-  el.innerHTML = pageHead(shop.shop_name, 'bi-shop', shop.shop_code) +
-    card(`<button class="btn btn-sm btn-light mb-2" id="backBtn"><i class="bi bi-arrow-left"></i> 戻る</button>
-      <div class="flex gap-2 flex-wrap mb-3">
-        <button class="btn btn-primary btn-sm" id="addStaffBtn"><i class="bi bi-person-plus"></i> スタッフ追加</button>
-        <button class="btn btn-light btn-sm" id="migrateBtn" title="旧仕様店主のPWを引き継いで manager スタッフを作成"><i class="bi bi-arrow-up-circle"></i> 旧仕様から manager 昇格</button>
-        <button class="btn btn-sm btn-light" id="impersonateBtn"><i class="bi bi-eye"></i> この店舗を代理閲覧</button>
-      </div>
-      <div class="row mb-3"><div class="col-5"><label class="form-label" for="dStart">開始</label><input type="date"  id="dStart" class="form-control"></div><div class="col-5"><label class="form-label" for="dEnd">終了</label><input type="date"  id="dEnd" class="form-control"></div><div class="col-2 flex items-end"><button class="btn btn-primary w-full" id="loadBtn">表示</button></div></div>
-      <div id="detailBody"><div class="text-secondary small">期間を指定してください</div></div>`);
+  // include_archived=1 なのは、アーカイブ済み店舗の詳細（解除・完全削除）にも
+  // このタブからしか到達できないため（一覧の既定表示では隠れている）。
+  const shops = await api('/admin/shops?include_archived=1');
+  if (!isAlive(tok)) return;
+  const shop = (shops.shops || []).find((s) => s.id === sid);
+  if (!shop) { el.innerHTML = emptyState('bi-shop', '店舗が見つかりません'); return; }
+
+  el.innerHTML = pageHead(shop.shop_name || '(名称未設定)', 'bi-shop', shop.shop_code) +
+    `<button class="btn btn-sm btn-light mb-3" id="backBtn"><i class="bi bi-arrow-left"></i> 戻る</button>
+     <div class="tabs no-print">
+       <button class="tab ${adminShopTab === 'overview' ? 'active' : ''}" data-tab="overview">概要</button>
+       <button class="tab ${adminShopTab === 'staffs' ? 'active' : ''}" data-tab="staffs">スタッフ</button>
+       <button class="tab ${adminShopTab === 'settings' ? 'active' : ''}" data-tab="settings">設定</button>
+       <button class="tab ${adminShopTab === 'danger' ? 'active' : ''}" data-tab="danger">危険な操作</button>
+     </div><div id="shopTabBody"></div>`;
   document.getElementById('backBtn')?.addEventListener('click', () => navigateTo('adminShops'));
-  document.getElementById('loadBtn')?.addEventListener('click', () => loadDetail());
-  document.getElementById('addStaffBtn')?.addEventListener('click', () => openAdminAddStaffModal(sid, loadDetail));
-  document.getElementById('migrateBtn')?.addEventListener('click', () => openAdminMigrateModal(sid, shop, loadDetail));
+  el.querySelectorAll('.tab').forEach((t) => t?.addEventListener('click', () => {
+    adminShopTab = t.dataset.tab;
+    el.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === adminShopTab));
+    renderAdminShopTab(document.getElementById('shopTabBody'), shop);
+  }));
+  renderAdminShopTab(document.getElementById('shopTabBody'), shop);
+};
+
+// 注意: app.js 側にも同名に見える店舗設定タブの関数 renderShopTab(body) が
+// 既に存在する（一般店舗ユーザー向け設定画面の「店舗情報」タブ）。両ファイルは
+// モジュール化されておらずグローバル関数として共存するため、同名にすると
+// admin.js の読み込み順（app.js の後）で上書きしてしまい、店舗ユーザーの
+// 設定画面が壊れる。そのため管理者側は renderAdminShopTab という別名にする。
+function renderAdminShopTab(body, shop) {
+  ({ overview: renderShopOverviewTab, staffs: renderShopStaffsTab,
+     settings: renderShopSettingsTab, danger: renderShopDangerTab }[adminShopTab])(body, shop);
+}
+
+/* ---- 概要タブ: 代理閲覧・稼働状態・期間集計 ---- */
+async function renderShopOverviewTab(body, shop) {
+  const sid = shop.id;
+  body.innerHTML =
+    card(`<div class="flex gap-2 flex-wrap items-center">
+      <button class="btn btn-sm btn-light" id="impersonateBtn"><i class="bi bi-eye"></i> この店舗を代理閲覧</button>
+      ${shop.is_archived ? badge('アーカイブ済み', 'warning') : badge(shop.is_active ? '稼働中' : '停止中', shop.is_active ? 'success' : 'warning')}
+    </div>`) +
+    card(sectionTitle('bi-calendar-range', '期間集計') +
+      `<div class="row mb-3">
+         <div class="col-5"><label class="form-label" for="sumStart">開始</label><input type="date" id="sumStart" class="form-control"></div>
+         <div class="col-5"><label class="form-label" for="sumEnd">終了</label><input type="date" id="sumEnd" class="form-control"></div>
+         <div class="col-2 flex items-end"><button class="btn btn-primary w-full" id="sumLoadBtn">表示</button></div>
+       </div><div id="sumBody"><div class="text-secondary small">「表示」ボタンを押してください</div></div>`);
+
   document.getElementById('impersonateBtn')?.addEventListener('click', () =>
     openModal('<i class="bi bi-eye"></i> 代理閲覧',
       `<p class="mb-2">この店舗の画面を<strong>閲覧のみ</strong>の権限で開きます。</p>
@@ -141,21 +194,55 @@ SCREENS.adminShopDetail = async function (el) {
         } catch (e) { toast(e.message, 'error'); }
       },
       { saveLabel: '代理閲覧を開始' }));
-  api(`/admin/shops/${sid}/periods/next`).then((p) => {
-    const ds = document.getElementById('dStart'); const de = document.getElementById('dEnd');
-    if (!ds || !de) return;  // 画面遷移済み
-    ds.value = p.start_date; de.value = p.end_date; loadDetail();
-  }).catch(() => {});
-  async function loadDetail() {
-    const start = dStart.value, end = dEnd.value; if (!start || !end) return;
-    const body = document.getElementById('detailBody');
-    if (!body) return;  // 画面遷移済み → 更新中止
+
+  async function loadSummary() {
+    const start = document.getElementById('sumStart')?.value;
+    const end = document.getElementById('sumEnd')?.value;
+    if (!start || !end) return;
+    const sumBody = document.getElementById('sumBody');
+    if (!sumBody) return;  // 画面遷移済み
     const tok = navToken();
-    body.innerHTML = '<div class="text-secondary small">読み込み中...</div>';
+    sumBody.innerHTML = '<div class="text-secondary small">読み込み中...</div>';
     try {
-      const [sum, st] = await Promise.all([api(`/admin/shops/summary/${sid}?start=${start}&end=${end}`), api(`/admin/shops/staffs/${sid}`)]);
-      if (!isAlive(tok) || !body.isConnected) return;  // 画面遷移済み
-      const tbl = sum.staff.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>氏名</th><th>日</th><th class="t-num">確定</th><th class="t-num">給与</th></tr></thead><tbody>${sum.staff.map((s) => `<tr><td>${esc(s.name)}</td><td>${s.days}</td><td class="t-num num">${s.confirmed_hours}h</td><td class="t-num num">${yen(s.pay)}</td></tr>`).join('')}<tr style="font-weight:800;color:var(--ink)"><td>合計</td><td></td><td class="t-num num">${sum.total_hours}h</td><td class="t-num num">${yen(sum.total_pay)}</td></tr></tbody></table></div>` : '<div class="small text-secondary">確定シフトなし</div>';
+      const sum = await api(`/admin/shops/summary/${sid}?start=${start}&end=${end}`);
+      if (!isAlive(tok) || !sumBody.isConnected) return;  // 画面遷移済み
+      sumBody.innerHTML = sum.staff.length
+        ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>氏名</th><th>日</th><th class="t-num">確定</th><th class="t-num">給与</th></tr></thead><tbody>${sum.staff.map((s) => `<tr><td>${esc(s.name)}</td><td>${s.days}</td><td class="t-num num">${s.confirmed_hours}h</td><td class="t-num num">${yen(s.pay)}</td></tr>`).join('')}<tr style="font-weight:800;color:var(--ink)"><td>合計</td><td></td><td class="t-num num">${sum.total_hours}h</td><td class="t-num num">${yen(sum.total_pay)}</td></tr></tbody></table></div>`
+        : '<div class="small text-secondary">確定シフトなし</div>';
+    } catch (e) {
+      if (!isAlive(tok) || !sumBody.isConnected) return;
+      sumBody.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
+    }
+  }
+  document.getElementById('sumLoadBtn')?.addEventListener('click', loadSummary);
+  api(`/admin/shops/${sid}/periods/next`).then((p) => {
+    const ds = document.getElementById('sumStart'); const de = document.getElementById('sumEnd');
+    if (!ds || !de) return;  // 画面遷移済み
+    ds.value = p.start_date; de.value = p.end_date; loadSummary();
+  }).catch(() => {});
+}
+
+/* ---- スタッフタブ: 一覧・検索・追加・編集・ロール変更・PWリセット・旧仕様昇格 ---- */
+async function renderShopStaffsTab(body, shop) {
+  const sid = shop.id;
+  body.innerHTML =
+    card(`<div class="flex gap-2 flex-wrap mb-3">
+        <button class="btn btn-primary btn-sm" id="addStaffBtn"><i class="bi bi-person-plus"></i> スタッフ追加</button>
+        <button class="btn btn-light btn-sm" id="migrateBtn" title="旧仕様店主のPWを引き継いで manager スタッフを作成"><i class="bi bi-arrow-up-circle"></i> 旧仕様から manager 昇格</button>
+      </div>
+      <div id="staffBody"><div class="text-secondary small">読み込み中...</div></div>`);
+
+  document.getElementById('addStaffBtn')?.addEventListener('click', () => openAdminAddStaffModal(sid, loadStaffs));
+  document.getElementById('migrateBtn')?.addEventListener('click', () => openAdminMigrateModal(sid, shop, loadStaffs));
+
+  async function loadStaffs() {
+    const staffBody = document.getElementById('staffBody');
+    if (!staffBody) return;  // 画面遷移済み → 更新中止
+    const tok = navToken();
+    staffBody.innerHTML = '<div class="text-secondary small">読み込み中...</div>';
+    try {
+      const st = await api(`/admin/shops/staffs/${sid}`);
+      if (!isAlive(tok) || !staffBody.isConnected) return;  // 画面遷移済み
       const slist = (st.staffs || []).map((s) => `
         <div class="list-row" data-staff-row data-search="${esc((s.name || '') + ' ' + (s.staff_code || '') + ' ' + roleLabel(s.role))}">
           <div class="staff-cell">
@@ -169,33 +256,163 @@ SCREENS.adminShopDetail = async function (el) {
           </div>
         </div>`).join('');
       const searchBox = `<input type="search" id="staffSearch" class="form-control mb-2" placeholder="氏名・コード・ロールで絞り込み">`;
-      body.innerHTML = sectionTitle('bi-people', `スタッフ（${st.staffs.length}名）`) + searchBox + `<div id="staffListBox">${slist}</div>` + `<hr style="border-color:var(--rule);margin:16px 0">` + sectionTitle('bi-bar-chart', `集計（${start}〜${end}）`) + tbl;
+      staffBody.innerHTML = sectionTitle('bi-people', `スタッフ（${st.staffs.length}名）`) + searchBox +
+        `<div id="staffListBox">${(st.staffs || []).length ? slist : emptyState('bi-people', 'スタッフがいません')}</div>`;
       // スタッフ検索（フロント側フィルタ）
       document.getElementById('staffSearch')?.addEventListener('input', (ev) => {
         const q = ev.target.value.trim().toLowerCase();
-        body.querySelectorAll('[data-staff-row]').forEach((row) => {
+        staffBody.querySelectorAll('[data-staff-row]').forEach((row) => {
           row.style.display = (!q || (row.dataset.search || '').toLowerCase().includes(q)) ? '' : 'none';
         });
       });
       // 汎用編集ボタン
-      body.querySelectorAll('[data-staff-edit]').forEach((b) => b?.addEventListener('click', () => {
+      staffBody.querySelectorAll('[data-staff-edit]').forEach((b) => b?.addEventListener('click', () => {
         let s2; try { s2 = JSON.parse(b.dataset.staffEdit); } catch { return; }
-        openAdminStaffEditModal(sid, s2, loadDetail);
+        openAdminStaffEditModal(sid, s2, loadStaffs);
       }));
       // ロール変更ボタン
-      body.querySelectorAll('[data-role-edit]').forEach((b) => b?.addEventListener('click', () => {
-        openAdminRoleModal(sid, +b.dataset.roleEdit, b.dataset.name, b.dataset.role, loadDetail);
+      staffBody.querySelectorAll('[data-role-edit]').forEach((b) => b?.addEventListener('click', () => {
+        openAdminRoleModal(sid, +b.dataset.roleEdit, b.dataset.name, b.dataset.role, loadStaffs);
       }));
       // パスワードリセットボタン
-      body.querySelectorAll('[data-pw-reset]').forEach((b) => b?.addEventListener('click', () => {
+      staffBody.querySelectorAll('[data-pw-reset]').forEach((b) => b?.addEventListener('click', () => {
         openAdminPwResetModal(sid, +b.dataset.pwReset, b.dataset.name);
       }));
     } catch (e) {
-      if (!isAlive(tok) || !body.isConnected) return;
-      body.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
+      if (!isAlive(tok) || !staffBody.isConnected) return;
+      staffBody.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
     }
   }
-};
+  loadStaffs();
+}
+
+/* ---- 設定タブ: 店舗名・店舗コード・シフト設定 ---- */
+async function renderShopSettingsTab(body, shop) {
+  const s = shop.settings ? (typeof shop.settings === 'string' ? JSON.parse(shop.settings || '{}') : shop.settings) : {};
+  const num = (v) => (v === undefined || v === null ? '' : v);
+  body.innerHTML =
+    card(sectionTitle('bi-shop', '店舗情報') +
+      `<label class="form-label" for="stName">店舗名</label>
+       <input id="stName" class="form-control mb-2" value="${esc(shop.shop_name || '')}">
+       <label class="form-label" for="stCode">店舗コード</label>
+       <input id="stCode" class="form-control mb-2" value="${esc(shop.shop_code || '')}">
+       <div class="form-error" id="stErr"></div>
+       <button class="btn btn-primary btn-sm mt-2" id="stSaveBtn">保存</button>`) +
+    card(sectionTitle('bi-sliders', 'シフト設定') +
+      `<div class="row">
+         <div class="col-6"><label class="form-label" for="cfWage">既定時給</label><input type="number" id="cfWage" class="form-control mb-2" value="${num(s.default_hourly_wage)}"></div>
+         <div class="col-6"><label class="form-label" for="cfMaxDaily">1日の上限時間</label><input type="number" id="cfMaxDaily" class="form-control mb-2" value="${num(s.max_daily_hours)}"></div>
+         <div class="col-6"><label class="form-label" for="cfMinDaily">1日の下限時間</label><input type="number" id="cfMinDaily" class="form-control mb-2" value="${num(s.min_daily_hours)}"></div>
+         <div class="col-6"><label class="form-label" for="cfEmpDaily">社員の1日上限</label><input type="number" id="cfEmpDaily" class="form-control mb-2" value="${num(s.max_employee_daily_hours)}"></div>
+         <div class="col-6"><label class="form-label" for="cfConsec">連勤上限（日）</label><input type="number" id="cfConsec" class="form-control mb-2" value="${num(s.max_consecutive_days)}"></div>
+         <div class="col-6"><label class="form-label" for="cfTransport">1日あたり交通費</label><input type="number" id="cfTransport" class="form-control mb-2" value="${num(s.transport_per_day)}"></div>
+       </div>
+       <div class="form-error" id="cfErr"></div>
+       <button class="btn btn-primary btn-sm mt-2" id="cfSaveBtn">保存</button>`);
+
+  document.getElementById('stSaveBtn')?.addEventListener('click', async () => {
+    const err = document.getElementById('stErr');
+    if (err) err.textContent = '';
+    try {
+      await api(`/admin/shops/${shop.id}`, { method: 'PUT', body: JSON.stringify({
+        shop_name: document.getElementById('stName').value.trim(),
+        shop_code: document.getElementById('stCode').value.trim() }) });
+      toast('保存しました', 'success');
+      navigateTo('adminShopDetail');
+    } catch (e) { if (err) err.textContent = e.message; }
+  });
+
+  document.getElementById('cfSaveBtn')?.addEventListener('click', async () => {
+    const err = document.getElementById('cfErr');
+    if (err) err.textContent = '';
+    const pick = (id) => {
+      const v = document.getElementById(id).value.trim();
+      return v === '' ? undefined : Number(v);
+    };
+    const payload = {};
+    const map = { cfWage: 'default_hourly_wage', cfMaxDaily: 'max_daily_hours',
+                  cfMinDaily: 'min_daily_hours', cfEmpDaily: 'max_employee_daily_hours',
+                  cfConsec: 'max_consecutive_days', cfTransport: 'transport_per_day' };
+    Object.keys(map).forEach((id) => { const v = pick(id); if (v !== undefined) payload[map[id]] = v; });
+    try {
+      await api(`/admin/shops/${shop.id}/settings`, { method: 'PUT', body: JSON.stringify(payload) });
+      toast('保存しました', 'success');
+    } catch (e) { if (err) err.textContent = e.message; }
+  });
+}
+
+/* ---- 危険な操作タブ: アーカイブ・エクスポート・完全削除 ---- */
+function renderShopDangerTab(body, shop) {
+  body.innerHTML = card(sectionTitle('bi-exclamation-triangle', '危険な操作') +
+    `<div class="list-row">
+       <div><strong>${shop.is_archived ? 'アーカイブを解除' : 'アーカイブ'}</strong>
+         <div class="small text-secondary">${shop.is_archived
+           ? '一覧に再表示します。稼働させるには別途「有効化」が必要です。'
+           : '一覧から隠し、ログインを停止します。データは残ります。'}</div></div>
+       <button class="btn btn-sm btn-light" id="archBtn">${shop.is_archived ? '解除' : 'アーカイブ'}</button>
+     </div>
+     <div class="list-row">
+       <div><strong>データのエクスポート</strong>
+         <div class="small text-secondary">この店舗の全データを JSON でダウンロードします。</div></div>
+       <button class="btn btn-sm btn-light" id="expBtn"><i class="bi bi-download"></i> ダウンロード</button>
+     </div>
+     <div class="list-row">
+       <div><strong>完全削除</strong>
+         <div class="small text-secondary">${shop.is_archived
+           ? 'アーカイブ済みです。エクスポートしてから削除できます。'
+           : '先にアーカイブしてください。'}</div></div>
+       <button class="btn btn-sm btn-outline-danger" id="delBtn" disabled><i class="bi bi-trash"></i> 完全削除</button>
+     </div>`);
+
+  document.getElementById('archBtn')?.addEventListener('click', async () => {
+    const path = shop.is_archived ? 'unarchive' : 'archive';
+    try {
+      await api(`/admin/shops/${shop.id}/${path}`, { method: 'POST' });
+      toast(shop.is_archived ? 'アーカイブを解除しました' : 'アーカイブしました', 'success');
+      navigateTo('adminShopDetail');
+    } catch (e) { toast(e.message, 'error'); }
+  });
+
+  document.getElementById('expBtn')?.addEventListener('click', async () => {
+    try {
+      // api() は JSON を返す前提なので、ファイル取得は fetch を直に使う
+      const res = await fetch(`/api/admin/shops/${shop.id}/export`, {
+        headers: { Authorization: 'Bearer ' + localStorage.getItem('shift_token') } });
+      if (!res.ok) throw new Error('エクスポートに失敗しました');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `shop-${shop.shop_code}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast('エクスポートしました', 'success');
+      // エクスポート済みのときだけ削除を許可する（取り返しのつかない操作の前に
+      // 必ずバックアップを取らせる）
+      const del = document.getElementById('delBtn');
+      if (del && shop.is_archived) del.disabled = false;
+    } catch (e) { toast(e.message, 'error'); }
+  });
+
+  document.getElementById('delBtn')?.addEventListener('click', () =>
+    openModal('<i class="bi bi-trash text-danger"></i> 店舗の完全削除',
+      `<div class="text-center py-2">
+         <div class="mb-2"><i class="bi bi-exclamation-triangle-fill text-danger" style="font-size:2.2rem"></i></div>
+         <p class="mb-1"><strong>${esc(shop.shop_name || '')}</strong> と、その全スタッフ・シフト・希望を削除します。</p>
+         <p class="small text-secondary">この操作は取り消せません。監査ログのみ記録として残ります。</p>
+       </div>
+       <label class="form-label" for="delCode">確認のため店舗コード <strong>${esc(shop.shop_code)}</strong> を入力してください</label>
+       <input id="delCode" class="form-control" autocomplete="off">
+       <div class="form-error" id="delErr"></div>`,
+      async (w, close) => {
+        const err = w.querySelector('#delErr');
+        try {
+          await api(`/admin/shops/${shop.id}`, { method: 'DELETE',
+            body: JSON.stringify({ confirm_code: w.querySelector('#delCode').value.trim() }) });
+          close(); toast('削除しました', 'success'); navigateTo('adminShops');
+        } catch (e) { if (err) err.textContent = e.message; }
+      }, { saveLabel: '完全に削除する', btnClass: 'btn-danger' }));
+}
 
 const AUDIT_ACTION_LABELS = {
   'shift.finalize': 'シフト確定',

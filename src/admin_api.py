@@ -145,7 +145,10 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
     @app.get("/api/admin/shops")
     def admin_shops():
         require_auth(["admin"])
-        cols = "id, shop_code, shop_name, is_active, settings, created_at"
+        # is_archived も返す。管理画面（店舗詳細タブ）がアーカイブ済みバッジの表示や
+        # 「エクスポート必須→完全削除」の活性判定に使うため、フィルタ用途だけでなく
+        # 各行の値としても必要。COALESCE で NULL を 0 に正規化するのは下の WHERE と同じ理由。
+        cols = "id, shop_code, shop_name, is_active, settings, created_at, COALESCE(is_archived,0) AS is_archived"
         # アーカイブ済みは既定で隠す。運営が普段見るのは稼働中の店舗だけのため。
         # COALESCE を使うのは、ALTER TABLE ADD COLUMN 以前からある行の is_archived が
         # NULL になり得るため。
