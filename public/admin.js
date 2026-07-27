@@ -1047,14 +1047,29 @@ async function renderAnnounceTab(body) {
       : emptyState('bi-megaphone', '配信履歴がありません');
   };
 
-  document.getElementById('anSend')?.addEventListener('click', () =>
+  // 確認モーダルの「配信する」連打で二重配信されるのを防ぐガード。
+  // renderAnnounceTab の呼び出しごとに新しいクロージャで初期化される。
+  let anSending = false;
+
+  document.getElementById('anSend')?.addEventListener('click', () => {
+    const err = document.getElementById('anErr');
+    if (err) err.textContent = '';
+    const scope = document.getElementById('anScope').value;
+    const picked = Array.from(document.querySelectorAll('.an-shop:checked')).map((c) => +c.value);
+    // 「店舗を選ぶ」で1件も選ばずに送信すると、サーバは shop_ids:[] を
+    // 全店舗(shop_ids:null)と区別して400で拒否するが、確認モーダルまで
+    // 進めるのは不親切なのでここで止める（レビュー指摘: 空配列の誤操作対策）。
+    if (scope === 'select' && picked.length === 0) {
+      if (err) err.textContent = '配信先の店舗を1件以上選択してください';
+      return;
+    }
     openModal('<i class="bi bi-send"></i> 配信の確認',
       '<p class="mb-0">この内容で配信します。配信後は取り消せません。</p>',
       async (w, close) => {
-        const err = document.getElementById('anErr');
-        if (err) err.textContent = '';
-        const scope = document.getElementById('anScope').value;
-        const picked = Array.from(document.querySelectorAll('.an-shop:checked')).map((c) => +c.value);
+        if (anSending) return; // 連打防止：直前の送信が完了するまで無視する
+        anSending = true;
+        const saveBtn = w.querySelector('[data-save]');
+        if (saveBtn) saveBtn.disabled = true;
         try {
           const r = await api('/admin/announcements', { method: 'POST', body: JSON.stringify({
             shop_ids: scope === 'select' ? picked : null,
@@ -1066,8 +1081,14 @@ async function renderAnnounceTab(body) {
           document.getElementById('anTitle').value = '';
           document.getElementById('anBody').value = '';
           loadHistory();
-        } catch (e) { close(); if (err) err.textContent = e.message; }
-      }, { saveLabel: '配信する' }));
+        } catch (e) {
+          close();
+          if (err) err.textContent = e.message;
+        } finally {
+          anSending = false;
+        }
+      }, { saveLabel: '配信する' });
+  });
 
   loadHistory();
 }

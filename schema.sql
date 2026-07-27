@@ -137,7 +137,12 @@ CREATE TABLE IF NOT EXISTS notifications (
   title      TEXT,
   body       TEXT,
   is_read    INTEGER DEFAULT 0,
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (datetime('now')),
+  -- 一斉通知（type='announcement'）のバッチ識別子。created_at は表示用に
+  -- バッチ内で1つの値へ揃えるため、同一秒に同一件名で2回配信すると
+  -- (created_at, title) だけでは配信履歴上で1件に潰れてしまう。
+  -- batch_id は配信ごとに secrets.token_hex() で発行し、この列で束ねる。
+  batch_id   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_notif_shop ON notifications(shop_id, is_read);
 CREATE INDEX IF NOT EXISTS idx_notif_staff ON notifications(staff_id, is_read);

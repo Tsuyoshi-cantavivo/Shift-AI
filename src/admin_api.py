@@ -21,6 +21,7 @@ from utils import (calc_next_period, jst_now, parse_settings, validate_password,
                     SETTINGS_KEYS)
 import json
 import re
+import secrets
 import migrator
 from datetime import datetime
 
@@ -1213,11 +1214,17 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
             raise ValueError("配信対象が不正です")
 
         shop_ids = body.get("shop_ids")
-        if shop_ids:
+        if shop_ids is not None:
             # shop_ids は IN (...) の展開に使うため、値を束縛する前に
             # 中身が整数であることを検証する（文字列や配列混入を防ぐ）。
-            if not isinstance(shop_ids, list) or not all(
-                    isinstance(x, int) and not isinstance(x, bool) for x in shop_ids):
+            if not isinstance(shop_ids, list):
+                raise ValueError("shop_ids は整数の配列で指定してください")
+            if not shop_ids:
+                # None（未指定＝全店舗）と [] を区別する。「店舗を選ぶ」で1件も
+                # 選ばずに送信した誤操作を、全店舗配信にフォールバックさせない
+                # ための明示的なガード（レビュー指摘: 空配列が全店舗配信になる事故）。
+                raise ValueError("配信先の店舗を選択してください")
+            if not all(isinstance(x, int) and not isinstance(x, bool) for x in shop_ids):
                 raise ValueError("shop_ids は整数の配列で指定してください")
             shops = query_all(
                 "SELECT id FROM shops WHERE COALESCE(is_archived,0)=0 AND is_active=1 "
@@ -1227,9 +1234,15 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
         if not shops:
             raise ValueError("配信先の店舗がありません")
 
-        # created_at はバッチで1つの値に揃える。配信履歴を (created_at, title) で
-        # グルーピングするため、datetime('now') 任せにすると行ごとにずれる。
+        # created_at はバッチで1つの値に揃える。配信履歴の表示に使うため、
+        # datetime('now') 任せにすると行ごとにずれる。
         stamp = jst_now().strftime("%Y-%m-%d %H:%M:%S")
+        # batch_id は配信履歴のグルーピング専用キー。created_at は秒精度で
+        # バッチ内は1つの値に揃えているため、同一秒に同一件名で2回配信すると
+        # (created_at, title) だけでは1件に統合されてしまう
+        # （レビュー指摘: 連打・連続配信での履歴統合）。ランダムトークンで
+        # 確実に別バッチとして区別する。
+        batch_id = secrets.token_hex(8)
         rows = [(s["id"], None) for s in shops]
         recipients = 0
         if audience == "all":
@@ -1245,11 +1258,12 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
 
         # D1 は REST API の1往復＝1クエリのため、1件ずつ挿すと配信が実用速度にならない。
         # 1文のまとめ INSERT にする。
-        placeholders = ",".join(["(?,?,?,?,?,0,?)"] * len(rows))
+        placeholders = ",".join(["(?,?,?,?,?,0,?,?)"] * len(rows))
         binds = []
         for shop_id, staff_id in rows:
-            binds += [shop_id, staff_id, "announcement", title, text, stamp]
-        execute("INSERT INTO notifications (shop_id, staff_id, type, title, body, is_read, created_at) "
+            binds += [shop_id, staff_id, "announcement", title, text, stamp, batch_id]
+        execute("INSERT INTO notifications "
+                "(shop_id, staff_id, type, title, body, is_read, created_at, batch_id) "
                 "VALUES " + placeholders, tuple(binds))
 
         audit("admin.announce", target_type="announcement", detail=
@@ -1261,15 +1275,17 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
     def admin_notifs():
         """一斉通知の配信履歴。
 
-        notifications にバッチIDが無いため (created_at, title) で束ねる。
-        この2列で一意になるのは、配信時に created_at をバッチで揃えているため。
+        batch_id で束ねる（Task 14 の一斉通知は必ず batch_id を発行する）。
+        created_at はバッチ内で1つの値に揃えているため MIN() で代表値を取れば足りる
+        が、同一秒・同一件名の別バッチが1件に潰れないよう GROUP BY は batch_id で行う。
         """
         require_auth(["admin"])
         rows = query_all(
-            "SELECT created_at, title, COUNT(DISTINCT shop_id) AS shops, "
+            "SELECT MIN(created_at) AS created_at, MIN(title) AS title, "
+            "COUNT(DISTINCT shop_id) AS shops, "
             "SUM(CASE WHEN staff_id IS NOT NULL THEN 1 ELSE 0 END) AS recipients "
             "FROM notifications WHERE type='announcement' "
-            "GROUP BY created_at, title ORDER BY created_at DESC LIMIT 100")
+            "GROUP BY batch_id ORDER BY MAX(id) DESC LIMIT 100")
         return jsonify({"announcements": rows})
 
 

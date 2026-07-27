@@ -500,6 +500,18 @@ async function refreshNotifBadge() {
   // 代理閲覧中は 'admin' ではなく 'shop' の通知APIを見る（管理者向けは常に空の
   // スタブを返すため、代理中のままだと店舗の実際の未読件数が拾えない）。
   const role = effectiveRole();
+  // 管理者自身（代理閲覧していない状態）の通知ベルには「未読」という概念が
+  // 無い。GET /api/admin/notifications は Task 14 で一斉通知の配信履歴
+  // {announcements:[...]} を返す実装に変わり、unread を持たなくなったため、
+  // d.unread を参照すると常に undefined になる（バッジが出ないだけで実害は
+  // 無いが、意図を明示するため早期リターンする）。
+  if (role === 'admin') {
+    document.getElementById('notifBtn')?.classList.remove('d-none');
+    document.getElementById('notifBadge')?.classList.add('d-none');
+    const adminSideBadge = document.getElementById('sideNotifBadge');
+    if (adminSideBadge) adminSideBadge.style.display = 'none';
+    return;
+  }
   try {
     const d = await api(`/${role}/notifications`);
     const badge = document.getElementById('notifBadge');
@@ -529,6 +541,27 @@ async function refreshNotifBadge() {
 }
 function openNotifications() {
   const role = effectiveRole();
+  // 管理者自身（代理閲覧していない状態）のベルは「配信履歴」を出す。
+  // GET /api/admin/notifications は {announcements:[...]}（一斉通知の履歴）を
+  // 返し、店舗/スタッフ向けの {notifications:[...], unread} とは形が違うため、
+  // d.notifications.length に触れると必ず例外になる。ここで個別に分岐して回避する。
+  // 既読/未読の概念が無いため「すべて既読にする」ボタンは出さない（配信した
+  // 側の履歴を眺めるだけの画面という位置づけ）。
+  if (role === 'admin') {
+    api('/admin/notifications').then((d) => {
+      const items = d.announcements || [];
+      const listHtml = items.length ? items.map((a) => `
+        <div class="notif-item">
+          <div class="nt-title">${esc(a.title || '')}</div>
+          <div class="nt-body">配信先 ${a.shops} 店舗 / 個人宛 ${a.recipients || 0} 名</div>
+          <div class="nt-time">${esc((a.created_at || '').replace('T', ' '))}</div>
+        </div>`).join('') : '<div class="text-muted small">配信履歴はありません</div>';
+      openModal('<i class="bi bi-bell"></i> 通知', listHtml, null);
+    }).catch(() => {
+      openModal('<i class="bi bi-bell"></i> 通知', '<div class="text-muted small">通知はありません</div>', null);
+    });
+    return;
+  }
   api(`/${role}/notifications`).then((d) => {
     const renderList = (notifs) => notifs.length ? notifs.map((n) => `
       <div class="notif-item ${n.is_read ? '' : 'unread'}">

@@ -73,6 +73,33 @@ class TestAnnounce:
                         json={"shop_ids": None, "audience": "managers", "title": "", "body": "本文"})
         assert r.status_code == 400
 
+    def test_empty_shop_ids_list_is_rejected(self, client):
+        """shop_ids:[] は「店舗を選ぶ」で1件も選ばなかった誤操作の可能性が高い。
+
+        None（未指定）は全店舗配信の意味だが、[] を同じ falsy 扱いにして
+        全店舗配信へフォールバックさせると、誤操作で全社配信になり得るため
+        400 で明確に拒否する（レビュー指摘）。
+        """
+        t = _admin_token(client)
+        _two_shops()
+        r = client.post("/api/admin/announcements", headers=_hdr(t),
+                        json={"shop_ids": [], "audience": "managers",
+                              "title": "空配列テスト", "body": "本文"})
+        assert r.status_code == 400
+        assert dbmod.query_all(
+            "SELECT id FROM notifications WHERE type='announcement'") == []
+
+    def test_shop_ids_null_still_targets_all_shops(self, client):
+        """shop_ids:[] を400にする変更が、shop_ids:null（全店舗)の挙動を
+        壊していないことの回帰確認。"""
+        t = _admin_token(client)
+        _two_shops()
+        r = client.post("/api/admin/announcements", headers=_hdr(t),
+                        json={"shop_ids": None, "audience": "managers",
+                              "title": "全店舗テスト", "body": "本文"})
+        assert r.status_code == 200
+        assert r.get_json()["shops"] == 2
+
     def test_same_created_at_within_batch(self, client):
         """配信履歴のグルーピングのため、同一バッチは created_at が揃うこと。"""
         t = _admin_token(client)
@@ -103,6 +130,25 @@ class TestHistory:
         assert len(items) == 1
         assert items[0]["title"] == "1回目"
         assert items[0]["shops"] == 2
+
+    def test_repeated_same_title_batches_are_not_merged(self, client):
+        """同一件名を連続配信しても、独立した2回の配信が履歴で2行になること。
+
+        created_at は秒精度でバッチ内は1つの値に揃えているため、同一秒に
+        同一件名で2回配信すると (created_at, title) だけでは1件に統合されて
+        しまう（レビュー指摘）。batch_id で区別されることを確認する。
+        """
+        t = _admin_token(client)
+        _two_shops()
+        for _ in range(2):
+            r = client.post("/api/admin/announcements", headers=_hdr(t),
+                            json={"shop_ids": None, "audience": "managers",
+                                  "title": "衝突テスト", "body": "本文"})
+            assert r.status_code == 200
+        r = client.get("/api/admin/notifications", headers=_hdr(t))
+        items = r.get_json()["announcements"]
+        assert len(items) == 2
+        assert all(i["title"] == "衝突テスト" for i in items)
 
     def test_history_requires_admin(self, client):
         sid = insert_shop("SHOP1", "pw12345678")
