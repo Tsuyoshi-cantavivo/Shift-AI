@@ -326,10 +326,20 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
     _STAFF_LINKED_TABLES = {"notifications", "change_requests", "wish_history", "shifts"}
     _STAFF_SUBQUERY = "staff_id IN (SELECT id FROM staffs WHERE shop_id=?)"
 
+    # shift_pattern_weekday_required も同じ構図。shop_id は NOT NULL で、挿入経路
+    # （src/app.py のパターン曜日別必要人数の保存）は必ずパターンの所有店舗を検証してから
+    # 同じ shop_id を入れるので到達経路は無いが、pattern_id だけが対象店を指す行が
+    # あると DELETE FROM shift_patterns が FK 違反で詰まる。他の4テーブルと形を
+    # 揃えておかないと、読む人が「なぜここだけ違うのか」を毎回確認することになる。
+    _PATTERN_LINKED_TABLES = {"shift_pattern_weekday_required"}
+    _PATTERN_SUBQUERY = "pattern_id IN (SELECT id FROM shift_patterns WHERE shop_id=?)"
+
     def _scope_clause(table):
         """テーブルの行を店舗に結びつける WHERE 句と、必要な ? の数を返す。"""
         if table in _STAFF_LINKED_TABLES:
             return f"(shop_id=? OR {_STAFF_SUBQUERY})", 2
+        if table in _PATTERN_LINKED_TABLES:
+            return f"(shop_id=? OR {_PATTERN_SUBQUERY})", 2
         return "shop_id=?", 1
 
     def _collect_shop_data(sid):
@@ -396,13 +406,18 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         # 「誰がいつどの店舗を消し始めたか」がどこにも残らない。
         # audit_logs は消さない。運営の記録であり、店舗が消えた事実こそ残す必要がある。
         # 店舗行が消えると shop_id から店舗コードを引けなくなるため、detail に残す。
+        # 書く前の最大 id を控える。「今回のリクエストで書けた行」だけを根拠にするため。
+        # action と target_id だけで引くと、DELETE が落ちた前回の試行が残した行を
+        # 自分の記録と誤認する。すると監査が壊れたままの再実行で店舗が完全に消え、
+        # 記録上は「開始したが未完了」なのに実データだけ消えた状態になる。
+        high_water = (query_one("SELECT MAX(id) AS m FROM audit_logs") or {}).get("m") or 0
         audit("shop.delete", target_type="shop", target_id=sid, shop_id=sid,
               detail=f"shop_code={code} の完全削除を開始")
         # audit() は失敗しても業務を止めない設計（src/app.py）なので、握り潰された
         # 場合に備えて書けたことを確認する。記録が残せないなら削除しない
         # ＝「記録の無い破壊」を作らない。
         if query_one("SELECT id FROM audit_logs WHERE action='shop.delete' AND target_id=? "
-                     "ORDER BY id DESC LIMIT 1", (sid,)) is None:
+                     "AND id>? ORDER BY id DESC LIMIT 1", (sid, high_water)) is None:
             abort(500, description="監査ログを記録できなかったため削除を中止しました")
 
         # NOTE: 上記のとおりトランザクションが張れず、本番の D1 は1文ごとに

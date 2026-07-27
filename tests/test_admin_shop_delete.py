@@ -66,6 +66,24 @@ def _staff_id(sid, code="p1"):
                            (sid, code))["id"]
 
 
+def _insert_orphan_rows(staff_id):
+    """shop_id から辿れないが staffs を参照する行を、staff_id 側の4テーブルに作る。
+
+    削除でもエクスポートでも「消える集合＝控えの集合」を検証するのに使う。
+    """
+    dbmod.execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, reason) "
+                  "VALUES (NULL,?,?,?,?)",
+                  (staff_id, "2026-09-01T10:00:00", "2026-09-01T18:00:00", "孤児シフト"))
+    dbmod.execute("INSERT INTO change_requests (shop_id, staff_id, request_type, reason) "
+                  "VALUES (NULL,?,?,?)", (staff_id, "cancel", "孤児申請"))
+    # wish_history.shop_id は NOT NULL なので「別店舗の id が入った不整合行」で再現
+    dbmod.execute("INSERT INTO wish_history (shop_id, staff_id, start_datetime, end_datetime, note) "
+                  "VALUES (?,?,?,?,?)",
+                  (99999, staff_id, "2026-09-02T10:00:00", "2026-09-02T18:00:00", "孤児希望"))
+    dbmod.execute("INSERT INTO notifications (shop_id, staff_id, type, title) "
+                  "VALUES (NULL,?,?,?)", (staff_id, "info", "孤児通知"))
+
+
 class TestExport:
     def test_export_contains_shop_data(self, client):
         t = _admin_token(client)
@@ -94,6 +112,28 @@ class TestExport:
     def test_unknown_shop_returns_404(self, client):
         t = _admin_token(client)
         assert client.get("/api/admin/shops/99999/export", headers=_hdr(t)).status_code == 404
+
+    def test_export_includes_orphan_rows(self, client):
+        """削除で消える孤児行が控えにも入ること。
+
+        エクスポートは完全削除の直前に取る控えなので、集合が削除対象と一致して
+        いないと「消えたのに控えに無い」行が生まれる。エクスポート側だけ shop_id で
+        絞ると、まさにその状態になる。
+        """
+        t = _admin_token(client)
+        sid = _shop_with_data()
+        _insert_orphan_rows(_staff_id(sid))
+        r = client.get(f"/api/admin/shops/{sid}/export", headers=_hdr(t))
+        assert r.status_code == 200
+        data = json.loads(r.get_data(as_text=True))
+        # 各テーブル 正常1件 + 孤児1件
+        for table in ("shifts", "change_requests", "wish_history", "notifications"):
+            assert len(data[table]) == 2, f"{table} の控えが不足している: {data[table]}"
+        assert any(x.get("reason") == "孤児シフト" for x in data["shifts"]), \
+            "削除で消える孤児シフトが控えに入っていない"
+        assert any(x.get("reason") == "孤児申請" for x in data["change_requests"])
+        assert any(x.get("note") == "孤児希望" for x in data["wish_history"])
+        assert any(x.get("title") == "孤児通知" for x in data["notifications"])
 
     def test_export_filename_is_sanitized(self, client):
         """shop_code は運営の自由入力なので filename に生で入れないこと。
@@ -253,17 +293,7 @@ class TestDelete:
         t = _admin_token(client)
         sid = _shop_with_data()
         staff = _staff_id(sid)
-        dbmod.execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime) "
-                      "VALUES (NULL,?,?,?)",
-                      (staff, "2026-09-01T10:00:00", "2026-09-01T18:00:00"))
-        dbmod.execute("INSERT INTO change_requests (shop_id, staff_id, request_type) "
-                      "VALUES (NULL,?,?)", (staff, "cancel"))
-        # wish_history.shop_id は NOT NULL なので「別店舗の id が入った不整合行」で再現
-        dbmod.execute("INSERT INTO wish_history (shop_id, staff_id, start_datetime, end_datetime) "
-                      "VALUES (?,?,?,?)",
-                      (99999, staff, "2026-09-02T10:00:00", "2026-09-02T18:00:00"))
-        dbmod.execute("INSERT INTO notifications (shop_id, staff_id, type, title) "
-                      "VALUES (NULL,?,?,?)", (staff, "info", "孤児通知"))
+        _insert_orphan_rows(staff)
 
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
         r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
@@ -332,6 +362,49 @@ class TestDeleteAudit:
         assert dbmod.query_one("SELECT id FROM shops WHERE id=?", (sid,)) is not None
         assert dbmod.query_one("SELECT id FROM staffs WHERE shop_id=?", (sid,)) is not None
         assert dbmod.query_one("SELECT id FROM shifts WHERE shop_id=?", (sid,)) is not None
+
+    def test_retry_without_working_audit_does_not_delete(self, client, monkeypatch):
+        """前回の試行が残した記録を自分のものと誤認しないこと。
+
+        存在確認を action / target_id だけで引くと、DELETE が落ちた1回目が残した
+        shop.delete 行を2回目が自分の記録とみなしてしまう。その結果、監査が
+        壊れたままの再実行で店舗が完全に消え、記録上は「開始したが未完了」なのに
+        実データだけが全て消えた状態（記録の無い破壊）になる。
+        """
+        import admin_api
+        import app as appmod
+
+        t = _admin_token(client)
+        sid = _shop_with_data()
+        client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+
+        # 1回目: 監査は書けるが DELETE が落ちる
+        real = admin_api.execute
+
+        def boom_delete(sql, params=()):
+            if sql.strip().upper().startswith("DELETE"):
+                raise RuntimeError("D1 down")
+            return real(sql, params)
+
+        monkeypatch.setattr(admin_api, "execute", boom_delete)
+        assert client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
+                             json={"confirm_code": "SHOP1"}).status_code == 500
+        monkeypatch.setattr(admin_api, "execute", real)
+        assert dbmod.query_one("SELECT id FROM audit_logs WHERE action='shop.delete' "
+                               "AND target_id=?", (sid,)) is not None, "1回目の開始記録が無い"
+
+        # 2回目: DELETE は通るが監査が書けない
+        def boom_audit(table, row):
+            raise RuntimeError("audit down")
+
+        monkeypatch.setattr(appmod, "insert_row", boom_audit)
+        r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
+                          json={"confirm_code": "SHOP1"})
+        assert r.status_code == 500
+        assert dbmod.query_one("SELECT id FROM shops WHERE id=?", (sid,)) is not None, \
+            "前回の監査記録を自分のものと誤認して店舗が消えた"
+        assert dbmod.query_one("SELECT id FROM staffs WHERE shop_id=?", (sid,)) is not None
+        assert dbmod.query_one("SELECT id FROM audit_logs WHERE action='shop.delete_done'") is None
 
 
 class TestAuthorization:
