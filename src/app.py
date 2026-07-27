@@ -283,6 +283,11 @@ def require_auth(allowed):
         user = query_one("SELECT * FROM shops WHERE id=?", (session.get("shop_id"),))
         if user is None:
             abort(401, description="セッションの店舗が見つかりません")
+        # アーカイブは「セッション全削除」を主防御にしているが、それだけに頼らない
+        # 多層防御として、行が残っていてもここで確実に落とす。NULL/0 はアーカイブ
+        # 済みではない（ALTER TABLE ADD COLUMN 以前の行が NULL になり得るため）。
+        if user.get("is_archived"):
+            abort(401, description="この店舗はアーカイブ済みです")
     else:
         user = query_one("SELECT * FROM staffs WHERE id=?", (session["user_id"],))
         if user is None:

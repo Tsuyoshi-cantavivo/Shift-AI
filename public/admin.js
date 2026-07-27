@@ -207,6 +207,8 @@ const AUDIT_ACTION_LABELS = {
   'staff.create': 'スタッフ作成',
   'shop.create': '店舗作成',
   'shop.update': '店舗更新',
+  'shop.archive': '店舗アーカイブ',
+  'shop.unarchive': '店舗復元',
   'auth.login': 'ログイン',
   'auth.login_failed': 'ログイン失敗',
   'auth.login_blocked': 'ログインブロック',

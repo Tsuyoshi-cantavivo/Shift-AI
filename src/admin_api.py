@@ -306,6 +306,11 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         if shop is None:
             abort(404, description="店舗が見つかりません")
         body = request.get_json(silent=True) or {}
+        # JSON配列・文字列・数値等が送られると body.keys() が AttributeError で
+        # 500（生のPython例外文字列漏洩）になっていた。admin_update_shop と同じく
+        # 型不正は 400 として扱う（"key" in body 方式ではなく明示チェックにする）。
+        if not isinstance(body, dict):
+            raise ValueError("settings は JSON オブジェクトで指定してください")
         unknown = set(body.keys()) - _SETTINGS_KEYS
         if unknown:
             raise ValueError(f"未知の設定キーです: {', '.join(sorted(unknown))}")
