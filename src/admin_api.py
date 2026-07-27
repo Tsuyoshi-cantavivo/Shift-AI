@@ -11,7 +11,7 @@ db_module_get_conn / _restore_staffs_table_internal は admin_db_migrate /
 admin_db_restore_staffs 専用の内部ヘルパで、app.py 側の状態には依存しないため
 モジュールレベル関数としてここに置く（register_admin_routes の外）。
 """
-from flask import request, jsonify, abort, g
+from flask import request, jsonify, abort, g, Response
 
 from db import query_all, query_one, execute, insert_row
 from auth import hash_password, verify_password, strip_password
@@ -297,6 +297,97 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         audit("shop.unarchive", target_type="shop", target_id=sid, shop_id=sid,
               detail=f"shop_code={shop['shop_code']}")
         return jsonify({"ok": True})
+
+
+    # ---- 店舗のエクスポートと完全削除 ----
+    # 店舗に紐づくテーブル。削除は FK の依存順（子→親）に実行する。
+    # 依存関係（schema.sql の FOREIGN KEY 定義）:
+    #   shift_pattern_weekday_required → shift_patterns
+    #   change_requests / wish_history / shifts / fixed_shifts → staffs
+    #   staffs / shift_patterns / shift_request_periods / shop_holidays → shops
+    # sessions / notifications は FK を持たないが、店舗の痕跡なので同時に消す。
+    # fixed_shifts は shop_id を持たず staff_id 経由でしか辿れないため別扱い。
+    # audit_logs はここに含めない（下の delete のコメント参照）。
+    _SHOP_SCOPED_TABLES = [
+        "sessions", "notifications", "change_requests", "wish_history", "shifts",
+        "shift_pattern_weekday_required", "shift_patterns", "shift_request_periods",
+        "shop_holidays",
+    ]
+
+    def _collect_shop_data(sid):
+        """店舗に属する全行を dict で集める。password_hash は含めない。"""
+        shop = query_one("SELECT * FROM shops WHERE id=?", (sid,))
+        if shop is None:
+            abort(404, description="店舗が見つかりません")
+        data = {"shop": strip_password(shop), "exported_at": jst_now().strftime("%Y-%m-%d %H:%M:%S")}
+        data["staffs"] = [strip_password(r) for r in
+                          query_all("SELECT * FROM staffs WHERE shop_id=?", (sid,))]
+        for table in _SHOP_SCOPED_TABLES:
+            if table == "sessions":
+                continue  # セッションは機微情報で復元価値も無い
+            data[table] = query_all(f"SELECT * FROM {table} WHERE shop_id=?", (sid,))
+        data["fixed_shifts"] = query_all(
+            "SELECT fs.* FROM fixed_shifts fs JOIN staffs s ON fs.staff_id=s.id WHERE s.shop_id=?",
+            (sid,))
+        return data
+
+    @app.get("/api/admin/shops/<int:sid>/export")
+    def admin_shop_export(sid):
+        require_auth(["admin"])
+        data = _collect_shop_data(sid)
+        code = data["shop"].get("shop_code") or str(sid)
+        audit("shop.export", target_type="shop", target_id=sid, shop_id=sid,
+              detail=f"shop_code={code}")
+        body = json.dumps(data, ensure_ascii=False, indent=2)
+        filename = f"shop-{code}-{jst_now().strftime('%Y%m%d')}.json"
+        resp = Response(body, content_type="application/json; charset=utf-8")
+        resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return resp
+
+    @app.delete("/api/admin/shops/<int:sid>")
+    def admin_shop_delete(sid):
+        require_auth(["admin"])
+        shop = query_one("SELECT id, shop_code, is_archived FROM shops WHERE id=?", (sid,))
+        if shop is None:
+            abort(404, description="店舗が見つかりません")
+        # アーカイブ済みを必須にするのは、削除の直前に「もう使っていない」という
+        # 判断が1回入るようにするため（1操作で顧客データが消えるのを防ぐ二段構え）。
+        if not shop.get("is_archived"):
+            raise ValueError("先にアーカイブしてください（誤削除を防ぐため）")
+        body = request.get_json(silent=True) or {}
+        # 店舗コードの手入力一致を求めるのは、隣の行を押し間違えても消えないようにするため。
+        if (body.get("confirm_code") or "").strip() != shop["shop_code"]:
+            raise ValueError("店舗コードが一致しません")
+
+        # NOTE: execute() は毎回 commit するためトランザクションを張れない
+        # （src/db.py の execute）。本番の D1 は1文ごとにネットワーク往復するので
+        # 途中で失敗し得る。どこまで消したかを返して再実行できるようにする。
+        # 既に消えたテーブルへの DELETE は0件で成功するため再実行は冪等。
+        #
+        # 全ての DELETE を shop_id（fixed_shifts は staff_id 経由）で絞る。
+        # 1つでも条件が外れると無関係の顧客のデータが道連れで消える。
+        deleted = []
+        # fixed_shifts は shop_id を持たないので staff_id 経由で先に消す
+        execute("DELETE FROM fixed_shifts WHERE staff_id IN (SELECT id FROM staffs WHERE shop_id=?)",
+                (sid,))
+        deleted.append("fixed_shifts")
+        for table in _SHOP_SCOPED_TABLES:
+            execute(f"DELETE FROM {table} WHERE shop_id=?", (sid,))
+            deleted.append(table)
+        execute("DELETE FROM staffs WHERE shop_id=?", (sid,))
+        deleted.append("staffs")
+        # 物理削除であること（論理削除にしないこと）が重要。require_auth の代理閲覧経路は
+        # 「SELECT * FROM shops WHERE id=? が行を引けない」ことを条件に 409 を返して
+        # 運営者を脱出させている。論理削除にするとその防御が効かず、削除済みの店舗を
+        # 代理閲覧し続けられてしまう。
+        execute("DELETE FROM shops WHERE id=?", (sid,))
+        deleted.append("shops")
+
+        # audit_logs は消さない。運営の記録であり、店舗が消えた事実こそ残す必要がある。
+        # 店舗行が消えると shop_id から店舗コードを引けなくなるため、detail に残す。
+        audit("shop.delete", target_type="shop", target_id=sid, shop_id=sid,
+              detail=f"shop_code={shop['shop_code']} を完全削除")
+        return jsonify({"ok": True, "deleted": deleted})
 
 
     @app.put("/api/admin/shops/<int:sid>/settings")
