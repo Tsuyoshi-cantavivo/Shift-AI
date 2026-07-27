@@ -14,6 +14,9 @@ CSS_PATH = Path(__file__).resolve().parents[1] / "public" / "style.css"
 # app.js もインラインスタイルでトークンを参照する。CSS しか見ないと
 # `style="color:var(--indigo-l)"` のような削除済みトークンの参照を取り逃がす。
 JS_PATH = Path(__file__).resolve().parents[1] / "public" / "app.js"
+# 管理画面は admin.js に切り出してある。ここに入れないと廃止トークンの
+# 再導入検査（TestOldTokensRemoved）が管理画面をすり抜ける。
+ADMIN_JS_PATH = Path(__file__).resolve().parents[1] / "public" / "admin.js"
 
 # --- 設計書 4章・5章の確定値 ---
 LIGHT_EXPECTED = {
@@ -59,7 +62,7 @@ def _read_css():
 
 
 def _read_js():
-    return JS_PATH.read_text(encoding="utf-8")
+    return JS_PATH.read_text(encoding="utf-8") + "\n" + ADMIN_JS_PATH.read_text(encoding="utf-8")
 
 
 def _tokens_in_scope(selector):
@@ -162,11 +165,11 @@ class TestOldTokensRemoved:
         黙って落ちるだけなので、実行しても気づけない。ここで機械的に止める。
         """
         assert f"var(--{token})" not in _read_js(), \
-            f"var(--{token}) の参照が public/app.js に残っている"
+            f"var(--{token}) の参照が public/app.js または admin.js に残っている"
 
     def test_no_hardcoded_indigo(self):
         """インディゴ系の生の16進数が残っていないこと。"""
-        for path, text in (("style.css", _read_css()), ("app.js", _read_js())):
+        for path, text in (("style.css", _read_css()), ("app.js または admin.js", _read_js())):
             up = text.upper()
             for dead in ["#6366F1", "#818CF8", "#4F46E5", "#10B981", "#0F172A", "#1F2937"]:
                 assert dead not in up, f"{dead} が {path} に残っている"

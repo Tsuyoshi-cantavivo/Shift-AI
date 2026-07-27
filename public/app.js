@@ -91,6 +91,9 @@ function logoutLocal() {
   appState.businessHours = null;
   appState.patterns = null;
   wishState = {};
+  // 代理閲覧の状態も前セッションのものなので消す（残すと次ログインで誤表示になる）
+  window._impersonating = null;
+  renderImpersonationBar();
   document.getElementById('loginView')?.classList.remove('d-none');
   document.getElementById('appView')?.classList.add('d-none');
 }
@@ -310,17 +313,20 @@ function showApp() {
   renderNav();
   // 自分の権限情報を正確に取得（非同期・画面遷移は待たない）
   refreshMyStaffInfo();
-  // 店舗の場合は期間・営業時間を事前取得してから画面へ
-  if (currentRole === 'shop') {
+  // 店舗の場合（代理閲覧中も含む）は期間・営業時間を事前取得してから画面へ
+  if (effectiveRole() === 'shop') {
     Promise.all([ensurePeriod(), ensureBusinessHours()]).then(() => navigateTo(defaultScreen()));
   } else {
     navigateTo(defaultScreen());
   }
 }
 function defaultScreen() {
-  if (currentRole === 'shop') return 'dashboard';
-  if (currentRole === 'staff') return 'staffDashboard';
-  if (currentRole === 'admin') return 'adminHome';
+  // 代理閲覧中は currentRole が admin のままでも店舗のダッシュボードを開く
+  // （リロード直後にナビだけ店舗用でホームが管理者画面のままになるのを防ぐ）
+  const role = effectiveRole();
+  if (role === 'shop') return 'dashboard';
+  if (role === 'staff') return 'staffDashboard';
+  if (role === 'admin') return 'adminHome';
   return 'dashboard';
 }
 
@@ -390,10 +396,92 @@ document.getElementById('sideOverlay')?.addEventListener('click', () => {
   document.getElementById('sideOverlay')?.classList.add('d-none');
 });
 
+/* ============================================================
+   代理閲覧（管理者が店舗画面を閲覧のみで開く）
+   状態は /api/me の impersonating をそのまま window._impersonating に保持する。
+   リロードしても /api/me から復元されるため、ページ内変数だけで完結する。
+   ============================================================ */
+window._impersonating = null;
+
+/* 代理閲覧中は currentRole が 'admin' のままでも実際には店舗として振る舞う
+   （Task 6 の設計：/api/admin/* と /api/me を管理者のまま動かすため）。
+   ナビ・デフォルト画面・通知・営業時間取得など「今どの役割として動くか」を
+   判定する箇所は currentRole を直接見ず、必ずこちらを使うこと。
+   【背景】レビューで、この判定漏れにより営業時間9-22時のダミー値が代理閲覧中の
+   ダッシュボードに表示される・通知バッジが常に管理者の空スタブを見てしまう、
+   という実害が具体的に確認された。 */
+function effectiveRole() {
+  return window._impersonating ? 'shop' : currentRole;
+}
+
+// バーの実高を監視する ResizeObserver。renderImpersonationBar() を呼ぶたびに
+// 必ず破棄してから作り直す（多重登録・古いバーへのゾンビ更新を防ぐため）。
+let _impBarObserver = null;
+
+function renderImpersonationBar() {
+  const existing = document.getElementById('impersonationBar');
+  if (existing) existing.remove();
+  if (_impBarObserver) { _impBarObserver.disconnect(); _impBarObserver = null; }
+  // 高さオフセットも一旦リセット（非表示時は --header-h と同値に戻す）
+  document.documentElement.classList.remove('has-impersonation-bar');
+  document.documentElement.style.removeProperty('--imp-bar-h');
+  const info = window._impersonating;
+  if (!info) return;
+  const header = document.querySelector('.app-header');
+  if (!header) return;
+  const bar = document.createElement('div');
+  bar.id = 'impersonationBar';
+  bar.className = 'impersonation-bar';
+  bar.innerHTML = `<span><i class="bi bi-eye"></i> ${esc(info.shop_name)} を代理閲覧中（閲覧のみ・変更はできません）</span>` +
+    `<button class="btn btn-sm btn-light" id="stopImpersonateBtn">管理者に戻る</button>`;
+  header.insertAdjacentElement('afterend', bar);
+  document.getElementById('stopImpersonateBtn')?.addEventListener('click', stopImpersonation);
+  document.documentElement.classList.add('has-impersonation-bar');
+  // side-nav / side-overlay がこのバーと重ならないよう、実測した高さで --imp-bar-h を
+  // 上書きする。offsetHeight の一回読みだけだと、
+  //   ・呼び出し時点で祖先の #appView に d-none が付いていて未レイアウト（0を測ってしまう）
+  //   ・ウィンドウ幅が変わってテキストが折り返し、バーの実高が変わる
+  // の2ケースで値がずれたまま固定される（レビューで実機確認済み）。ResizeObserver で
+  // バー自身の box を監視し、#appView が可視化された瞬間・折り返しで高さが変わった
+  // 瞬間の両方で測り直す。
+  const applyHeight = () => {
+    // 別の renderImpersonationBar() 呼び出しで既にこのバーが破棄されている場合、
+    // 遅延実行（rAF）の間に古い bar を測って新しいバーの高さを上書きしてしまう
+    // （ゾンビ更新）ことがあるため、DOM に残っているかを確認してから書き込む。
+    if (!bar.isConnected) return;
+    document.documentElement.style.setProperty('--imp-bar-h', bar.offsetHeight + 'px');
+  };
+  applyHeight();
+  if (typeof ResizeObserver !== 'undefined') {
+    // ResizeObserver のコールバック内で同期的にレイアウトへ影響する書き込みを行うと、
+    // ブラウザが「ResizeObserver loop completed with undelivered notifications」という
+    // 無害だが煩わしい警告を error イベントとして発生させることがある
+    // （本アプリはグローバルエラーハンドラで window の error を全てトースト表示するため、
+    // このままだと代理閲覧の開始/終了を素早く繰り返しただけでエラートーストが出てしまう）。
+    // 次フレームまで書き込みを遅延させるのが定石の回避策。
+    _impBarObserver = new ResizeObserver(() => requestAnimationFrame(applyHeight));
+    _impBarObserver.observe(bar);
+  }
+}
+
+async function stopImpersonation() {
+  try {
+    await api('/admin/impersonate', { method: 'DELETE' });
+    window._impersonating = null;
+    renderImpersonationBar();
+    renderNav();
+    navigateTo('adminShops');
+    toast('管理者に戻りました', 'success');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
 (async function bootstrap() {
   if (authToken) {
     try {
       const data = await api('/me'); currentUser = data.user; currentRole = data.role;
+      // リロードしても代理閲覧中であることが分かるよう、/api/me の結果から復元する
+      window._impersonating = data.impersonating || null;
+      renderImpersonationBar();
       // ★ 自動ログイン時も前セッションの状態をクリア
       window._miniChat = null;
       window._shopChat = null;
@@ -409,8 +497,23 @@ document.getElementById('sideOverlay')?.addEventListener('click', () => {
    ============================================================ */
 async function refreshNotifBadge() {
   if (!currentRole) return;
+  // 代理閲覧中は 'admin' ではなく 'shop' の通知APIを見る（管理者向けは常に空の
+  // スタブを返すため、代理中のままだと店舗の実際の未読件数が拾えない）。
+  const role = effectiveRole();
+  // 管理者自身（代理閲覧していない状態）の通知ベルには「未読」という概念が
+  // 無い。GET /api/admin/notifications は Task 14 で一斉通知の配信履歴
+  // {announcements:[...]} を返す実装に変わり、unread を持たなくなったため、
+  // d.unread を参照すると常に undefined になる（バッジが出ないだけで実害は
+  // 無いが、意図を明示するため早期リターンする）。
+  if (role === 'admin') {
+    document.getElementById('notifBtn')?.classList.remove('d-none');
+    document.getElementById('notifBadge')?.classList.add('d-none');
+    const adminSideBadge = document.getElementById('sideNotifBadge');
+    if (adminSideBadge) adminSideBadge.style.display = 'none';
+    return;
+  }
   try {
-    const d = await api(`/${currentRole}/notifications`);
+    const d = await api(`/${role}/notifications`);
     const badge = document.getElementById('notifBadge');
     const btn = document.getElementById('notifBtn');
     if (btn) btn.classList.remove('d-none');
@@ -423,7 +526,7 @@ async function refreshNotifBadge() {
       else { sideBadge.style.display = 'none'; }
     }
     // 希望休管理のバッジ
-    if (currentRole === 'shop') {
+    if (role === 'shop') {
       try {
         const shifts = await api(`/shop/shifts?start=${todayStr().slice(0,8)+'01'}&end=${plusMonths(2)}`);
         const reqCount = (shifts.shifts || []).filter((s) => s.status === 'requested').length;
@@ -437,7 +540,29 @@ async function refreshNotifBadge() {
   } catch {}
 }
 function openNotifications() {
-  api(`/${currentRole}/notifications`).then((d) => {
+  const role = effectiveRole();
+  // 管理者自身（代理閲覧していない状態）のベルは「配信履歴」を出す。
+  // GET /api/admin/notifications は {announcements:[...]}（一斉通知の履歴）を
+  // 返し、店舗/スタッフ向けの {notifications:[...], unread} とは形が違うため、
+  // d.notifications.length に触れると必ず例外になる。ここで個別に分岐して回避する。
+  // 既読/未読の概念が無いため「すべて既読にする」ボタンは出さない（配信した
+  // 側の履歴を眺めるだけの画面という位置づけ）。
+  if (role === 'admin') {
+    api('/admin/notifications').then((d) => {
+      const items = d.announcements || [];
+      const listHtml = items.length ? items.map((a) => `
+        <div class="notif-item">
+          <div class="nt-title">${esc(a.title || '')}</div>
+          <div class="nt-body">配信先 ${a.shops} 店舗 / 個人宛 ${a.recipients || 0} 名</div>
+          <div class="nt-time">${esc((a.created_at || '').replace('T', ' '))}</div>
+        </div>`).join('') : '<div class="text-muted small">配信履歴はありません</div>';
+      openModal('<i class="bi bi-bell"></i> 通知', listHtml, null);
+    }).catch(() => {
+      openModal('<i class="bi bi-bell"></i> 通知', '<div class="text-muted small">通知はありません</div>', null);
+    });
+    return;
+  }
+  api(`/${role}/notifications`).then((d) => {
     const renderList = (notifs) => notifs.length ? notifs.map((n) => `
       <div class="notif-item ${n.is_read ? '' : 'unread'}">
         <div class="nt-title">${esc(n.title)}</div>
@@ -447,7 +572,7 @@ function openNotifications() {
     const w = openModal('<i class="bi bi-bell"></i> 通知', renderList(d.notifications) + (d.notifications.length ? '<button class="btn btn-light w-full mt-3" id="readAllBtn">すべて既読にする</button>' : ''), null);
     if (d.notifications.length) {
       w.querySelector('#readAllBtn')?.addEventListener('click', async () => {
-        await api(`/${currentRole}/notifications/read-all`, { method: 'PUT' });
+        await api(`/${role}/notifications/read-all`, { method: 'PUT' });
         // モーダル内のリストを既読状態で再描画
         const updated = d.notifications.map((n) => ({ ...n, is_read: 1 }));
         w.querySelector('.modal-body').innerHTML = renderList(updated) + '<div class="small text-success mt-2"><i class="bi bi-check-circle"></i> すべて既読にしました</div>';
@@ -483,11 +608,13 @@ const NAV_DEFS = {
     { key: 'adminHome', icon: 'bi-house-door', label: 'ホーム', mobile: true },
     { key: 'adminShops', icon: 'bi-shop', label: '店舗', mobile: true },
     { key: 'adminAudit', icon: 'bi-clipboard-data', label: '監査ログ', mobile: true },
+    { key: 'adminSystem', icon: 'bi-gear', label: 'システム', mobile: true },
   ],
 };
 
 function renderNav() {
-  const defs = NAV_DEFS[currentRole] || [];
+  // 代理閲覧中は店舗のナビを出す。管理者に戻るのは警告バーのボタンから。
+  const defs = NAV_DEFS[effectiveRole()] || [];
   // Sidebar (PC)
   const side = document.getElementById('sideNav');
   side.innerHTML = `
@@ -516,7 +643,8 @@ function renderNav() {
 
 function setActiveNav() {
   document.querySelectorAll('.side-item, .bn-item').forEach((b) => b.classList.toggle('active', b.dataset.screen === currentScreen));
-  const defs = NAV_DEFS[currentRole] || [];
+  // renderNav() と同じ effectiveRole() を使う（代理閲覧中は店舗画面のキーで画面タイトルを引く）
+  const defs = NAV_DEFS[effectiveRole()] || [];
   const label = defs.find((i) => i.key === currentScreen)?.label || 'ShiftAI';
   const titleEl = document.getElementById('headerTitle');
   if (titleEl) {
@@ -630,7 +758,12 @@ async function ensureBusinessHours() {
   // パターン編集後にキャッシュが古くなり「9-19」等の古い表示に固定される
   // デグレを防ぐため。API は軽量なので毎回呼び出しでも実用上問題ない。
   const fallback = { start: 9, end: 22 };
-  if (currentRole !== 'shop' && currentRole !== 'staff') return fallback;
+  // currentRole ではなく effectiveRole() で判定する。代理閲覧中は currentRole が
+  // 'admin' のままのため、ここを currentRole のままにすると /shop/patterns を
+  // 一切呼ばずに 9-22時のダミー値を返してしまい、代理閲覧中のダッシュボード・
+  // シフトカレンダーのタイムライン軸が実際の営業時間からずれる（レビューで実機確認済み）。
+  const role = effectiveRole();
+  if (role !== 'shop' && role !== 'staff') return fallback;
   try {
     const d = await api('/shop/patterns');
     const pats = d.patterns || [];
@@ -831,7 +964,7 @@ function shiftDetailHtml(s, editable) {
   const statusBadge = s.status === 'confirmed' ? badge('確定', 'success') : s.status === 'requested' ? badge('調整待ち', 'warning') : badge('調整中', 'info');
   const edit = editable ? `<button class="btn btn-sm btn-light edit-shift"><i class="bi bi-pencil"></i></button>` : '';
   return `<div class="shift-line">
-    <div><span class="dot ${sc}"></span><span class="time">${hm(s.start_datetime)} - ${hm(s.end_datetime)}</span>${s.break_time_minutes ? `<span class="who">・休憩${s.break_time_minutes}分</span>` : ''} ${statusBadge}</div>
+    <div><span class="dot ${sc}"></span><span class="time">${hm(s.start_datetime)} - ${hm(s.end_datetime)}</span>${s.break_time_minutes ? `<span class="who">・休憩${esc(s.break_time_minutes)}分</span>` : ''} ${statusBadge}</div>
     <div class="flex items-center gap-2"><span class="who">${esc(s.staff_name || '')}</span>${edit}</div>
   </div>`;
 }
@@ -1266,7 +1399,9 @@ function openDayTimeline(date, allShifts, editable, onChange) {
       const overCap = !!s.over_cap_flag;
       const overCapCls = overCap ? ' tl-bar-overcap' : '';
       const overCapMark = overCap ? '<span class="tl-bar-overcap-mark" aria-hidden="true">⚠️</span>' : '';
-      const noteTitle = s.note ? `\nメモ: ${s.note}` : '';
+      // shifts.note はスタッフが希望提出時に自由入力できる。title 属性に生で
+      // 入れると " で属性を抜けられるため、必ず esc() を通す。
+      const noteTitle = s.note ? `\nメモ: ${esc(s.note)}` : '';
       const overCapTitle = overCap ? '\n⚠必要人数超過の時間帯を含みます' : '';
       const dragAttrs = editable && isDraft ? ' data-draft-editable="true"' : '';
       const handles = editable && isDraft ? '<span class="tl-drag-handle tl-drag-handle-start" aria-hidden="true"></span><span class="tl-drag-handle tl-drag-handle-end" aria-hidden="true"></span>' : '';
@@ -1519,8 +1654,8 @@ function showEditModal(s) {
     return wl;
   }
   const w = openModal(`<i class="bi bi-pencil-square"></i> シフト編集${s.staff_name ? ' — ' + esc(s.staff_name) : ''}`,
-    `${overCapBanner}<label class="form-label" for="mStart">開始</label><input type="datetime-local"  id="mStart" class="form-control mb-2" value="${toLocal(s.start_datetime)}">
-     <label class="form-label" for="mEnd">終了</label><input type="datetime-local"  id="mEnd" class="form-control mb-3" value="${toLocal(s.end_datetime)}">
+    `${overCapBanner}<label class="form-label" for="mStart">開始</label><input type="datetime-local"  id="mStart" class="form-control mb-2" value="${esc(toLocal(s.start_datetime))}">
+     <label class="form-label" for="mEnd">終了</label><input type="datetime-local"  id="mEnd" class="form-control mb-3" value="${esc(toLocal(s.end_datetime))}">
      <label class="form-label" for="mStatus">ステータス</label><select id="mStatus" class="form-select mb-3">
        <option value="confirmed" ${s.status === 'confirmed' ? 'selected' : ''}>確定</option>
        <option value="modifying" ${s.status === 'modifying' ? 'selected' : ''}>調整中</option>
@@ -1797,8 +1932,8 @@ function renderGenerateTab(body, p) {
   body.innerHTML =
     card(sectionTitle('bi-calendar-range', '作成期間') +
       `<div class="row">
-        <div class="col-6"><label class="form-label" for="genStart">開始日</label><input type="date"  id="genStart" class="form-control" value="${p.start_date}"></div>
-        <div class="col-6"><label class="form-label" for="genEnd">終了日</label><input type="date"  id="genEnd" class="form-control" value="${p.end_date}"></div>
+        <div class="col-6"><label class="form-label" for="genStart">開始日</label><input type="date"  id="genStart" class="form-control" value="${esc(p.start_date)}"></div>
+        <div class="col-6"><label class="form-label" for="genEnd">終了日</label><input type="date"  id="genEnd" class="form-control" value="${esc(p.end_date)}"></div>
       </div>`) +
     `<div id="genConditions"></div>` +
     card(`<div class="text-center" style="padding:8px 0">
@@ -1814,6 +1949,10 @@ function renderGenerateTab(body, p) {
     const [patsD, settingsD] = await Promise.all([api('/shop/patterns'), api('/shop/settings')]);
     const active = (staffsD.staffs || []).filter((s) => !s.is_resigned);
     const s = settingsD.settings || {};
+    // s.xxx（下の gen-condition-value）は shops.settings 由来。サーバ側の型検証
+    // （utils.validate_known_settings_values）は新規保存にしか効かず、代理閲覧中は
+    // このコードが別テナントのデータを管理者のブラウザで描画し得るため、
+    // 描画側でも esc() を通す（保存型XSS対策の多層防御）。
     // シフト時間設定から代表的な時間帯を表示（bulk_mode優先、無ければ月-金の平均）
     let shiftHoursLabel = '未設定';
     try {
@@ -1830,9 +1969,9 @@ function renderGenerateTab(body, p) {
       card(sectionTitle('bi-clipboard-data', 'AIに考慮させる条件') +
         `<div class="gen-condition"><span class="gen-condition-label">稼働スタッフ</span><span class="gen-condition-value">${active.length}名</span></div>
          <div class="gen-condition"><span class="gen-condition-label">　社員 / アルバイト</span><span class="gen-condition-value">${active.filter((x) => x.role === 'employee').length}名 / ${active.filter((x) => x.role === 'part_time' || x.role === 'student').length}名</span></div>
-         <div class="gen-condition"><span class="gen-condition-label">1日最低勤務時間</span><span class="gen-condition-value">${s.min_daily_hours || 4}時間</span></div>
-         <div class="gen-condition"><span class="gen-condition-label">最大連勤（推奨）</span><span class="gen-condition-value">${s.max_consecutive_days || 6}日</span></div>
-         <div class="gen-condition"><span class="gen-condition-label">深夜割増率</span><span class="gen-condition-value">${s.night_premium_rate || 1.25}倍</span></div>
+         <div class="gen-condition"><span class="gen-condition-label">1日最低勤務時間</span><span class="gen-condition-value">${esc(String(s.min_daily_hours || 4))}時間</span></div>
+         <div class="gen-condition"><span class="gen-condition-label">最大連勤（推奨）</span><span class="gen-condition-value">${esc(String(s.max_consecutive_days || 6))}日</span></div>
+         <div class="gen-condition"><span class="gen-condition-label">深夜割増率</span><span class="gen-condition-value">${esc(String(s.night_premium_rate || 1.25))}倍</span></div>
          <div class="gen-condition"><span class="gen-condition-label">シフト時間（代表）</span><span class="gen-condition-value">${esc(shiftHoursLabel)}</span></div>
          <div class="gen-condition"><span class="gen-condition-label">シフト時間帯</span><span class="gen-condition-value">${(patsD.patterns || []).length}枠</span></div>`);
   }).catch(() => {});
@@ -1987,8 +2126,8 @@ SCREENS.shifts = function (el) {
   el.innerHTML = pageHead('シフト管理', 'bi-calendar3') +
     card(sectionTitle('bi-magic', '自動作成・手動操作') +
       `<div class="row mb-2">
-        <div class="col-6 col-sm-5"><label class="form-label" for="sStart">開始</label><input type="date" id="sStart" class="form-control" value="${p.start_date}"></div>
-        <div class="col-6 col-sm-5"><label class="form-label" for="sEnd">終了</label><input type="date" id="sEnd" class="form-control" value="${p.end_date}"></div>
+        <div class="col-6 col-sm-5"><label class="form-label" for="sStart">開始</label><input type="date" id="sStart" class="form-control" value="${esc(p.start_date)}"></div>
+        <div class="col-6 col-sm-5"><label class="form-label" for="sEnd">終了</label><input type="date" id="sEnd" class="form-control" value="${esc(p.end_date)}"></div>
         <div class="col-12 col-sm-2 mt-2 mt-sm-0"><label class="form-label d-none d-sm-block">&nbsp;</label><button class="btn btn-ai w-full" id="autoGen" title="AI自動作成"><i class="bi bi-stars"></i> AI生成</button></div>
       </div>
       <div class="flex gap-2 flex-wrap">
@@ -2059,8 +2198,8 @@ SCREENS.shifts = function (el) {
       const defFrom = past ? past.start_date : '', defTo = past ? past.end_date : '';
       const m = openModal('<i class="bi bi-files"></i> 前回シフトをコピー',
         `<p class="small text-muted">過去期間の確定シフトを、現在の期間へ日付をずらして複製します。</p>
-         <div class="row"><div class="col-6"><label class="form-label" for="cpFrom">コピー元 開始</label><input type="date"  id="cpFrom" class="form-control" value="${defFrom}"></div>
-         <div class="col-6"><label class="form-label" for="cpFromEnd">コピー元 終了</label><input type="date"  id="cpFromEnd" class="form-control" value="${defTo}"></div></div>
+         <div class="row"><div class="col-6"><label class="form-label" for="cpFrom">コピー元 開始</label><input type="date"  id="cpFrom" class="form-control" value="${esc(defFrom)}"></div>
+         <div class="col-6"><label class="form-label" for="cpFromEnd">コピー元 終了</label><input type="date"  id="cpFromEnd" class="form-control" value="${esc(defTo)}"></div></div>
          <label class="form-label mt-2">貼り付け先 開始</label><input type="date" id="cpTo" class="form-control" value="${cur().start}">
          <div class="small text-muted mt-1" id="cpPreview"></div>`,
         async (w, close) => {
@@ -2217,7 +2356,7 @@ async function loadStaffList() {
           <span class="dot ${roleClass(s.role)}"></span>
           <div>
             <strong>${esc(s.name)}</strong> <span class="text-secondary">${esc(s.staff_code)}</span>${s.is_resigned ? badge('退職', 'warning') : ''}
-            <div class="small text-secondary">${roleLabel(s.role)} ・ 時給${s.hourly_wage}円 ・ 月${s.min_hours_per_month}-${s.max_hours_per_month}h</div>
+            <div class="small text-secondary">${roleLabel(s.role)} ・ 時給${esc(s.hourly_wage)}円 ・ 月${esc(s.min_hours_per_month)}-${esc(s.max_hours_per_month)}h</div>
           </div>
         </div>
         <div class="flex gap-1">
@@ -2245,9 +2384,9 @@ function showStaffForm(s) {
     </div>
     <label class="form-label mt-2">ロール</label><select id="f_role" class="form-select"><option value="part_time" ${s && s.role === 'part_time' ? 'selected' : ''}>アルバイト</option><option value="student" ${s && s.role === 'student' ? 'selected' : ''}>学生アルバイト（月${STUDENT_MAX_HOURS}h上限）</option><option value="employee" ${s && s.role === 'employee' ? 'selected' : ''}>社員</option><option value="manager" ${s && s.role === 'manager' ? 'selected' : ''}>店舗管理者（店舗権限）</option></select>
     <div class="row mt-2">
-      <div class="col-4"><label class="form-label" for="f_wage">時給</label><input id="f_wage" type="number" class="form-control" value="${s ? s.hourly_wage : 1100}"></div>
-      <div class="col-4"><label class="form-label" for="f_min">最低h</label><input id="f_min" type="number" class="form-control" value="${s ? s.min_hours_per_month : 0}"></div>
-      <div class="col-4"><label class="form-label" for="f_max">上限h ${isStudent ? `<span class="text-danger small">(学生は${STUDENT_MAX_HOURS})</span>` : ''}</label><input id="f_max" type="number" class="form-control" value="${s ? s.max_hours_per_month : 160}" ${isStudent ? 'max="' + STUDENT_MAX_HOURS + '"' : ''}></div>
+      <div class="col-4"><label class="form-label" for="f_wage">時給</label><input id="f_wage" type="number" class="form-control" value="${esc(s ? s.hourly_wage : 1100)}"></div>
+      <div class="col-4"><label class="form-label" for="f_min">最低h</label><input id="f_min" type="number" class="form-control" value="${esc(s ? s.min_hours_per_month : 0)}"></div>
+      <div class="col-4"><label class="form-label" for="f_max">上限h ${isStudent ? `<span class="text-danger small">(学生は${STUDENT_MAX_HOURS})</span>` : ''}</label><input id="f_max" type="number" class="form-control" value="${esc(s ? s.max_hours_per_month : 160)}" ${isStudent ? 'max="' + STUDENT_MAX_HOURS + '"' : ''}></div>
     </div>
     <div class="small text-secondary mt-1" id="f_role_hint" style="display:${isStudent ? 'block' : 'none'}"><i class="bi bi-info-circle"></i> 学生アルバイトは月間${STUDENT_MAX_HOURS}時間上限・学生のみのシフトは作成できません。</div>
     <label class="form-label mt-2">ステータス</label><select id="f_resign" class="form-select"><option value="0" ${!s || !s.is_resigned ? 'selected' : ''}>在籍</option><option value="1" ${s && s.is_resigned ? 'selected' : ''}>退職</option></select>
@@ -2378,14 +2517,14 @@ function showFixedShiftModal(staffId, staffName) {
       w.querySelector('#fxList').innerHTML = mine.length ? mine.map((f) => `
         <div class="list-row"><div>${badge(WD[f.weekday] + '曜', 'info')} ${esc(f.start_time)} - ${esc(f.end_time)}</div>
         <div class="flex gap-1">
-          <button class="btn btn-sm btn-light" data-edit="${f.id}" data-wd="${f.weekday}" data-st="${f.start_time}" data-et="${f.end_time}"><i class="bi bi-pencil"></i></button>
+          <button class="btn btn-sm btn-light" data-edit="${f.id}" data-wd="${esc(f.weekday)}" data-st="${esc(f.start_time)}" data-et="${esc(f.end_time)}"><i class="bi bi-pencil"></i></button>
           <button class="btn btn-sm btn-outline-danger" data-del="${f.id}"><i class="bi bi-x"></i></button>
         </div></div>`).join('') : '<div class="small text-secondary">固定シフト未設定</div>';
       w.querySelectorAll('[data-del]').forEach((b) => b?.addEventListener('click', async () => { await api(`/shop/fixed-shifts/${b.dataset.del}`, { method: 'DELETE' }); mine = mine.filter((m) => m.id != b.dataset.del); render(w); }));
       w.querySelectorAll('[data-edit]').forEach((b) => {
         b?.addEventListener('click', () => openModal('<i class="bi bi-pencil"></i> 固定シフト編集',
           `<label class="form-label" for="eWd">曜日</label><select id="eWd" class="form-select mb-2">${WD.map((n, i) => `<option value="${i}" ${i == b.dataset.wd ? 'selected' : ''}>${n}曜</option>`).join('')}</select>
-           <div class="row"><div class="col-6"><label class="form-label" for="eSt">開始</label><input id="eSt" class="form-control" value="${b.dataset.st}"></div><div class="col-6"><label class="form-label" for="eEt">終了</label><input id="eEt" class="form-control" value="${b.dataset.et}"></div></div>`,
+           <div class="row"><div class="col-6"><label class="form-label" for="eSt">開始</label><input id="eSt" class="form-control" value="${esc(b.dataset.st)}"></div><div class="col-6"><label class="form-label" for="eEt">終了</label><input id="eEt" class="form-control" value="${esc(b.dataset.et)}"></div></div>`,
           async (w2, close2) => {
             try { await api(`/shop/fixed-shifts/${b.dataset.edit}`, { method: 'PUT', body: JSON.stringify({ weekday: +w2.querySelector('#eWd').value, start_time: w2.querySelector('#eSt').value, end_time: w2.querySelector('#eEt').value }) });
               const m = mine.find((x) => x.id == b.dataset.edit); if (m) { m.weekday = +w2.querySelector('#eWd').value; m.start_time = w2.querySelector('#eSt').value; m.end_time = w2.querySelector('#eEt').value; }
@@ -2463,7 +2602,7 @@ SCREENS.myshift = async function (el) {
         });
         return;
       }
-      safeSetHTML(infoBox, `<div class="my-info-row"><i class="bi bi-person-badge"></i> <strong>${esc(me.staff.name)}</strong> (${esc(me.staff.staff_code)}) ・ ${roleLabel(me.staff.role)} ・ 時給${me.staff.hourly_wage}円</div>`);
+      safeSetHTML(infoBox, `<div class="my-info-row"><i class="bi bi-person-badge"></i> <strong>${esc(me.staff.name)}</strong> (${esc(me.staff.staff_code)}) ・ ${roleLabel(me.staff.role)} ・ 時給${esc(me.staff.hourly_wage)}円</div>`);
     }
     // 確定シフト（+ AIドラフトも確認用に表示）
     const shiftsBox = document.getElementById('myShifts');
@@ -3972,14 +4111,14 @@ async function loadMatrix(body) {
         const wr = p.weekday_required || {};
         return `<tr data-pid="${p.id}">
           <td><div class="matrix-pat-name">${esc(p.pattern_name)}</div><div class="matrix-pat-time">${esc(p.start_time)} - ${esc(p.end_time)}</div></td>
-          <td><input type="number" class="matrix-input matrix-default" data-pid="${p.id}" value="${p.required_staff}" min="0" title="基本必要人数"></td>
+          <td><input type="number" class="matrix-input matrix-default" data-pid="${p.id}" value="${esc(p.required_staff)}" min="0" title="基本必要人数"></td>
           ${[0,1,2,3,4,5,6].map((w) => {
             const val = wr[String(w)];
             const has = val !== undefined && val !== null;
-            return `<td><input type="number" class="matrix-input matrix-wd ${has?'has-override':''}" data-pid="${p.id}" data-wd="${w}" value="${has?val:''}" placeholder="${p.required_staff}" min="0"></td>`;
+            return `<td><input type="number" class="matrix-input matrix-wd ${has?'has-override':''}" data-pid="${p.id}" data-wd="${w}" value="${esc(has?val:'')}" placeholder="${esc(p.required_staff)}" min="0"></td>`;
           }).join('')}
           <td><div class="matrix-row-actions">
-            <button data-edit="${p.id}" data-n="${esc(p.pattern_name)}" data-st="${p.start_time}" data-et="${p.end_time}" data-req="${p.required_staff}" title="編集"><i class="bi bi-pencil"></i></button>
+            <button data-edit="${p.id}" data-n="${esc(p.pattern_name)}" data-st="${esc(p.start_time)}" data-et="${esc(p.end_time)}" data-req="${esc(p.required_staff)}" title="編集"><i class="bi bi-pencil"></i></button>
             <button data-del="${p.id}" title="削除"><i class="bi bi-trash"></i></button>
           </div></td>
         </tr>`;
@@ -4022,10 +4161,10 @@ async function loadMatrix(body) {
 function openPatternModal(data, onDone) {
   const isEdit = !!data;
   openModal(`<i class="bi bi-clock-history"></i> ${isEdit ? '時間帯の編集' : '新しい時間帯'}`,
-    `<label class="form-label" for="pName">時間帯名</label><input id="pName" class="form-control mb-2" value="${data?.n || ''}" placeholder="例: 夜">
-     <div class="row"><div class="col-6"><label class="form-label" for="pSt">開始</label><input id="pSt" class="form-control" value="${data?.st || '17:00'}"></div>
-     <div class="col-6"><label class="form-label" for="pEt">終了</label><input id="pEt" class="form-control" value="${data?.et || '22:00'}"></div></div>
-     <label class="form-label mt-2">基本必要人数</label><input id="pReq" type="number" class="form-control" value="${data?.req || 2}">
+    `<label class="form-label" for="pName">時間帯名</label><input id="pName" class="form-control mb-2" value="${esc(data?.n || '')}" placeholder="例: 夜">
+     <div class="row"><div class="col-6"><label class="form-label" for="pSt">開始</label><input id="pSt" class="form-control" value="${esc(data?.st || '17:00')}"></div>
+     <div class="col-6"><label class="form-label" for="pEt">終了</label><input id="pEt" class="form-control" value="${esc(data?.et || '22:00')}"></div></div>
+     <label class="form-label mt-2">基本必要人数</label><input id="pReq" type="number" class="form-control" value="${esc(data?.req || 2)}">
      <div class="small text-secondary mt-2">作成後、マトリクスで曜日別の人数を設定できます。</div>`,
     async (w, close) => {
       try {
@@ -4043,18 +4182,23 @@ function renderShopTab(body) {
   body.innerHTML = card('<div class="text-secondary small">読み込み中...</div>');
   api('/shop/settings').then((d) => {
     const s = d.settings || {};
+    // 数値項目は shops.settings 由来。サーバ側の型検証は新規保存にしか効かず、
+    // 代理閲覧中はこの画面が別テナントのデータを管理者のブラウザで描画し得るため、
+    // value 属性に入れる前に必ず esc() する（保存型XSS対策の多層防御。
+    // public/admin.js の renderShopSettingsTab の num() と同じパターン）。
+    const num = (v, dflt) => esc(String(v ?? dflt));
     body.innerHTML = card(sectionTitle('bi-shop', '店舗情報') +
       `<label class="form-label" for="setShopName">店舗名</label><input id="setShopName" class="form-control mb-2" value="${esc(d.shop_name)}">
        <label class="form-label" for="setShopCode">店舗コード</label><input id="setShopCode" class="form-control mb-3" value="${esc(d.shop_code)}" disabled>
        <hr style="border-color:var(--rule);margin:16px 0">
        ${sectionTitle('bi-gear', '運用設定')}
        <div class="row">
-         <div class="col-6"><label class="form-label" for="setWage">デフォルト時給(円)</label><input id="setWage" type="number" class="form-control" value="${s.default_hourly_wage ?? 1000}"></div>
-         <div class="col-6"><label class="form-label" for="setMinDaily">1日最低勤務(h)</label><input id="setMinDaily" type="number" class="form-control" value="${s.min_daily_hours ?? 4}"></div>
-         <div class="col-6"><label class="form-label" for="setMaxDaily">1日最大勤務(h)</label><input id="setMaxDaily" type="number" class="form-control" value="${s.max_daily_hours ?? 9}"></div>
-         <div class="col-6"><label class="form-label" for="setMaxConsec">最大連勤（推奨）</label><input id="setMaxConsec" type="number" class="form-control" value="${s.max_consecutive_days ?? 6}"></div>
-         <div class="col-6"><label class="form-label" for="setNightRate">深夜割増率</label><input id="setNightRate" type="number" step="0.05" class="form-control" value="${s.night_premium_rate ?? 1.25}"></div>
-         <div class="col-6"><label class="form-label" for="setTransport">1日交通費(円)</label><input id="setTransport" type="number" class="form-control" value="${s.transport_per_day ?? 0}"></div>
+         <div class="col-6"><label class="form-label" for="setWage">デフォルト時給(円)</label><input id="setWage" type="number" class="form-control" value="${num(s.default_hourly_wage, 1000)}"></div>
+         <div class="col-6"><label class="form-label" for="setMinDaily">1日最低勤務(h)</label><input id="setMinDaily" type="number" class="form-control" value="${num(s.min_daily_hours, 4)}"></div>
+         <div class="col-6"><label class="form-label" for="setMaxDaily">1日最大勤務(h)</label><input id="setMaxDaily" type="number" class="form-control" value="${num(s.max_daily_hours, 9)}"></div>
+         <div class="col-6"><label class="form-label" for="setMaxConsec">最大連勤（推奨）</label><input id="setMaxConsec" type="number" class="form-control" value="${num(s.max_consecutive_days, 6)}"></div>
+         <div class="col-6"><label class="form-label" for="setNightRate">深夜割増率</label><input id="setNightRate" type="number" step="0.05" class="form-control" value="${num(s.night_premium_rate, 1.25)}"></div>
+         <div class="col-6"><label class="form-label" for="setTransport">1日交通費(円)</label><input id="setTransport" type="number" class="form-control" value="${num(s.transport_per_day, 0)}"></div>
          <div class="col-12"><label class="form-label">シフト時間設定</label><div class="info-box"><i class="bi bi-info-circle"></i> シフト作成可能な時間帯は <strong>「シフト時間設定」タブ</strong> で管理しています（曜日別・祝日対応）。</div></div>
          <div class="col-6"><label class="form-label" for="setPeriodMode">デフォルト期間</label><select id="setPeriodMode" class="form-select"><option value="half" ${(s.period_mode || 'half') === 'half' ? 'selected' : ''}>半月ごと</option><option value="month" ${s.period_mode === 'month' ? 'selected' : ''}>1ヶ月ごと</option></select></div>
        </div>
@@ -4090,8 +4234,8 @@ function renderPeriodsTab(body) {
   document.getElementById('addPer')?.addEventListener('click', async () => {
     let np = window._nextPeriod; if (!np) { try { np = await api('/shop/periods/next'); } catch { np = { start_date: '', end_date: '', deadline: '' }; } }
     openModal('<i class="bi bi-plus-lg"></i> 募集期間追加',
-      `<div class="row"><div class="col-6"><label class="form-label" for="peStart">開始</label><input type="date"  id="peStart" class="form-control" value="${np.start_date}"></div><div class="col-6"><label class="form-label" for="peEnd">終了</label><input type="date"  id="peEnd" class="form-control" value="${np.end_date}"></div></div>
-       <label class="form-label mt-2">締切</label><input type="date" id="peDeadline" class="form-control" value="${np.deadline}">`,
+      `<div class="row"><div class="col-6"><label class="form-label" for="peStart">開始</label><input type="date"  id="peStart" class="form-control" value="${esc(np.start_date)}"></div><div class="col-6"><label class="form-label" for="peEnd">終了</label><input type="date"  id="peEnd" class="form-control" value="${esc(np.end_date)}"></div></div>
+       <label class="form-label mt-2">締切</label><input type="date" id="peDeadline" class="form-control" value="${esc(np.deadline)}">`,
       async (w, close) => { try { await api('/shop/periods', { method: 'POST', body: JSON.stringify({ start_date: w.querySelector('#peStart').value, end_date: w.querySelector('#peEnd').value, deadline: w.querySelector('#peDeadline').value }) }); close(); toast('追加しました', 'success'); load(); } catch (e) { toast(e.message, 'error'); } });
   });
 }
@@ -4117,7 +4261,7 @@ function openChangeRequestModal(s) {
   const w = openModal('<i class="bi bi-pencil"></i> シフト変更申請',
     `<div class="small text-secondary mb-2">対象: ${esc(s.start_datetime.slice(0, 16))} 〜 ${esc(s.end_datetime.slice(11, 16))}</div>
      <label class="form-label" for="crType">申請種別</label><select id="crType" class="form-select mb-3"><option value="change">時間変更</option><option value="cancel">休みにする</option></select>
-     <div id="crTime"><label class="form-label" for="crStart">希望時間</label><div class="row mb-2"><div class="col-6"><input type="datetime-local" id="crStart" class="form-control" value="${sl(s.start_datetime)}"></div><div class="col-6"><input type="datetime-local" id="crEnd" class="form-control" value="${sl(s.end_datetime)}"></div></div></div>
+     <div id="crTime"><label class="form-label" for="crStart">希望時間</label><div class="row mb-2"><div class="col-6"><input type="datetime-local" id="crStart" class="form-control" value="${esc(sl(s.start_datetime))}"></div><div class="col-6"><input type="datetime-local" id="crEnd" class="form-control" value="${esc(sl(s.end_datetime))}"></div></div></div>
      <label class="form-label" for="crReason">理由</label><input id="crReason" class="form-control mb-2" placeholder="例: 用事のため変更希望">
      <div class="small text-secondary">※店長の承認後にシフトへ反映されます</div>`,
     async (w2, close) => {
@@ -4137,7 +4281,7 @@ SCREENS.staffDashboard = async function (el) {
     const periods = await api('/staff/periods');
     const ap = (periods.periods || []).filter((p) => p.is_active).sort((a, b) => b.end_date.localeCompare(a.end_date))[0];
     if (ap) {
-      periodBanner = `<div class="kpi-card kpi-indigo mb-3"><div class="kpi-label"><i class="bi bi-megaphone"></i> シフト希望受付中</div><div class="kpi-value num" style="font-size:1.05rem">${ap.start_date} 〜 ${ap.end_date}</div><div class="kpi-sub">締切: ${ap.deadline}</div><button class="btn btn-primary btn-sm mt-2" id="goRequest"><i class="bi bi-pencil-square"></i> 希望を提出する</button></div>`;
+      periodBanner = `<div class="kpi-card kpi-indigo mb-3"><div class="kpi-label"><i class="bi bi-megaphone"></i> シフト希望受付中</div><div class="kpi-value num" style="font-size:1.05rem">${esc(ap.start_date)} 〜 ${esc(ap.end_date)}</div><div class="kpi-sub">締切: ${esc(ap.deadline)}</div><button class="btn btn-primary btn-sm mt-2" id="goRequest"><i class="bi bi-pencil-square"></i> 希望を提出する</button></div>`;
     }
   } catch {}
 
@@ -4266,7 +4410,7 @@ SCREENS.request = async function (el) {
   }
 
   const periodBanner = wishPeriod
-    ? `<div class="kpi-card kpi-indigo" style="margin-bottom:12px"><div class="kpi-label">募集期間</div><div class="kpi-value num" style="font-size:1.1rem">${wishPeriod.start_date} 〜 ${wishPeriod.end_date}</div><div class="kpi-sub">締切: ${wishPeriod.deadline}</div></div>`
+    ? `<div class="kpi-card kpi-indigo" style="margin-bottom:12px"><div class="kpi-label">募集期間</div><div class="kpi-value num" style="font-size:1.1rem">${esc(wishPeriod.start_date)} 〜 ${esc(wishPeriod.end_date)}</div><div class="kpi-sub">締切: ${esc(wishPeriod.deadline)}</div></div>`
     : `<div class="kpi-card kpi-red" style="margin-bottom:12px"><div class="kpi-label"><i class="bi bi-exclamation-triangle"></i> 募集期間外</div><div class="kpi-sub">現在シフト希望を提出できる期間ではありません。店長にお問い合わせください。</div></div>`;
 
   el.innerHTML = pageHead('シフト希望入力', 'bi-pencil-square') + periodBanner +
@@ -4382,11 +4526,13 @@ SCREENS.request = async function (el) {
     try {
       const d = await api('/staff/ai/parse', { method: 'POST', body: JSON.stringify({ text }) });
       const ng = (d.ng_weekdays || []).map((x) => WD[x]).join('・');
-      const slotTxt = d.preferred_slot === 'time' ? `${d.preferred_start}-${d.preferred_end}` : (d.preferred_slot === 'morning' ? '朝' : d.preferred_slot === 'evening' ? '夜' : '指定なし');
+      // preferred_start / preferred_end / need_hours は LLM が本人の入力文から
+      // 抽出した値で、形式が保証されない。描画前に必ず esc() を通す。
+      const slotTxt = d.preferred_slot === 'time' ? `${esc(d.preferred_start)}-${esc(d.preferred_end)}` : (d.preferred_slot === 'morning' ? '朝' : d.preferred_slot === 'evening' ? '夜' : '指定なし');
       fillWishesFromAI(d);
       box.innerHTML = `<div class="ai-card p-3"><div class="flex gap-2 flex-wrap mb-2">${badge(d.source === 'llm' ? 'AI(API)' : 'ルールベース', d.source === 'llm' ? 'success' : 'warning')}
         ${d.target_income ? `<span class="stat-pill">目標 ${yen(d.target_income)}</span>` : ''}
-        ${d.need_hours ? `<span class="stat-pill">必要 ${d.need_hours}h</span>` : ''}
+        ${d.need_hours ? `<span class="stat-pill">必要 ${esc(d.need_hours)}h</span>` : ''}
         ${ng ? `<span class="stat-pill">NG ${ng}</span>` : ''}
         <span class="stat-pill">希望時間帯 ${slotTxt}</span></div>
         <div style="font-size:.88rem;line-height:1.7;white-space:pre-wrap">${esc(d.reason)}</div></div>`;
@@ -4432,506 +4578,3 @@ SCREENS.staffSettings = function (el) {
     catch (e) { toast(e.message, 'error'); }
   });
 };
-
-/* ============================================================
-   Admin Screens
-   ============================================================ */
-SCREENS.adminHome = function (el) {
-  el.innerHTML = pageHead('システム管理者', 'bi-shield-lock', currentUser.name) +
-    card(`<button class="btn btn-primary btn-lg w-full mb-2" id="goShops"><i class="bi bi-shop"></i> 店舗一覧へ</button>
-      <button class="btn btn-light btn-lg w-full" id="dbMaintBtn"><i class="bi bi-database-check"></i> データベース状態確認・更新</button>`);
-  document.getElementById('goShops')?.addEventListener('click', () => navigateTo('adminShops'));
-  document.getElementById('dbMaintBtn')?.addEventListener('click', () => openDbMaintenanceModal());
-};
-
-function openDbMaintenanceModal() {
-  const w = openModal('<i class="bi bi-database-check"></i> データベース状態確認・更新',
-    `<div id="dbStatus"><div class="text-secondary small">確認中...</div></div>`,
-    null, { saveLabel: '閉じる' });
-  // 状態取得
-  api('/admin/debug/db-schema').then((d) => {
-    const box = w.querySelector('#dbStatus');
-    if (!box) return;
-    const student = d.supports_student_role;
-    const holidays = d.has_shop_holidays_table;
-    const allOk = student && holidays;
-    safeSetHTML(box, `
-      <div class="${allOk ? 'info-box' : 'info-box'}" style="border-color:${allOk ? 'var(--success)' : 'var(--danger)'}">
-        <div class="mb-2"><strong>現在のデータベース状態</strong></div>
-        <div>• student ロール対応: ${student ? '<span class="text-success">✓ 対応済み</span>' : '<span class="text-danger">✗ 未対応（要更新）</span>'}</div>
-        <div>• shop_holidays テーブル: ${holidays ? '<span class="text-success">✓ 存在</span>' : '<span class="text-danger">✗ 未作成</span>'}</div>
-      </div>
-      ${!allOk ? `
-        <div class="alert alert-warning mt-3">
-          <strong>⚠ データベースが古い状態です。</strong><br>
-          新機能（学生アルバイト・祝日機能等）が使えません。<br>
-          下の「スキーマを最新化」ボタンで修正できます。
-        </div>
-        <button class="btn btn-primary w-full mt-2" id="runMigrationBtn"><i class="bi bi-arrow-repeat"></i> スキーマを最新化する</button>
-        <div id="migrationResult" class="mt-2"></div>
-      ` : `
-        <div class="alert alert-success mt-3">
-          ✓ データベースは最新です。追加の操作は不要です。
-        </div>
-      `}
-      <details class="mt-3">
-        <summary class="small text-secondary cursor-pointer">技術詳細</summary>
-        <pre class="small mt-2" style="white-space:pre-wrap;word-break:break-all">${esc(d.staffs_schema || '')}</pre>
-        <div class="small mt-2">role 分布:</div>
-        <pre class="small">${esc(JSON.stringify(d.role_distribution, null, 2))}</pre>
-      </details>`);
-    const btn = w.querySelector('#runMigrationBtn');
-    if (btn) {
-      btn.addEventListener('click', async () => {
-        btn.disabled = true;
-        btn.innerHTML = '<i class="bi bi-hourglass-split"></i> 実行中...';
-        const resultBox = w.querySelector('#migrationResult');
-        try {
-          const r = await api('/admin/db/migrate', { method: 'POST', body: JSON.stringify({}) });
-          if (resultBox) {
-            safeSetHTML(resultBox, `
-              <div class="alert alert-success">
-                <strong>✓ マイグレーション完了</strong>
-                <pre class="small mt-2" style="white-space:pre-wrap">${esc((r.log || []).join('\n'))}</pre>
-              </div>`);
-          }
-          toast('データベースを最新化しました', 'success');
-        } catch (e) {
-          if (resultBox) {
-            safeSetHTML(resultBox, `<div class="alert alert-danger">エラー: ${esc(e.message)}</div>`);
-          }
-          toast(e.message, 'error');
-        }
-      });
-    }
-  }).catch((e) => {
-    const box = w.querySelector('#dbStatus');
-    if (box) safeSetHTML(box, `<div class="text-danger small">${esc(e.message)}</div>`);
-  });
-}
-SCREENS.adminShops = async function (el) {
-  el.innerHTML = pageHead('店舗一覧', 'bi-shop') +
-    card(`<div class="flex justify-between items-center mb-3">${sectionTitle('bi-shop', '店舗一覧')}<button class="btn btn-primary btn-sm" id="addShopBtn"><i class="bi bi-plus-lg"></i></button></div><div id="shopList"></div>`);
-  const load = async () => {
-    const d = await api('/admin/shops');
-    document.getElementById('shopList').innerHTML = d.shops.length ? (await Promise.all(d.shops.map(async (s) => {
-      let st = { staff_count: '-', confirmed_count: '-' };
-      try { st = await api(`/admin/shops/stats/${s.id}`); } catch {}
-      return `<div class="list-row" style="cursor:pointer" data-detail="${s.id}"><div><strong>${esc(s.shop_name)}</strong> <span class="text-secondary">${esc(s.shop_code)}</span> ${badge(s.is_active ? '有効' : '無効', s.is_active ? 'success' : 'warning')}<div class="small text-secondary">スタッフ${st.staff_count}名 / 確定${st.confirmed_count}件</div></div><button class="btn btn-sm btn-light" data-toggle="${s.id}" data-active="${s.is_active}">${s.is_active ? '無効化' : '有効化'}</button></div>`;
-    }))).join('') : emptyState('bi-shop', '店舗がありません');
-    document.getElementById('shopList').querySelectorAll('[data-detail]').forEach((b) => b?.addEventListener('click', (ev) => { if (ev.target.closest('[data-toggle]')) return; window._adminShopId = +b.dataset.detail; navigateTo('adminShopDetail'); }));
-    document.getElementById('shopList').querySelectorAll('[data-toggle]').forEach((b) => b?.addEventListener('click', async (ev) => { ev.stopPropagation(); await api(`/admin/shops/${b.dataset.toggle}`, { method: 'PUT', body: JSON.stringify({ is_active: b.dataset.active !== '1' }) }); load(); }));
-  };
-  load();
-  document.getElementById('addShopBtn')?.addEventListener('click', () =>
-    openModal('<i class="bi bi-plus-lg"></i> 店舗追加',
-      `<p class="small text-secondary mb-3">店舗情報と、ログイン用の店舗責任者アカウントを同時に作成します。店舗責任者は作成直後から <strong>店舗コード + ユーザーID + パスワード</strong> でログインできます。</p>
-       <div class="row"><div class="col-6"><label class="form-label" for="shCode">店舗コード <span class="text-danger">*</span></label><input id="shCode" class="form-control mb-2" placeholder="例: SHOP001"></div><div class="col-6"><label class="form-label" for="shName">店舗名 <span class="text-danger">*</span></label><input id="shName" class="form-control mb-2" placeholder="例: 渋谷店"></div></div>
-       <label class="form-label" for="shPw">店舗パスワード <span class="text-danger">*</span></label><input id="shPw" type="password" class="form-control mb-2" placeholder="8文字以上・英数字" autocomplete="new-password">
-       <hr style="border-color:var(--rule);margin:14px 0">
-       <div class="section-title"><i class="bi bi-person-badge"></i> 店舗責任者アカウント</div>
-       <div class="row mt-2"><div class="col-6"><label class="form-label" for="shMgrCode">ユーザーID <span class="text-danger">*</span></label><input id="shMgrCode" class="form-control mb-2" placeholder="例: manager" autocomplete="username"></div><div class="col-6"><label class="form-label" for="shMgrName">氏名 <span class="text-danger">*</span></label><input id="shMgrName" class="form-control mb-2" placeholder="例: 山田太郎"></div></div>
-       <label class="form-label" for="shMgrPw">パスワード <span class="text-danger">*</span></label><input id="shMgrPw" type="password" class="form-control" placeholder="8文字以上・英数字" autocomplete="new-password">
-       <div class="pw-rules mt-2" id="shPwRules">
-         <span class="pw-rule" data-rule="len"><i class="bi bi-circle"></i>8文字以上</span>
-         <span class="pw-rule" data-rule="alpha"><i class="bi bi-circle"></i>英字を含む</span>
-         <span class="pw-rule" data-rule="digit"><i class="bi bi-circle"></i>数字を含む</span>
-       </div>
-       <div class="form-error mt-2" id="shFormErr"></div>`,
-      async (w, close) => {
-        const g = (id) => (w.querySelector(id)?.value || '').trim();
-        const errBox = w.querySelector('#shFormErr');
-        const showErr = (msg) => { if (errBox) errBox.innerHTML = msg ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(msg)}` : ''; };
-        showErr('');
-        // バリデーション
-        if (!g('#shCode')) return showErr('店舗コードを入力してください');
-        if (!g('#shName')) return showErr('店舗名を入力してください');
-        if (!g('#shMgrCode')) return showErr('店舗責任者のユーザーIDを入力してください');
-        if (!g('#shMgrName')) return showErr('店舗責任者の氏名を入力してください');
-        const shPw = g('#shPw');
-        const mgrPw = g('#shMgrPw');
-        const verr1 = validatePassword(shPw);
-        if (verr1) return showErr('店舗パスワード: ' + verr1);
-        const verr2 = validatePassword(mgrPw);
-        if (verr2) return showErr('店舗責任者パスワード: ' + verr2);
-        try {
-          const result = await api('/admin/shops', { method: 'POST', body: JSON.stringify({
-            shop_code: g('#shCode'), shop_name: g('#shName'), password: shPw,
-            manager_code: g('#shMgrCode'), manager_password: mgrPw, manager_name: g('#shMgrName'),
-          })});
-          close();
-          toast(`店舗「${g('#shName')}」と店舗責任者「${g('#shMgrName')}」を作成しました`, 'success');
-          load();
-        } catch (e) { showErr(e.message || '作成に失敗しました'); }
-      }, { saveLabel: '店舗を作成' }));
-  // リアルタイムパスワード検証（両方のPW入力を監視）
-  setTimeout(() => {
-    const wrap = document.querySelector('.modal-overlay:last-child');
-    if (!wrap) return;
-    const pwInputs = wrap.querySelectorAll('#shPw, #shMgrPw');
-    const ruleEls = wrap.querySelectorAll('#shPwRules .pw-rule');
-    const updateRules = (input) => {
-      const v = input?.value || '';
-      const checks = {
-        len: v.length >= 8,
-        alpha: /[A-Za-z]/.test(v),
-        digit: /[0-9]/.test(v),
-      };
-      ruleEls.forEach((el) => {
-        const k = el.dataset.rule;
-        const ok = checks[k];
-        el.classList.toggle('ok', !!ok && v.length > 0);
-        el.classList.toggle('ng', !ok && v.length > 0);
-        el.querySelector('i').className = ok ? 'bi bi-check-circle-fill' : 'bi bi-x-circle-fill';
-      });
-    };
-    pwInputs.forEach((inp) => inp?.addEventListener('input', () => {
-      updateRules(inp);
-      wrap.querySelector('#shFormErr').innerHTML = '';
-    }));
-  }, 50);
-};
-SCREENS.adminShopDetail = async function (el) {
-  const sid = window._adminShopId;
-  const shop = (await api('/admin/shops')).shops.find((x) => x.id === sid) || { shop_name: '店舗#' + sid, shop_code: '' };
-  el.innerHTML = pageHead(shop.shop_name, 'bi-shop', shop.shop_code) +
-    card(`<button class="btn btn-sm btn-light mb-2" id="backBtn"><i class="bi bi-arrow-left"></i> 戻る</button>
-      <div class="flex gap-2 flex-wrap mb-3">
-        <button class="btn btn-primary btn-sm" id="addStaffBtn"><i class="bi bi-person-plus"></i> スタッフ追加</button>
-        <button class="btn btn-light btn-sm" id="migrateBtn" title="旧仕様店主のPWを引き継いで manager スタッフを作成"><i class="bi bi-arrow-up-circle"></i> 旧仕様から manager 昇格</button>
-      </div>
-      <div class="row mb-3"><div class="col-5"><label class="form-label" for="dStart">開始</label><input type="date"  id="dStart" class="form-control"></div><div class="col-5"><label class="form-label" for="dEnd">終了</label><input type="date"  id="dEnd" class="form-control"></div><div class="col-2 flex items-end"><button class="btn btn-primary w-full" id="loadBtn">表示</button></div></div>
-      <div id="detailBody"><div class="text-secondary small">期間を指定してください</div></div>`);
-  document.getElementById('backBtn')?.addEventListener('click', () => navigateTo('adminShops'));
-  document.getElementById('loadBtn')?.addEventListener('click', () => loadDetail());
-  document.getElementById('addStaffBtn')?.addEventListener('click', () => openAdminAddStaffModal(sid, loadDetail));
-  document.getElementById('migrateBtn')?.addEventListener('click', () => openAdminMigrateModal(sid, shop, loadDetail));
-  api(`/admin/shops/${sid}/periods/next`).then((p) => {
-    const ds = document.getElementById('dStart'); const de = document.getElementById('dEnd');
-    if (!ds || !de) return;  // 画面遷移済み
-    ds.value = p.start_date; de.value = p.end_date; loadDetail();
-  }).catch(() => {});
-  async function loadDetail() {
-    const start = dStart.value, end = dEnd.value; if (!start || !end) return;
-    const body = document.getElementById('detailBody');
-    if (!body) return;  // 画面遷移済み → 更新中止
-    const tok = navToken();
-    body.innerHTML = '<div class="text-secondary small">読み込み中...</div>';
-    try {
-      const [sum, st] = await Promise.all([api(`/admin/shops/summary/${sid}?start=${start}&end=${end}`), api(`/admin/shops/staffs/${sid}`)]);
-      if (!isAlive(tok) || !body.isConnected) return;  // 画面遷移済み
-      const tbl = sum.staff.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>氏名</th><th>日</th><th class="t-num">確定</th><th class="t-num">給与</th></tr></thead><tbody>${sum.staff.map((s) => `<tr><td>${esc(s.name)}</td><td>${s.days}</td><td class="t-num num">${s.confirmed_hours}h</td><td class="t-num num">${yen(s.pay)}</td></tr>`).join('')}<tr style="font-weight:800;color:var(--ink)"><td>合計</td><td></td><td class="t-num num">${sum.total_hours}h</td><td class="t-num num">${yen(sum.total_pay)}</td></tr></tbody></table></div>` : '<div class="small text-secondary">確定シフトなし</div>';
-      const slist = (st.staffs || []).map((s) => `
-        <div class="list-row" data-staff-row data-search="${esc((s.name || '') + ' ' + (s.staff_code || '') + ' ' + roleLabel(s.role))}">
-          <div class="staff-cell">
-            <span class="staff-name">${esc(s.name)}</span>
-            <span class="staff-sub">${esc(s.staff_code)} ・ ${roleLabel(s.role)}${s.is_resigned ? ' ・ 退職' : ''}</span>
-          </div>
-          <div class="flex gap-1">
-            <button class="btn btn-sm btn-light" data-staff-edit='${esc(JSON.stringify(s))}' title="編集"><i class="bi bi-pencil"></i></button>
-            <button class="btn btn-sm btn-light" data-role-edit="${s.id}" data-name="${esc(s.name)}" data-role="${s.role}" title="ロール変更"><i class="bi bi-shield-lock"></i></button>
-            <button class="btn btn-sm btn-light" data-pw-reset="${s.id}" data-name="${esc(s.name)}" title="パスワードリセット"><i class="bi bi-key"></i></button>
-          </div>
-        </div>`).join('');
-      const searchBox = `<input type="search" id="staffSearch" class="form-control mb-2" placeholder="氏名・コード・ロールで絞り込み">`;
-      body.innerHTML = sectionTitle('bi-people', `スタッフ（${st.staffs.length}名）`) + searchBox + `<div id="staffListBox">${slist}</div>` + `<hr style="border-color:var(--rule);margin:16px 0">` + sectionTitle('bi-bar-chart', `集計（${start}〜${end}）`) + tbl;
-      // スタッフ検索（フロント側フィルタ）
-      document.getElementById('staffSearch')?.addEventListener('input', (ev) => {
-        const q = ev.target.value.trim().toLowerCase();
-        body.querySelectorAll('[data-staff-row]').forEach((row) => {
-          row.style.display = (!q || (row.dataset.search || '').toLowerCase().includes(q)) ? '' : 'none';
-        });
-      });
-      // 汎用編集ボタン
-      body.querySelectorAll('[data-staff-edit]').forEach((b) => b?.addEventListener('click', () => {
-        let s2; try { s2 = JSON.parse(b.dataset.staffEdit); } catch { return; }
-        openAdminStaffEditModal(sid, s2, loadDetail);
-      }));
-      // ロール変更ボタン
-      body.querySelectorAll('[data-role-edit]').forEach((b) => b?.addEventListener('click', () => {
-        openAdminRoleModal(sid, +b.dataset.roleEdit, b.dataset.name, b.dataset.role, loadDetail);
-      }));
-      // パスワードリセットボタン
-      body.querySelectorAll('[data-pw-reset]').forEach((b) => b?.addEventListener('click', () => {
-        openAdminPwResetModal(sid, +b.dataset.pwReset, b.dataset.name);
-      }));
-    } catch (e) {
-      if (!isAlive(tok) || !body.isConnected) return;
-      body.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
-    }
-  }
-};
-
-const AUDIT_ACTION_LABELS = {
-  'shift.finalize': 'シフト確定',
-  'creq.approve': '変更申請 承認',
-  'creq.reject': '変更申請 却下',
-  'staff.role_change': 'ロール変更',
-  'staff.password_reset': 'パスワードリセット',
-  'staff.update': 'スタッフ編集',
-  'staff.create': 'スタッフ作成',
-  'shop.create': '店舗作成',
-  'shop.update': '店舗更新',
-  'auth.login': 'ログイン',
-  'auth.login_failed': 'ログイン失敗',
-  'auth.login_blocked': 'ログインブロック',
-  'auth.logout': 'ログアウト',
-  'admin.password_change': '管理者PW変更',
-};
-function auditActionLabel(a) { return AUDIT_ACTION_LABELS[a] || a || '—'; }
-
-SCREENS.adminAudit = async function (el) {
-  el.innerHTML = pageHead('監査ログ', 'bi-clipboard-data', '重要操作の履歴') +
-    card(sectionTitle('bi-funnel', 'フィルタ') +
-      `<div class="row mb-2">
-         <div class="col-6"><label class="form-label" for="auShop">店舗</label><select id="auShop" class="form-select"><option value="">すべて</option></select></div>
-         <div class="col-6"><label class="form-label" for="auAction">操作</label><select id="auAction" class="form-select">
-           <option value="">すべて</option>${Object.keys(AUDIT_ACTION_LABELS).map((k) => `<option value="${k}">${esc(AUDIT_ACTION_LABELS[k])}</option>`).join('')}
-         </select></div>
-       </div>
-       <button class="btn btn-primary btn-sm" id="auLoad"><i class="bi bi-search"></i> 表示</button>`) +
-    card(`<div id="auBody"><div class="text-secondary small">「表示」を押してください</div></div>`);
-  // 店舗フィルタの選択肢
-  try {
-    const d = await api('/admin/shops');
-    const sel = document.getElementById('auShop');
-    if (sel) sel.innerHTML = '<option value="">すべて</option>' + (d.shops || []).map((s) => `<option value="${s.id}">${esc(s.shop_name)}</option>`).join('');
-  } catch {}
-  async function load() {
-    const body = document.getElementById('auBody');
-    if (!body) return;
-    const tok = navToken();
-    body.innerHTML = '<div class="text-secondary small">読み込み中...</div>';
-    const shop = document.getElementById('auShop').value;
-    const action = document.getElementById('auAction').value;
-    const qs = new URLSearchParams();
-    if (shop) qs.set('shop', shop);
-    if (action) qs.set('action', action);
-    qs.set('limit', '200');
-    try {
-      const r = await api('/admin/audit-logs?' + qs.toString());
-      if (!isAlive(tok) || !body.isConnected) return;
-      const logs = r.logs || [];
-      if (!logs.length) { body.innerHTML = '<div class="small text-secondary">該当するログはありません</div>'; return; }
-      body.innerHTML = `<div class="table-wrap"><table class="data-table"><thead><tr><th>日時</th><th>操作者</th><th>操作</th><th>対象</th><th>詳細</th></tr></thead><tbody>${logs.map((l) => `
-        <tr>
-          <td class="small">${esc((l.created_at || '').replace('T', ' '))}</td>
-          <td class="small">${esc(l.actor_name || l.actor_role || '—')}</td>
-          <td>${badge(auditActionLabel(l.action), l.action && l.action.indexOf('reject') >= 0 ? 'warning' : 'info')}</td>
-          <td class="small">${esc(l.target_type || '')}${l.target_id != null ? ' #' + l.target_id : ''}</td>
-          <td class="small text-secondary">${esc(l.detail || '')}</td>
-        </tr>`).join('')}</tbody></table></div>`;
-    } catch (e) {
-      if (!isAlive(tok) || !body.isConnected) return;
-      body.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
-    }
-  }
-  document.getElementById('auLoad')?.addEventListener('click', load);
-  load();
-};
-
-function openAdminStaffEditModal(shopId, s, onDone) {
-  const roles = [
-    { v: 'manager', label: '店舗管理者（manager）' },
-    { v: 'employee', label: '社員（employee）' },
-    { v: 'part_time', label: 'アルバイト（part_time）' },
-    { v: 'student', label: '学生アルバイト（student）' },
-  ];
-  openModal(`<i class="bi bi-pencil"></i> スタッフ編集 — ${esc(s.name)}`,
-    `<label class="form-label" for="aeName">氏名</label>
-     <input id="aeName" class="form-control mb-2" value="${esc(s.name || '')}">
-     <label class="form-label" for="aeRole">ロール</label>
-     <select id="aeRole" class="form-select mb-2">${roles.map((o) => `<option value="${o.v}" ${o.v === s.role ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>
-     <label class="form-label" for="aeWage">時給</label>
-     <input id="aeWage" type="number" class="form-control mb-2" value="${s.hourly_wage != null ? s.hourly_wage : ''}">
-     <div class="flex items-center gap-2 mb-1"><input id="aeResigned" type="checkbox" ${s.is_resigned ? 'checked' : ''}><label for="aeResigned" class="form-label mb-0">退職として扱う</label></div>
-     <div class="small text-secondary mb-2"><i class="bi bi-info-circle"></i> 学生アルバイトは月80h上限が自動適用されます。ロール変更でセッションは無効化されません（軽微編集用）。</div>
-     <div class="form-error mt-1" id="aeErr"></div>`,
-    async (w, close) => {
-      const errBox = w.querySelector('#aeErr');
-      const showErr = (m) => { if (errBox) errBox.innerHTML = m ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(m)}` : ''; };
-      showErr('');
-      const payload = {
-        name: w.querySelector('#aeName').value.trim(),
-        role: w.querySelector('#aeRole').value,
-        hourly_wage: +w.querySelector('#aeWage').value || 0,
-        is_resigned: w.querySelector('#aeResigned').checked ? 1 : 0,
-      };
-      if (!payload.name) { showErr('氏名を入力してください'); return; }
-      try {
-        await api(`/admin/shops/${shopId}/staffs/${s.id}`, { method: 'PUT', body: JSON.stringify(payload) });
-        close();
-        toast(`${payload.name} さんの情報を更新しました`, 'success');
-        onDone?.();
-      } catch (e) { showErr(e.message || '更新に失敗しました'); }
-    });
-}
-
-function openAdminRoleModal(shopId, staffId, staffName, currentRole, onDone) {
-  const opts = [
-    { v: 'manager', label: '店舗管理者（manager）— 店舗権限でログイン' },
-    { v: 'employee', label: '社員（employee）' },
-    { v: 'part_time', label: 'アルバイト（part_time）' },
-    { v: 'student', label: '学生アルバイト（student・月80h上限）' },
-  ];
-  openModal(`<i class="bi bi-shield-lock"></i> ロール変更 — ${esc(staffName)}`,
-    `<p class="small text-secondary mb-2">現在のロール: <strong>${roleLabel(currentRole)}</strong></p>
-     <label class="form-label">新しいロール</label>
-     <select id="admRoleSel" class="form-select">${opts.map((o) => `<option value="${o.v}" ${o.v === currentRole ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>
-     <div class="small text-secondary mt-2"><i class="bi bi-info-circle"></i> 変更すると、このスタッフの既存ログインセッションは無効化されます（再ログインが必要）。</div>
-     <div class="form-error mt-2" id="admRoleErr"></div>`,
-    async (w, close) => {
-      const errBox = w.querySelector('#admRoleErr');
-      const showErr = (m) => { if (errBox) errBox.innerHTML = m ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(m)}` : ''; };
-      showErr('');
-      const newRole = w.querySelector('#admRoleSel').value;
-      try {
-        await api(`/admin/shops/${shopId}/staffs/${staffId}/role`, {
-          method: 'PUT', body: JSON.stringify({ role: newRole })
-        });
-        close();
-        toast(`${staffName} さんのロールを ${roleLabel(newRole)} に変更しました`, 'success');
-        onDone?.();
-      } catch (e) { showErr(e.message || '変更に失敗しました'); }
-    });
-}
-
-function openAdminPwResetModal(shopId, staffId, staffName) {
-  openModal(`<i class="bi bi-key"></i> パスワードリセット — ${esc(staffName)}`,
-    `<p class="small text-secondary mb-2">このスタッフのパスワードを新しいものにリセットします。変更後、再ログインが必要になります。</p>
-     <label class="form-label">新しいパスワード（8文字以上・英数字）</label>
-     <input id="admPwInput" type="password" class="form-control" autocomplete="new-password">
-     <div class="pw-rules mt-2" id="admPwRules">
-       <span class="pw-rule" data-rule="len"><i class="bi bi-circle"></i>8文字以上</span>
-       <span class="pw-rule" data-rule="alpha"><i class="bi bi-circle"></i>英字を含む</span>
-       <span class="pw-rule" data-rule="digit"><i class="bi bi-circle"></i>数字を含む</span>
-     </div>
-     <div class="form-error mt-2" id="admPwErr"></div>`,
-    async (w, close) => {
-      const errBox = w.querySelector('#admPwErr');
-      const showErr = (m) => { if (errBox) errBox.innerHTML = m ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(m)}` : ''; };
-      showErr('');
-      const pw = w.querySelector('#admPwInput').value;
-      const verr = validatePassword(pw);
-      if (verr) { showErr(verr); return; }
-      try {
-        await api(`/admin/shops/${shopId}/staffs/${staffId}/password`, {
-          method: 'PUT', body: JSON.stringify({ new_password: pw })
-        });
-        close();
-        toast(`${staffName} さんのパスワードをリセットしました`, 'success');
-      } catch (e) { showErr(e.message || 'リセットに失敗しました'); }
-    });
-  // リアルタイムパスワード検証
-  setTimeout(() => {
-    const wrap = document.querySelector('.modal-overlay:last-child');
-    if (!wrap) return;
-    const pwInput = wrap.querySelector('#admPwInput');
-    const ruleEls = wrap.querySelectorAll('.pw-rule');
-    const updateRules = () => {
-      const v = pwInput.value || '';
-      const checks = { len: v.length >= 8, alpha: /[A-Za-z]/.test(v), digit: /[0-9]/.test(v) };
-      ruleEls.forEach((el) => {
-        const ok = checks[el.dataset.rule];
-        el.classList.toggle('ok', !!ok && v.length > 0);
-        el.classList.toggle('ng', !ok && v.length > 0);
-        el.querySelector('i').className = ok ? 'bi bi-check-circle-fill' : 'bi bi-x-circle-fill';
-      });
-    };
-    pwInput?.addEventListener('input', () => { updateRules(); wrap.querySelector('#admPwErr').innerHTML = ''; });
-  }, 50);
-}
-
-function openAdminAddStaffModal(shopId, onDone) {
-  openModal(`<i class="bi bi-person-plus"></i> スタッフ追加`,
-    `<p class="small text-secondary mb-2">任意のユーザーコードとロールでスタッフを作成します。</p>
-     <div class="row">
-       <div class="col-6"><label class="form-label" for="admStaffCode">ユーザーコード <span class="text-danger">*</span></label><input id="admStaffCode" class="form-control" placeholder="例: yamada"></div>
-       <div class="col-6"><label class="form-label" for="admStaffName">氏名 <span class="text-danger">*</span></label><input id="admStaffName" class="form-control"></div>
-     </div>
-     <label class="form-label mt-2">ロール</label>
-     <select id="admStaffRole" class="form-select">
-       <option value="manager">店舗管理者（manager）— 店舗権限でログイン</option>
-       <option value="employee" selected>社員（employee）</option>
-       <option value="part_time">アルバイト（part_time）</option>
-       <option value="student">学生アルバイト（student・月80h上限）</option>
-     </select>
-     <label class="form-label mt-2">パスワード（8文字以上・英数字）</label>
-     <input id="admStaffPw" type="password" class="form-control" autocomplete="new-password">
-     <div class="pw-rules mt-2" id="admStaffPwRules">
-       <span class="pw-rule" data-rule="len"><i class="bi bi-circle"></i>8文字以上</span>
-       <span class="pw-rule" data-rule="alpha"><i class="bi bi-circle"></i>英字を含む</span>
-       <span class="pw-rule" data-rule="digit"><i class="bi bi-circle"></i>数字を含む</span>
-     </div>
-     <div class="form-error mt-2" id="admStaffErr"></div>`,
-    async (w, close) => {
-      const errBox = w.querySelector('#admStaffErr');
-      const showErr = (m) => { if (errBox) errBox.innerHTML = m ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(m)}` : ''; };
-      showErr('');
-      const code = w.querySelector('#admStaffCode').value.trim();
-      const name = w.querySelector('#admStaffName').value.trim();
-      const role = w.querySelector('#admStaffRole').value;
-      const pw = w.querySelector('#admStaffPw').value;
-      if (!code) return showErr('ユーザーコードを入力してください');
-      if (!name) return showErr('氏名を入力してください');
-      const verr = validatePassword(pw);
-      if (verr) return showErr(verr);
-      try {
-        await api(`/admin/shops/${shopId}/staffs`, {
-          method: 'POST', body: JSON.stringify({ staff_code: code, name, password: pw, role })
-        });
-        close();
-        toast(`${name} さんを追加しました（${roleLabel(role)}）`, 'success');
-        onDone?.();
-      } catch (e) { showErr(e.message || '追加に失敗しました'); }
-    });
-  // リアルタイムパスワード検証
-  setTimeout(() => {
-    const wrap = document.querySelector('.modal-overlay:last-child');
-    if (!wrap) return;
-    const pwInput = wrap.querySelector('#admStaffPw');
-    const ruleEls = wrap.querySelectorAll('#admStaffPwRules .pw-rule');
-    const updateRules = () => {
-      const v = pwInput.value || '';
-      const checks = { len: v.length >= 8, alpha: /[A-Za-z]/.test(v), digit: /[0-9]/.test(v) };
-      ruleEls.forEach((el) => {
-        const ok = checks[el.dataset.rule];
-        el.classList.toggle('ok', !!ok && v.length > 0);
-        el.classList.toggle('ng', !ok && v.length > 0);
-        el.querySelector('i').className = ok ? 'bi bi-check-circle-fill' : 'bi bi-x-circle-fill';
-      });
-    };
-    pwInput?.addEventListener('input', () => { updateRules(); wrap.querySelector('#admStaffErr').innerHTML = ''; });
-  }, 50);
-}
-
-function openAdminMigrateModal(shopId, shop, onDone) {
-  openModal(`<i class="bi bi-arrow-up-circle"></i> 旧仕様から manager 昇格 — ${esc(shop.shop_name || '')}`,
-    `<p class="small text-secondary mb-2">
-       旧仕様（shops テーブルのパスワード直接利用）でログインしていた店主を、
-       新仕様の <strong>manager ロール</strong> に昇格させます。<br>
-       <strong>パスワードは旧仕様のものを引き継ぎ</strong>ます（同じPWでログイン可）。
-     </p>
-     <div class="row">
-       <div class="col-6"><label class="form-label" for="admMigrateCode">ユーザーコード <span class="text-danger">*</span></label><input id="admMigrateCode" class="form-control" placeholder="例: manager / yamada 等"></div>
-       <div class="col-6"><label class="form-label" for="admMigrateName">氏名</label><input id="admMigrateName" class="form-control" placeholder="未入力時は店舗名+店主"></div>
-     </div>
-     <div class="small text-secondary mt-2"><i class="bi bi-info-circle"></i> 任意のユーザーコードで構いません（'manager' でなくてもOK）。</div>
-     <div class="form-error mt-2" id="admMigrateErr"></div>`,
-    async (w, close) => {
-      const errBox = w.querySelector('#admMigrateErr');
-      const showErr = (m) => { if (errBox) errBox.innerHTML = m ? `<i class="bi bi-exclamation-triangle-fill"></i> ${esc(m)}` : ''; };
-      showErr('');
-      const code = w.querySelector('#admMigrateCode').value.trim();
-      const name = w.querySelector('#admMigrateName').value.trim();
-      if (!code) return showErr('ユーザーコードを入力してください');
-      try {
-        const r = await api(`/admin/shops/${shopId}/migrate-legacy-manager`, {
-          method: 'POST', body: JSON.stringify({ staff_code: code, name: name || undefined })
-        });
-        close();
-        toast(`昇格しました: ${r.staff_code}（PWは旧仕様のまま）`, 'success');
-        onDone?.();
-      } catch (e) { showErr(e.message || '昇格に失敗しました'); }
-    });
-}

@@ -547,18 +547,42 @@ class TestOpenRedirect:
 # Information Disclosure (CWE-209)
 # ============================================================
 class TestInfoDisclosure:
-    def test_500_error_does_not_leak_stacktrace(self, client):
-        """サーバエラー時のレスポンスに Python スタックトレースを含めない。"""
+    def test_500_error_does_not_leak_stacktrace(self, client, monkeypatch):
+        """サーバエラー時のレスポンスに Python スタックトレース・ソースの場所を含めない。
+
+        【旧テストが何も見ていなかったこと】（レビュー指摘）
+          1. 誘発しようとしていた `staff_id: 1` は他店舗のスタッフなので
+             _assert_staff_in_shop が先に 404 を返しており、500 ハンドラに
+             一度も到達していなかった。
+          2. 最後の assert は演算子の優先順位が
+             `(A and B) or (status == 500)` になっており、500 のときは A/B が
+             どうであろうと真になる。つまり「500 のときの中身」を見るための
+             assert が、まさに 500 のときだけ空振りしていた。
+          結果として「生エラー露出を守っているはずのテスト」が、露出を一度も
+          観測していなかった。ここでは確実に 500 ハンドラへ到達させ、
+          到達したこと自体もアサートする。
+        """
+        import db as _db
+
         shop_id = insert_shop()
         tok = make_session("shop", shop_id, shop_id)
-        # わざと不正な datetime を送信して 500 を誘発
-        r = client.post("/api/shop/shifts", json={
-            "staff_id": 1, "start_datetime": "INVALID", "end_datetime": "ALSO_INVALID",
-        }, headers=auth(tok))
+
+        # 500 を確実に誘発する（ValueError は 400 ハンドラに吸われるので使わない）。
+        # 例外メッセージにファイルパス・行番号らしき文字列を混ぜ、それが
+        # そのままクライアントに出ていかないことまで見る。
+        def boom(sql, params=()):
+            raise RuntimeError('File "/srv/app/src/app.py", line 4242, in boom')
+
+        monkeypatch.setattr(_db, "query_all", boom)
+        r = client.get("/api/shop/staffs", headers=auth(tok))
+
+        assert r.status_code == 500, (
+            f"500 ハンドラに到達していない（このテストの前提が崩れている）: {r.status_code}")
         body = r.get_data(as_text=True)
-        # スタックトレース ("Traceback (most recent call last)") が含まれないこと
-        assert "Traceback" not in body
-        assert ".py\"、" not in body and "line " not in body.lower() or r.status_code == 500
+        assert "Traceback" not in body, body
+        assert 'File "' not in body, f"ソースファイルの位置が漏れている: {body}"
+        assert "line 4242" not in body, f"行番号が漏れている: {body}"
+        assert ".py" not in body, f"ソースファイル名が漏れている: {body}"
 
     def test_dotenv_not_served(self, client):
         """.env ファイルが静的配信されないこと。"""
@@ -913,6 +937,31 @@ class TestStartupIntegrity:
     def test_ensure_db_recreates_login_attempts(self, client):
         dbmod.execute("DROP TABLE login_attempts")
         appmod.ensure_db()
+        appmod._verify_critical_tables()
+
+    # ---- Phase 2 でログイン・管理コンソールが依存するようになった列 ----
+    # マイグレーション未適用のまま起動すると、/api/health は 200 のままなのに
+    # POST /api/login（店舗管理者・スタッフ・旧店主）が
+    # 「no such column: sh.is_archived」の 500 になる。既存トークンは最大7日
+    # 有効なので、静かな障害が7日かけて全顧客に広がる。
+    # 起動時にここで落とせば「静かな全顧客障害」を「大声の起動失敗」に変えられる。
+    @pytest.mark.parametrize("table,column", [
+        ("shops", "is_archived"),            # /api/login の SELECT が参照
+        ("sessions", "acting_shop_id"),      # 代理閲覧セッションの読み書き
+        ("notifications", "batch_id"),       # 一斉通知の INSERT / 配信履歴の GROUP BY
+    ])
+    def test_verification_raises_when_phase2_column_missing(self, client, table, column):
+        """列だけが欠けた状態（マイグレーション未適用）を RENAME COLUMN で再現する。
+
+        テーブルごと落とすと FK や後続テストへの影響が大きいので、列名を変えて
+        「テーブルはあるが列が無い」状態だけを作る。
+        """
+        dbmod.execute(f"ALTER TABLE {table} RENAME COLUMN {column} TO {column}_missing")
+        try:
+            with pytest.raises(Exception):
+                appmod._verify_critical_tables()
+        finally:
+            dbmod.execute(f"ALTER TABLE {table} RENAME COLUMN {column}_missing TO {column}")
         appmod._verify_critical_tables()
 
     def test_verification_raises_when_blocked_logged_column_missing(self, client):

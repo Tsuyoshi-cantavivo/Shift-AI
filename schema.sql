@@ -19,7 +19,9 @@ CREATE TABLE IF NOT EXISTS shops (
   password_hash TEXT NOT NULL,
   is_active     INTEGER DEFAULT 1,
   settings      TEXT DEFAULT '{}',
-  created_at    TEXT DEFAULT (datetime('now'))
+  created_at    TEXT DEFAULT (datetime('now')),
+  is_archived INTEGER DEFAULT 0,
+  archived_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS staffs (
@@ -112,12 +114,13 @@ CREATE INDEX IF NOT EXISTS idx_shifts_staff ON shifts(staff_id);
 CREATE INDEX IF NOT EXISTS idx_shifts_status ON shifts(status);
 
 CREATE TABLE IF NOT EXISTS sessions (
-  token      TEXT PRIMARY KEY,
-  role       TEXT NOT NULL CHECK(role IN ('admin','shop','staff')),
-  user_id    INTEGER NOT NULL,
-  shop_id    INTEGER,
-  created_at TEXT DEFAULT (datetime('now')),
-  expires_at TEXT
+  token          TEXT PRIMARY KEY,
+  role           TEXT NOT NULL CHECK(role IN ('admin','shop','staff')),
+  user_id        INTEGER NOT NULL,
+  shop_id        INTEGER,
+  acting_shop_id INTEGER,   -- 代理閲覧中の店舗（admin セッションのみ）
+  created_at     TEXT DEFAULT (datetime('now')),
+  expires_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(role, user_id);
 
@@ -134,7 +137,12 @@ CREATE TABLE IF NOT EXISTS notifications (
   title      TEXT,
   body       TEXT,
   is_read    INTEGER DEFAULT 0,
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (datetime('now')),
+  -- 一斉通知（type='announcement'）のバッチ識別子。created_at は表示用に
+  -- バッチ内で1つの値へ揃えるため、同一秒に同一件名で2回配信すると
+  -- (created_at, title) だけでは配信履歴上で1件に潰れてしまう。
+  -- batch_id は配信ごとに secrets.token_hex() で発行し、この列で束ねる。
+  batch_id   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_notif_shop ON notifications(shop_id, is_read);
 CREATE INDEX IF NOT EXISTS idx_notif_staff ON notifications(staff_id, is_read);
@@ -247,4 +255,14 @@ CREATE TABLE IF NOT EXISTS login_attempts (
   locked_until   TEXT,
   updated_at     TEXT,
   blocked_logged INTEGER NOT NULL DEFAULT 0
+);
+
+-- -----------------------------------------------------------
+-- 16. schema_migrations: マイグレーションの適用状態（ステートメント単位）
+-- -----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  filename   TEXT NOT NULL,
+  stmt_index INTEGER NOT NULL,
+  applied_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (filename, stmt_index)
 );

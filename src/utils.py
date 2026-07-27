@@ -1,5 +1,7 @@
 """utils.py - 共通ユーティリティ（Flask版・純粋Python）。"""
 import json
+import math
+import re
 from datetime import date, datetime, timedelta, timezone
 
 _JST = timezone(timedelta(hours=9))
@@ -379,11 +381,177 @@ def validate_password(pw):
     return None
 
 
+# 店舗コード／ユーザーコード／管理者IDの最大長。
+# app.py の login() と admin_api.py の管理者作成の両方から参照する
+# （作成時にこの上限を超えて弾かないと、login() 側で必ず400になり
+# 二度とログインできない行を作ってしまうため、両者は同じ値を共有する必要がある）。
+LOGIN_CODE_MAX = 64
+
+
+def sanitize_login_code(value):
+    """ログイン系コード（店舗コード・ユーザーコード・管理者ID）を正規化する。
+
+    前後の空白除去 ＋ 改行の除去。
+
+    【なぜ改行を落とすか】
+      これらの値は監査ログの actor_name やレート制限キー、
+      system_admins.admin_id にそのまま入る。改行が生で残ると、
+      監査ログを1行1レコードとして読む運用（将来のCSV出力を含む）で
+      偽の行を差し込めてしまう。UI 側は esc() を通すので XSS にはならないが、
+      ログ偽装は残るため入口で落とす。
+
+    str() を挟むのは、JSON で文字列以外（数値・配列・オブジェクト）を送られたときに
+    .strip() が AttributeError になり、未認証クライアントに 500 が返るのを避けるため。
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    return value.replace("\r", "").replace("\n", "").strip()
+
+
 def parse_settings(s):
     try:
         return json.loads(s or "{}")
     except Exception:
         return {}
+
+
+# shops.settings のうち、意味が固定されている既知キー。
+# src/admin_api.py の PUT /api/admin/shops/<id>/settings と
+# src/app.py の PUT /api/shop/settings（店舗ユーザー向け）の両方から使う。
+SETTINGS_KEYS = frozenset({
+    "business_hours", "default_hourly_wage", "max_consecutive_days", "max_daily_hours",
+    "max_employee_daily_hours", "min_daily_hours", "night_premium_rate",
+    "period_mode", "shift_hours", "transport_per_day",
+})
+
+_SETTINGS_NUMERIC_KEYS = frozenset({
+    "default_hourly_wage", "max_consecutive_days", "max_daily_hours",
+    "max_employee_daily_hours", "min_daily_hours", "night_premium_rate",
+    "transport_per_day",
+})
+
+_SETTINGS_PERIOD_MODES = frozenset({"half", "month"})
+
+# "HH:MM-HH:MM" 形式（旧 business_hours 設定）。日またぎ営業を表すため時は0-47まで許可
+# （src/app.py の _validate_hhmm / shift_hours の扱いと同じ範囲に揃えている）。
+_BUSINESS_HOURS_RE = re.compile(
+    r"^([01]?[0-9]|[2-3][0-9]|4[0-7]):[0-5][0-9]-([01]?[0-9]|[2-3][0-9]|4[0-7]):[0-5][0-9]$")
+
+
+# "YYYY-MM-DD"。<input type="date"> の値と calc_next_period() の出力がこの形。
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def validate_numeric_field(value, label, default=None):
+    """数値であるべきフィールドを検証し、数値（int / float）にして返す。
+
+    【なぜ必要か】shops.settings と同じクラスの保存型XSSが、数値のはずの列に
+    残っていた。SQLite の INTEGER affinity は数値として解釈できない TEXT を
+    そのまま保持するため、staffs.hourly_wage に
+    `" onfocus="alert(1)" autofocus x="` を保存でき、管理コンソールの
+    スタッフ編集モーダル（無エスケープの `value="${s.hourly_wage}"`）で
+    value 属性を抜けて独立した属性としてパースされ、ハンドラが実行された。
+    店舗ユーザー → 運営管理者への権限昇格になる。
+    描画側の esc() だけでなく、そもそも数値以外を保存させない「入口」も塞ぐ。
+
+    None / "" は「未指定」として default を返す（既存の
+    `body.get("hourly_wage") or 1000` 形式のフォールバックを保つため）。
+    数値として読める文字列は数値に変換して受け入れる
+    （<input type="number"> の値を文字列のまま送るクライアントを壊さない）。
+    bool は Python では int のサブクラスなので明示的に弾く
+    （validate_known_settings_values と同じ扱い）。
+    """
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        raise ValueError(f"{label} は数値で指定してください")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{label} は数値で指定してください")
+        return value
+    if isinstance(value, str):
+        try:
+            # int を先に試す（"1100" を 1100.0 にせず整数のまま保つ）
+            return int(value.strip())
+        except ValueError:
+            pass
+        try:
+            n = float(value.strip())
+        except ValueError:
+            raise ValueError(f"{label} は数値で指定してください")
+        if not math.isfinite(n):
+            raise ValueError(f"{label} は数値で指定してください")
+        return n
+    raise ValueError(f"{label} は数値で指定してください")
+
+
+def validate_date_field(value, label, default=None):
+    """日付であるべきフィールドを "YYYY-MM-DD" として検証して返す。
+
+    数値フィールドと同じ理由（保存型XSS の入口封じ）。
+    shift_request_periods の start_date / end_date / deadline は
+    public/app.js の複数箇所で無エスケープの `value="${p.start_date}"` として
+    描画されるため、日付以外を保存させない。
+    形だけでなく実在する日付であることまで見る（"2026-02-30" を弾く）。
+    """
+    if value is None or value == "":
+        return default
+    if not isinstance(value, str) or not _DATE_RE.match(value):
+        raise ValueError(f"{label} は YYYY-MM-DD 形式で指定してください")
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"{label} に存在しない日付が指定されています")
+    return value
+
+
+def validate_known_settings_values(patch):
+    """shops.settings に部分更新でマージする patch のうち、既知キー（SETTINGS_KEYS）
+    だけを値の型で検証する。不正なら ValueError を送出する
+    （呼び出し元 Flask アプリの @app.errorhandler(ValueError) が 400 に変換する）。
+
+    【なぜ必要か】管理コンソールの店舗詳細「設定」タブ（public/admin.js）は
+    shop.settings を JSON.parse() してから 6つの数値項目を
+    `<input value="${num(s.xxx)}">` として描画していた。数値キーに文字列
+    （例: `1000"><img src=x onerror=...>`）が保存されると、無エスケープの
+    まま value 属性を抜けてタグを注入できる、保存型XSSが実際に成立した
+    （管理者が設定タブを開くだけでJSが実行される・クリック不要）。
+    描画側で esc() するだけでなく、そもそも数値以外を保存させない「入口」の
+    防御も入れることで、他の描画箇所（例: public/app.js の
+    深夜割増率表示・renderShopTab の value 属性、いずれも無エスケープ）が
+    将来同じ穴を持っていても、型で事前に塞がれる。
+
+    【未知キーは検証しない】PUT /api/shop/settings は既知キー以外の任意キーの
+    保存を許容する既存契約がある
+    （tests/test_admin_staff_apis.py::test_update_shop_name が
+    `{"new_key": 1}` の保存を 200 で期待している）。ここで弾くと後方互換が
+    壊れるため、既知キーだけを対象にする。
+    """
+    if not isinstance(patch, dict):
+        raise ValueError("settings はオブジェクトで指定してください")
+    for key, value in patch.items():
+        if key not in SETTINGS_KEYS:
+            continue
+        if key in _SETTINGS_NUMERIC_KEYS:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{key} は数値で指定してください")
+        elif key == "period_mode":
+            if value not in _SETTINGS_PERIOD_MODES:
+                raise ValueError("period_mode は half か month で指定してください")
+        elif key == "business_hours":
+            if not isinstance(value, str) or not _BUSINESS_HOURS_RE.match(value):
+                raise ValueError("business_hours の形式が不正です（例: 09:00-22:00）")
+        elif key == "shift_hours":
+            if not isinstance(value, dict):
+                raise ValueError("shift_hours はオブジェクトで指定してください")
+            # 内部の葉の値（時刻文字列等）は GET/PUT /api/shop/shift-hours 側の
+            # _normalize_shift_hours() が読み出し時に必ず正規化するため、
+            # ここでは dict であることだけを保証すれば描画時の安全は保たれる。
+    return patch
 
 
 def build_ics(shifts, staff_name, shop_name="ShiftAI"):

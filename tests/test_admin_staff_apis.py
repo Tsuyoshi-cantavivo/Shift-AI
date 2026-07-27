@@ -126,13 +126,12 @@ class TestAdminApis:
         assert r.get_json()["total_hours"] >= 8.0
 
     def test_admin_notifications_empty(self, client):
-        """管理者向け通知APIは空リストを返す（仕様）。"""
+        """一斉通知を配信していない状態では配信履歴が空（Phase 2 で空スタブから置換）。"""
         admin_id = insert_admin()
         tok = make_session("admin", admin_id)
         r = client.get("/api/admin/notifications", headers=auth(tok))
         assert r.status_code == 200
-        assert r.get_json()["notifications"] == []
-        assert r.get_json()["unread"] == 0
+        assert r.get_json()["announcements"] == []
 
     def test_admin_read_all_notifications(self, client):
         admin_id = insert_admin()

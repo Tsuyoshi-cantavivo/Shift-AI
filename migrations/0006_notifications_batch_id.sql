@@ -1,0 +1,14 @@
+-- 0006_notifications_batch_id.sql
+-- 一斉通知（Task 14: 全店舗一斉通知）の配信履歴を正しく分割するためのバッチ識別子。
+--
+-- 背景:
+--   配信履歴は notifications.type='announcement' の行を (created_at, title) で
+--   束ねて1配信としていたが、created_at は秒精度でバッチ内は1つの値に揃えて
+--   いるため、同一秒に同一件名で2回配信すると履歴上で1件に統合されてしまう
+--   （独立した2回の配信が区別できない）。batch_id 列を追加し、配信ごとに
+--   ランダムなトークンを発行してこの列で束ねることで解決する。
+--
+-- 適用方法:
+--   ローカル: python src/migrator.py apply
+--   本番D1  : 管理者画面「システム」→ マイグレーション → 未適用を適用
+ALTER TABLE notifications ADD COLUMN batch_id TEXT;

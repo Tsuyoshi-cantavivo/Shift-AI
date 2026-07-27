@@ -22,6 +22,7 @@ import pytest
 
 import db as dbmod
 import app as appmod  # noqa: E402  (インポート時に ensure_db -> init_schema が走る)
+import migrator  # noqa: E402  (schema_migrations のDDLを migrator 側と一元化するため)
 
 SCHEMA_PATH = os.path.join(_BASE, "schema.sql")
 
@@ -30,6 +31,8 @@ _TABLES = [
     "audit_logs",
     # 消し忘れると、あるテストのログイン失敗が次のテストにロック状態として漏れる
     "login_attempts",
+    # migrator.py が遅延作成するテーブル。消し忘れると適用状態がテスト間で漏れる
+    "schema_migrations",
     "change_requests",
     "shifts",
     "wish_history",
@@ -52,6 +55,13 @@ def db_reset():
     dbmod.init_schema(SCHEMA_PATH)
     conn = dbmod.get_conn()
     try:
+        # schema_migrations は schema.sql ではなく migrator.py が遅延作成する
+        # テーブルなので、DELETE 対象にする前に無害に存在保証しておく
+        # （migrator が一度も呼ばれていないテストで DELETE が「no such table」で
+        # 落ちるのを防ぐ）。DDL を migrator.py とここの2箇所に複製すると
+        # 将来どちらかだけ変更されてズレるため、migrator._ensure_table() を
+        # 呼んで定義を一元化する。
+        migrator._ensure_table()
         for t in _TABLES:
             conn.execute(f"DELETE FROM {t}")
         # AUTOINCREMENT の連番をリセット（表が存在しなければ無害）
