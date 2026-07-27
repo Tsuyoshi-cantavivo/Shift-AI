@@ -419,6 +419,17 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
         # 店舗コードの手入力一致を求めるのは、隣の行を押し間違えても消えないようにするため。
         if (body.get("confirm_code") or "").strip() != shop["shop_code"]:
             raise ValueError("店舗コードが一致しません")
+        # エクスポート済みを必須にする（is_archived / confirm_code に続く3つ目の条件）。
+        # このルールは public/admin.js のボタン disabled にしか無く、直接APIを叩けば
+        # 控えを1度も取らずに完全削除が通っていた。ページをリロードしてタブを開き直す
+        # だけでも画面の状態は初期化されるため、UI 側だけでは守れない。
+        # 対象店舗の shop.export 監査が1件でもあることを条件にする（他店舗の
+        # エクスポートで解錠されないよう target_id と shop_id の両方で絞る）。
+        if query_one("SELECT id FROM audit_logs WHERE action='shop.export' "
+                     "AND target_id=? AND shop_id=? LIMIT 1", (sid, sid)) is None:
+            raise ValueError(
+                "先にエクスポートしてください（取り返しのつかない操作のため、"
+                "控えの無い削除は許可していません）")
 
         code = shop["shop_code"]
         # 破壊を始める「前」に監査へ1行残す。execute() は毎回 commit するため
@@ -463,6 +474,16 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
             clause, n = _scope_clause(table)
             _run(table, f"DELETE FROM {table} WHERE {clause}", (sid,) * n)
         _run("staffs", "DELETE FROM staffs WHERE shop_id=?", (sid,))
+        # staffs_migrate_backup は旧 POST /api/admin/db/migrate が
+        # `CREATE TABLE ... AS SELECT * FROM staffs` で作っていた全テナントの控え。
+        # エンドポイント自体は削除済み（孤児かつ本番で破壊的だったため）だが、
+        # 既に作られた表は自然には消えず、password_hash と氏名を保持し続ける。
+        # 削除対象一覧に入っていなかったため、「完全削除」後も削除テナントの
+        # 認証情報と PII が残っていた。表が存在するDBでだけ該当店舗の行を消す。
+        if query_one("SELECT name FROM sqlite_master WHERE type='table' "
+                     "AND name='staffs_migrate_backup'"):
+            _run("staffs_migrate_backup",
+                 "DELETE FROM staffs_migrate_backup WHERE shop_id=?", (sid,))
         # 物理削除であること（論理削除にしないこと）が重要。require_auth の代理閲覧経路は
         # 「SELECT * FROM shops WHERE id=? が行を引けない」ことを条件に 409 を返して
         # 運営者を脱出させている。論理削除にするとその防御が効かず、削除済みの店舗を

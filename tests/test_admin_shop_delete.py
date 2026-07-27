@@ -61,6 +61,16 @@ def _shop_with_data():
     return sid
 
 
+def _export(client, t, sid):
+    """完全削除の前提条件（サーバ側で強制しているエクスポート）を満たす。
+
+    削除は is_archived / confirm_code / エクスポート済み の3条件を要求する。
+    削除そのものを検証したいテストは、この3つ目を満たしてから DELETE を叩く。
+    """
+    r = client.get(f"/api/admin/shops/{sid}/export", headers=_hdr(t))
+    assert r.status_code == 200, r.get_data(as_text=True)
+
+
 def _staff_id(sid, code="p1"):
     return dbmod.query_one("SELECT id FROM staffs WHERE shop_id=? AND staff_code=?",
                            (sid, code))["id"]
@@ -166,6 +176,7 @@ class TestDelete:
         t = _admin_token(client)
         sid = _shop_with_data()
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
         r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
                           json={"confirm_code": "WRONG"})
         assert r.status_code == 400
@@ -179,6 +190,7 @@ class TestDelete:
         t = _admin_token(client)
         sid = _shop_with_data()
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
         for bad in ("shop1", "Shop1", "SHOP", "SHOP12", "HOP1", "SHOP 1", ""):
             r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
                               json={"confirm_code": bad})
@@ -193,6 +205,7 @@ class TestDelete:
         t = _admin_token(client)
         sid = _shop_with_data()
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
         r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
                           json={"confirm_code": "SHOP1"})
         assert r.status_code == 200, r.get_data(as_text=True)
@@ -210,6 +223,7 @@ class TestDelete:
         t = _admin_token(client)
         sid = _shop_with_data()
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
         before = dbmod.query_all("SELECT id, action FROM audit_logs ORDER BY id")
         assert any(r["action"] == "shop.archive" for r in before), before
 
@@ -229,6 +243,7 @@ class TestDelete:
         t = _admin_token(client)
         sid = _shop_with_data()
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
         r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
                           json={"confirm_code": "SHOP1"})
         assert r.get_json()["counts"]["staffs"] == 2
@@ -242,6 +257,7 @@ class TestDelete:
         other = insert_shop("SHOP2", name="店2")
         insert_staff(other, "p9", "別店の人")
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
         client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t), json={"confirm_code": "SHOP1"})
         assert dbmod.query_one("SELECT id FROM shops WHERE id=?", (other,)) is not None
         assert dbmod.query_one("SELECT id FROM staffs WHERE shop_id=?", (other,)) is not None
@@ -251,6 +267,7 @@ class TestDelete:
         t = _admin_token(client)
         sid = _shop_with_data()
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
         assert client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
                              json={"confirm_code": "SHOP1"}).status_code == 200
         # 店舗が消えたので2回目は404
@@ -268,6 +285,7 @@ class TestDelete:
         t = _admin_token(client)
         sid = _shop_with_data()
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
         dbmod.execute("DELETE FROM fixed_shifts WHERE staff_id IN "
                       "(SELECT id FROM staffs WHERE shop_id=?)", (sid,))
         for table in ("sessions", "notifications", "change_requests", "wish_history", "shifts"):
@@ -296,6 +314,7 @@ class TestDelete:
         _insert_orphan_rows(staff)
 
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
         r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
                           json={"confirm_code": "SHOP1"})
         assert r.status_code == 200, r.get_data(as_text=True)
@@ -320,6 +339,7 @@ class TestDeleteAudit:
         t = _admin_token(client)
         sid = _shop_with_data()
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
 
         real = admin_api.execute
 
@@ -351,6 +371,7 @@ class TestDeleteAudit:
         t = _admin_token(client)
         sid = _shop_with_data()
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
 
         def boom(table, row):
             raise RuntimeError("audit down")
@@ -377,6 +398,7 @@ class TestDeleteAudit:
         t = _admin_token(client)
         sid = _shop_with_data()
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
 
         # 1回目: 監査は書けるが DELETE が落ちる
         real = admin_api.execute
@@ -454,6 +476,7 @@ class TestDeleteTenantIsolation:
         sid = _shop_with_data()
         other, staff = self._other_shop_with_every_table()
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
         r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
                           json={"confirm_code": "SHOP1"})
         assert r.status_code == 200, r.get_data(as_text=True)
@@ -483,6 +506,7 @@ class TestDeleteDuringImpersonation:
         assert client.get("/api/shop/staffs", headers=_hdr(t)).status_code == 200
 
         client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        _export(client, t, sid)
         assert client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
                              json={"confirm_code": "SHOP1"}).status_code == 200
 
@@ -491,3 +515,123 @@ class TestDeleteDuringImpersonation:
         # 管理者に戻る導線（/api/admin/*）は生きていること
         assert client.delete("/api/admin/impersonate", headers=_hdr(t)).status_code == 200
         assert client.get("/api/shop/staffs", headers=_hdr(t)).status_code == 403
+
+
+# ============================================================
+# I-2: エクスポート必須をサーバ側で強制する
+# ============================================================
+class TestDeleteRequiresExport:
+    """「エクスポートしてからでないと削除できない」をサーバ側の前提条件にする。
+
+    このルールは public/admin.js の delBtn.disabled と onclick ガードにしか無く、
+    admin_shop_delete は audit_logs の shop.export を見ていなかった。実測で
+    エクスポート監査0件でも直接APIを叩くと200で完全削除が通り、ページを
+    リロードしてタブを開き直すだけでも（画面の状態が初期化され）同じ状態になり得た。
+    is_archived・confirm_code に続く3つ目の条件として、サーバ側で強制する。
+    """
+
+    def test_delete_without_export_is_rejected(self, client):
+        t = _admin_token(client)
+        sid = _shop_with_data()
+        client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
+                          json={"confirm_code": "SHOP1"})
+        assert r.status_code == 400, "エクスポート無しで完全削除が通ってしまう"
+        assert dbmod.query_one("SELECT id FROM shops WHERE id=?", (sid,)) is not None
+        assert dbmod.query_one("SELECT id FROM staffs WHERE shop_id=?", (sid,)) is not None
+
+    def test_delete_after_export_succeeds(self, client):
+        t = _admin_token(client)
+        sid = _shop_with_data()
+        client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        assert client.get(f"/api/admin/shops/{sid}/export",
+                          headers=_hdr(t)).status_code == 200
+        r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
+                          json={"confirm_code": "SHOP1"})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert dbmod.query_one("SELECT id FROM shops WHERE id=?", (sid,)) is None
+
+    def test_export_of_another_shop_does_not_unlock_delete(self, client):
+        """別の店舗をエクスポートしても、対象店舗の削除は解錠されないこと。"""
+        t = _admin_token(client)
+        sid = _shop_with_data()
+        other = insert_shop("SHOP2", "pw12345678", name="店2")
+        client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        assert client.get(f"/api/admin/shops/{other}/export",
+                          headers=_hdr(t)).status_code == 200
+        r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
+                          json={"confirm_code": "SHOP1"})
+        assert r.status_code == 400, "他店舗のエクスポートで削除が解錠されている"
+        assert dbmod.query_one("SELECT id FROM shops WHERE id=?", (sid,)) is not None
+
+    def test_error_message_tells_what_to_do(self, client):
+        t = _admin_token(client)
+        sid = _shop_with_data()
+        client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
+                          json={"confirm_code": "SHOP1"})
+        assert "エクスポート" in r.get_json()["error"], r.get_json()
+
+
+# ============================================================
+# I-3: staffs_migrate_backup に削除テナントの PII が残る
+# ============================================================
+def _make_migrate_backup():
+    """旧 admin_db_migrate が作っていたバックアップ表を再現する。
+
+    エンドポイント自体は削除済み（I-8）だが、既に本番/既存DBに残っている表は
+    自然には消えないため、完全削除の対象に含める必要がある。
+    """
+    dbmod.execute("DROP TABLE IF EXISTS staffs_migrate_backup")
+    dbmod.execute("CREATE TABLE staffs_migrate_backup AS SELECT * FROM staffs")
+
+
+class TestDeleteRemovesStaffsMigrateBackup:
+    def test_backup_rows_of_deleted_shop_are_removed(self, client):
+        """完全削除後に、削除テナントの password_hash と PII が残らないこと。"""
+        t = _admin_token(client)
+        sid = _shop_with_data()
+        _make_migrate_backup()
+        try:
+            assert dbmod.query_all(
+                "SELECT id FROM staffs_migrate_backup WHERE shop_id=?", (sid,))
+            client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+            client.get(f"/api/admin/shops/{sid}/export", headers=_hdr(t))
+            r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
+                              json={"confirm_code": "SHOP1"})
+            assert r.status_code == 200, r.get_data(as_text=True)
+            left = dbmod.query_all(
+                "SELECT id FROM staffs_migrate_backup WHERE shop_id=?", (sid,))
+            assert left == [], "完全削除後もバックアップ表にPII/パスワードハッシュが残っている"
+        finally:
+            dbmod.execute("DROP TABLE IF EXISTS staffs_migrate_backup")
+
+    def test_other_shops_backup_rows_are_kept(self, client):
+        """他テナントの控えまで巻き添えで消さないこと。"""
+        t = _admin_token(client)
+        sid = _shop_with_data()
+        other = insert_shop("SHOP2", "pw12345678", name="店2")
+        insert_staff(other, "p9", "別店の人")
+        _make_migrate_backup()
+        try:
+            client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+            client.get(f"/api/admin/shops/{sid}/export", headers=_hdr(t))
+            client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
+                          json={"confirm_code": "SHOP1"})
+            assert dbmod.query_all(
+                "SELECT id FROM staffs_migrate_backup WHERE shop_id=?", (other,)), \
+                "他テナントの控えまで消えている"
+        finally:
+            dbmod.execute("DROP TABLE IF EXISTS staffs_migrate_backup")
+
+    def test_delete_works_when_backup_table_is_absent(self, client):
+        """バックアップ表が存在しないDB（新規環境）でも削除が完走すること。"""
+        dbmod.execute("DROP TABLE IF EXISTS staffs_migrate_backup")
+        t = _admin_token(client)
+        sid = _shop_with_data()
+        client.post(f"/api/admin/shops/{sid}/archive", headers=_hdr(t))
+        client.get(f"/api/admin/shops/{sid}/export", headers=_hdr(t))
+        r = client.delete(f"/api/admin/shops/{sid}", headers=_hdr(t),
+                          json={"confirm_code": "SHOP1"})
+        assert r.status_code == 200, r.get_data(as_text=True)
+        assert dbmod.query_one("SELECT id FROM shops WHERE id=?", (sid,)) is None
