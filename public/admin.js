@@ -21,10 +21,57 @@
    なお NAV_DEFS（app.js 側）は全ロール共通の定義であり、admin.js より先に
    評価される必要があるため、ここには移設していない。 */
 
-SCREENS.adminHome = function (el) {
-  el.innerHTML = pageHead('システム管理者', 'bi-shield-lock', currentUser.name) +
-    card(`<button class="btn btn-primary btn-lg w-full" id="goShops"><i class="bi bi-shop"></i> 店舗一覧へ</button>`);
-  document.getElementById('goShops')?.addEventListener('click', () => navigateTo('adminShops'));
+// 要対応の種別 → 日本語ラベル。badge() の見た目はすべて 'warning'（要確認の意味）に統一。
+const ATTENTION_LABELS = {
+  deadline_passed: '締切超過・未確定',
+  no_manager: '店舗管理者が不在',
+  stale_login: '長期未ログイン',
+  pending_migration: '未適用のマイグレーション',
+};
+
+SCREENS.adminHome = async function (el) {
+  const tok = navToken();
+  el.innerHTML = pageHead('ダッシュボード', 'bi-speedometer2') +
+    '<div id="dashKpi" class="row mb-3"></div><div id="dashAttention"></div><div id="dashAudit"></div>';
+  const d = await api('/admin/dashboard');
+  if (!isAlive(tok)) return;
+  const kpiEl = document.getElementById('dashKpi');
+  if (!kpiEl) return;
+  const k = d.kpi;
+  kpiEl.innerHTML =
+    `<div class="col-6 col-lg-3">${kpiCard('bi-shop', '稼働店舗', k.shops_active,
+       `停止${k.shops_inactive} / アーカイブ${k.shops_archived}`, 'indigo')}</div>
+     <div class="col-6 col-lg-3">${kpiCard('bi-people', '在籍スタッフ', k.staffs_total, '全店合計', 'indigo')}</div>
+     <div class="col-6 col-lg-3">${kpiCard('bi-calendar-check', '今月の確定シフト', k.confirmed_this_month, '件', 'green')}</div>
+     <div class="col-6 col-lg-3">${kpiCard('bi-exclamation-triangle', '要対応', k.attention_count,
+       k.attention_count ? '確認してください' : '問題ありません',
+       k.attention_count ? 'red' : 'green')}</div>`;
+
+  document.getElementById('dashAttention').innerHTML =
+    card(sectionTitle('bi-exclamation-triangle', '要対応') +
+      (d.attention.length ? d.attention.map((a) => `
+        <div class="list-row" ${a.shop_id ? `style="cursor:pointer" data-attshop="${a.shop_id}"` : ''}>
+          <div>${badge(ATTENTION_LABELS[a.kind] || a.kind, 'warning')}
+            <strong class="ms-2">${esc(a.shop_name || '—')}</strong>
+            <div class="small text-secondary">${esc(a.detail)}</div></div>
+          ${a.shop_id ? '<i class="bi bi-chevron-right text-secondary"></i>' : ''}
+        </div>`).join('') : emptyState('bi-check-circle', '対応が必要な項目はありません')));
+  document.querySelectorAll('[data-attshop]').forEach((b) => b?.addEventListener('click', () => {
+    window._adminShopId = +b.dataset.attshop;
+    navigateTo('adminShopDetail');
+  }));
+
+  document.getElementById('dashAudit').innerHTML =
+    card(sectionTitle('bi-clock-history', '最近の操作',
+      '<button class="btn btn-sm btn-light" id="toAuditBtn">監査ログへ</button>') +
+      (d.recent_audit.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>日時</th><th>操作者</th><th>操作</th><th>詳細</th></tr></thead><tbody>` +
+        d.recent_audit.map((l) => `<tr>
+          <td class="small">${esc((l.created_at || '').replace('T', ' '))}</td>
+          <td class="small">${esc(l.actor_name || l.actor_role || '—')}</td>
+          <td>${badge(auditActionLabel(l.action), 'info')}</td>
+          <td class="small">${esc(l.detail || '')}</td></tr>`).join('') +
+        '</tbody></table></div>' : emptyState('bi-clock-history', '操作履歴がありません')));
+  document.getElementById('toAuditBtn')?.addEventListener('click', () => navigateTo('adminAudit'));
 };
 
 // アーカイブ済み店舗は既定で一覧から隠す（運営が普段見るのは稼働中の店舗だけのため）。

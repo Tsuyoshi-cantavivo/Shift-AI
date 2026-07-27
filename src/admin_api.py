@@ -21,6 +21,7 @@ from utils import (calc_next_period, jst_now, parse_settings, validate_password,
 import json
 import re
 import migrator
+from datetime import datetime
 
 
 def db_module_get_conn():
@@ -142,6 +143,103 @@ def _restore_staffs_table_internal(log):
 
 def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
     """/api/admin/* の全ルートを app に登録する。"""
+
+    @app.get("/api/admin/dashboard")
+    def admin_dashboard():
+        """全社ダッシュボード。KPI・要対応リスト・直近の監査ログをまとめて返す。
+
+        店舗数だけループして店舗ごとにクエリを投げる素朴な実装。本番は D1
+        （1文ごとにHTTP往復）のため店舗数が増えるとレイテンシが線形に増える点は
+        既知の懸念（現状は2店舗のみで実用上問題ない）。将来的に件数が増えたら
+        集計クエリへの書き換えを検討する。
+        """
+        require_auth(["admin"])
+        now = jst_now()
+        today = now.strftime("%Y-%m-%d")
+        month_start = now.strftime("%Y-%m-01")
+
+        shops = query_all("SELECT id, shop_name, shop_code, is_active, "
+                          "COALESCE(is_archived,0) AS is_archived FROM shops")
+        active = [s for s in shops if not s["is_archived"] and s["is_active"]]
+        inactive = [s for s in shops if not s["is_archived"] and not s["is_active"]]
+        archived = [s for s in shops if s["is_archived"]]
+        live_ids = {s["id"] for s in shops if not s["is_archived"]}
+
+        staffs_total = query_one(
+            "SELECT COUNT(*) AS c FROM staffs WHERE is_resigned=0")["c"]
+        confirmed = query_one(
+            "SELECT COUNT(*) AS c FROM shifts WHERE status='confirmed' AND start_datetime>=?",
+            (month_start + "T00:00:00",))["c"]
+
+        attention = []
+
+        # 1. 締切を過ぎているのにシフトが未確定の店舗
+        rows = query_all(
+            "SELECT p.shop_id, p.start_date, p.end_date, p.deadline "
+            "FROM shift_request_periods p WHERE p.is_active=1 AND p.deadline < ?", (today,))
+        by_id = {s["id"]: s for s in shops}
+        for p in rows:
+            if p["shop_id"] not in live_ids:
+                continue
+            has = query_one(
+                "SELECT 1 AS x FROM shifts WHERE shop_id=? AND status='confirmed' "
+                "AND start_datetime>=? AND start_datetime<=? LIMIT 1",
+                (p["shop_id"], p["start_date"] + "T00:00:00", p["end_date"] + "T23:59:59"))
+            if not has:
+                shop = by_id.get(p["shop_id"], {})
+                attention.append({"kind": "deadline_passed", "shop_id": p["shop_id"],
+                                  "shop_name": shop.get("shop_name"),
+                                  "detail": f"締切 {p['deadline']} を過ぎていますが未確定です"})
+
+        # 2. manager が1人もいない店舗（＝誰もログインできない）
+        for s in shops:
+            if s["is_archived"]:
+                continue
+            has_mgr = query_one(
+                "SELECT 1 AS x FROM staffs WHERE shop_id=? AND role='manager' AND is_resigned=0 LIMIT 1",
+                (s["id"],))
+            if not has_mgr:
+                attention.append({"kind": "no_manager", "shop_id": s["id"],
+                                  "shop_name": s["shop_name"],
+                                  "detail": "店舗管理者がいないため誰もログインできません"})
+
+        # 3. 30日以上どのユーザーもログインしていない店舗
+        for s in shops:
+            if s["is_archived"]:
+                continue
+            last = query_one(
+                "SELECT MAX(created_at) AS last FROM audit_logs "
+                "WHERE shop_id=? AND action='auth.login'", (s["id"],))
+            last_at = (last or {}).get("last")
+            if not last_at:
+                continue  # ログイン記録が一度も無い場合は判定しない（導入直後の誤検知を避ける）
+            try:
+                days = (now - datetime.strptime(last_at, "%Y-%m-%d %H:%M:%S")).days
+            except (ValueError, TypeError):
+                continue
+            if days >= 30:
+                attention.append({"kind": "stale_login", "shop_id": s["id"],
+                                  "shop_name": s["shop_name"],
+                                  "detail": f"{days}日間ログインがありません"})
+
+        # 4. 未適用のマイグレーション
+        pending = [m for m in migrator.status() if not m["applied"]]
+        if pending:
+            attention.append({"kind": "pending_migration", "shop_id": None, "shop_name": None,
+                              "detail": f"未適用のマイグレーションが {len(pending)} 件あります"})
+
+        recent = query_all(
+            "SELECT created_at, actor_role, actor_name, action, detail FROM audit_logs "
+            "ORDER BY id DESC LIMIT 10")
+
+        return jsonify({
+            "kpi": {"shops_total": len(shops), "shops_active": len(active),
+                    "shops_inactive": len(inactive), "shops_archived": len(archived),
+                    "staffs_total": staffs_total, "confirmed_this_month": confirmed,
+                    "attention_count": len(attention)},
+            "attention": attention,
+            "recent_audit": recent,
+        })
 
     @app.get("/api/admin/shops")
     def admin_shops():
