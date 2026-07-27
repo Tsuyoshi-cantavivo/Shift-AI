@@ -209,6 +209,11 @@ const AUDIT_ACTION_LABELS = {
   'shop.update': '店舗更新',
   'shop.archive': '店舗アーカイブ',
   'shop.unarchive': '店舗復元',
+  'shop.export': '店舗エクスポート',
+  // 最も重い操作なので絞り込めるようにする。開始と完了で2行出るのは意図的で、
+  // 完了が無い＝途中で失敗した、が監査ログだけで判別できる。
+  'shop.delete': '店舗完全削除（開始）',
+  'shop.delete_done': '店舗完全削除（完了）',
   'auth.login': 'ログイン',
   'auth.login_failed': 'ログイン失敗',
   'auth.login_blocked': 'ログインブロック',

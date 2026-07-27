@@ -18,6 +18,7 @@ from auth import hash_password, verify_password, strip_password
 from utils import (calc_next_period, jst_now, parse_settings, validate_password,
                     sanitize_login_code, LOGIN_CODE_MAX)
 import json
+import re
 import migrator
 
 
@@ -314,6 +315,23 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         "shop_holidays",
     ]
 
+    # staff_id 列を持つテーブル（schema.sql で全数確認）。shop_id だけで絞ると
+    # 孤児行（shop_id が NULL や不整合で staff_id だけが対象店舗を指す行）を消し残す。
+    # shifts / change_requests / wish_history は staffs への FK を持つため、消し残すと
+    # 直後の DELETE FROM staffs が FK 違反で落ち、「子テーブルだけ消えて店舗行は残る」
+    # 状態から API では二度と完了できなくなる（手動SQLでしか直せない）。
+    # notifications は FK が無いので削除を止めはしないが、消えたスタッフ宛の通知が
+    # 残り続けるゴミなので同じ条件で掃除する。
+    # ? は 2 個しか増えないので D1 のバインド上限(100)には触れない。
+    _STAFF_LINKED_TABLES = {"notifications", "change_requests", "wish_history", "shifts"}
+    _STAFF_SUBQUERY = "staff_id IN (SELECT id FROM staffs WHERE shop_id=?)"
+
+    def _scope_clause(table):
+        """テーブルの行を店舗に結びつける WHERE 句と、必要な ? の数を返す。"""
+        if table in _STAFF_LINKED_TABLES:
+            return f"(shop_id=? OR {_STAFF_SUBQUERY})", 2
+        return "shop_id=?", 1
+
     def _collect_shop_data(sid):
         """店舗に属する全行を dict で集める。password_hash は含めない。"""
         shop = query_one("SELECT * FROM shops WHERE id=?", (sid,))
@@ -325,11 +343,23 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         for table in _SHOP_SCOPED_TABLES:
             if table == "sessions":
                 continue  # セッションは機微情報で復元価値も無い
-            data[table] = query_all(f"SELECT * FROM {table} WHERE shop_id=?", (sid,))
+            # 削除と同じ条件で引く。ここだけ shop_id で絞ると、削除される孤児行が
+            # バックアップに入らない（消える行はすべて控えに残す必要がある）。
+            clause, n = _scope_clause(table)
+            data[table] = query_all(f"SELECT * FROM {table} WHERE {clause}", (sid,) * n)
         data["fixed_shifts"] = query_all(
             "SELECT fs.* FROM fixed_shifts fs JOIN staffs s ON fs.staff_id=s.id WHERE s.shop_id=?",
             (sid,))
         return data
+
+    def _safe_filename_part(code, sid):
+        """Content-Disposition の filename に埋め込める形に落とす。
+
+        shop_code は運営が自由入力できるため、" が入るとヘッダのクォートが壊れ、
+        日本語が入ると環境によってファイル名が化ける。英数字と - _ 以外は _ にする。
+        """
+        safe = re.sub(r"[^A-Za-z0-9_-]", "_", code or "")
+        return safe or str(sid)
 
     @app.get("/api/admin/shops/<int:sid>/export")
     def admin_shop_export(sid):
@@ -339,7 +369,7 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         audit("shop.export", target_type="shop", target_id=sid, shop_id=sid,
               detail=f"shop_code={code}")
         body = json.dumps(data, ensure_ascii=False, indent=2)
-        filename = f"shop-{code}-{jst_now().strftime('%Y%m%d')}.json"
+        filename = f"shop-{_safe_filename_part(code, sid)}-{jst_now().strftime('%Y%m%d')}.json"
         resp = Response(body, content_type="application/json; charset=utf-8")
         resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
         return resp
@@ -359,35 +389,56 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         if (body.get("confirm_code") or "").strip() != shop["shop_code"]:
             raise ValueError("店舗コードが一致しません")
 
-        # NOTE: execute() は毎回 commit するためトランザクションを張れない
-        # （src/db.py の execute）。本番の D1 は1文ごとにネットワーク往復するので
-        # 途中で失敗し得る。どこまで消したかを返して再実行できるようにする。
-        # 既に消えたテーブルへの DELETE は0件で成功するため再実行は冪等。
+        code = shop["shop_code"]
+        # 破壊を始める「前」に監査へ1行残す。execute() は毎回 commit するため
+        # トランザクションが張れず（src/db.py の execute）、途中で失敗すると
+        # 子テーブルだけ消えた状態で終わる。完了後にしか記録しないと、その状態で
+        # 「誰がいつどの店舗を消し始めたか」がどこにも残らない。
+        # audit_logs は消さない。運営の記録であり、店舗が消えた事実こそ残す必要がある。
+        # 店舗行が消えると shop_id から店舗コードを引けなくなるため、detail に残す。
+        audit("shop.delete", target_type="shop", target_id=sid, shop_id=sid,
+              detail=f"shop_code={code} の完全削除を開始")
+        # audit() は失敗しても業務を止めない設計（src/app.py）なので、握り潰された
+        # 場合に備えて書けたことを確認する。記録が残せないなら削除しない
+        # ＝「記録の無い破壊」を作らない。
+        if query_one("SELECT id FROM audit_logs WHERE action='shop.delete' AND target_id=? "
+                     "ORDER BY id DESC LIMIT 1", (sid,)) is None:
+            abort(500, description="監査ログを記録できなかったため削除を中止しました")
+
+        # NOTE: 上記のとおりトランザクションが張れず、本番の D1 は1文ごとに
+        # ネットワーク往復するので途中で失敗し得る。どこまで消したかを返して
+        # 再実行できるようにする。既に消えたテーブルへの DELETE は0件で成功するため
+        # 再実行は冪等。
         #
         # 全ての DELETE を shop_id（fixed_shifts は staff_id 経由）で絞る。
         # 1つでも条件が外れると無関係の顧客のデータが道連れで消える。
         deleted = []
-        # fixed_shifts は shop_id を持たないので staff_id 経由で先に消す
-        execute("DELETE FROM fixed_shifts WHERE staff_id IN (SELECT id FROM staffs WHERE shop_id=?)",
-                (sid,))
-        deleted.append("fixed_shifts")
-        for table in _SHOP_SCOPED_TABLES:
-            execute(f"DELETE FROM {table} WHERE shop_id=?", (sid,))
+        counts = {}
+
+        def _run(table, sql, params):
+            meta = execute(sql, params)
             deleted.append(table)
-        execute("DELETE FROM staffs WHERE shop_id=?", (sid,))
-        deleted.append("staffs")
+            counts[table] = meta.get("changes") or 0
+
+        # fixed_shifts は shop_id を持たないので staff_id 経由で先に消す
+        _run("fixed_shifts",
+             f"DELETE FROM fixed_shifts WHERE {_STAFF_SUBQUERY}", (sid,))
+        for table in _SHOP_SCOPED_TABLES:
+            clause, n = _scope_clause(table)
+            _run(table, f"DELETE FROM {table} WHERE {clause}", (sid,) * n)
+        _run("staffs", "DELETE FROM staffs WHERE shop_id=?", (sid,))
         # 物理削除であること（論理削除にしないこと）が重要。require_auth の代理閲覧経路は
         # 「SELECT * FROM shops WHERE id=? が行を引けない」ことを条件に 409 を返して
         # 運営者を脱出させている。論理削除にするとその防御が効かず、削除済みの店舗を
         # 代理閲覧し続けられてしまう。
-        execute("DELETE FROM shops WHERE id=?", (sid,))
-        deleted.append("shops")
+        _run("shops", "DELETE FROM shops WHERE id=?", (sid,))
 
-        # audit_logs は消さない。運営の記録であり、店舗が消えた事実こそ残す必要がある。
-        # 店舗行が消えると shop_id から店舗コードを引けなくなるため、detail に残す。
-        audit("shop.delete", target_type="shop", target_id=sid, shop_id=sid,
-              detail=f"shop_code={shop['shop_code']} を完全削除")
-        return jsonify({"ok": True, "deleted": deleted})
+        # 何件消したかを残す。店舗行が消えた後はこれが唯一の規模の証跡になる
+        # （「本当にこの店だけだったか」を後から確かめる材料）。
+        summary = ",".join(f"{t}={counts[t]}" for t in deleted)
+        audit("shop.delete_done", target_type="shop", target_id=sid, shop_id=sid,
+              detail=f"shop_code={code} の完全削除が完了 {summary}")
+        return jsonify({"ok": True, "deleted": deleted, "counts": counts})
 
 
     @app.put("/api/admin/shops/<int:sid>/settings")
