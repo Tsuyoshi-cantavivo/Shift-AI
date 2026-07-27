@@ -184,6 +184,7 @@ SCREENS.adminShopDetail = async function (el) {
       <div class="flex gap-2 flex-wrap mb-3">
         <button class="btn btn-primary btn-sm" id="addStaffBtn"><i class="bi bi-person-plus"></i> スタッフ追加</button>
         <button class="btn btn-light btn-sm" id="migrateBtn" title="旧仕様店主のPWを引き継いで manager スタッフを作成"><i class="bi bi-arrow-up-circle"></i> 旧仕様から manager 昇格</button>
+        <button class="btn btn-sm btn-light" id="impersonateBtn"><i class="bi bi-eye"></i> この店舗を代理閲覧</button>
       </div>
       <div class="row mb-3"><div class="col-5"><label class="form-label" for="dStart">開始</label><input type="date"  id="dStart" class="form-control"></div><div class="col-5"><label class="form-label" for="dEnd">終了</label><input type="date"  id="dEnd" class="form-control"></div><div class="col-2 flex items-end"><button class="btn btn-primary w-full" id="loadBtn">表示</button></div></div>
       <div id="detailBody"><div class="text-secondary small">期間を指定してください</div></div>`);
@@ -191,6 +192,22 @@ SCREENS.adminShopDetail = async function (el) {
   document.getElementById('loadBtn')?.addEventListener('click', () => loadDetail());
   document.getElementById('addStaffBtn')?.addEventListener('click', () => openAdminAddStaffModal(sid, loadDetail));
   document.getElementById('migrateBtn')?.addEventListener('click', () => openAdminMigrateModal(sid, shop, loadDetail));
+  document.getElementById('impersonateBtn')?.addEventListener('click', () =>
+    openModal('<i class="bi bi-eye"></i> 代理閲覧',
+      `<p class="mb-2">この店舗の画面を<strong>閲覧のみ</strong>の権限で開きます。</p>
+       <p class="small text-secondary mb-0">データの変更はできません。開始と終了は監査ログに記録されます。</p>`,
+      async (w, close) => {
+        try {
+          const d = await api(`/admin/impersonate/${sid}`, { method: 'POST' });
+          window._impersonating = { shop_id: d.shop.id, shop_name: d.shop.shop_name };
+          close();
+          renderImpersonationBar();
+          renderNav();
+          navigateTo('dashboard');
+          toast(`${d.shop.shop_name} を代理閲覧中です`, 'success');
+        } catch (e) { toast(e.message, 'error'); }
+      },
+      { saveLabel: '代理閲覧を開始' }));
   api(`/admin/shops/${sid}/periods/next`).then((p) => {
     const ds = document.getElementById('dStart'); const de = document.getElementById('dEnd');
     if (!ds || !de) return;  // 画面遷移済み

@@ -1489,3 +1489,19 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 /* 日付詳細モーダル: 同日に複数の読み取りが並ぶ場合の区切り */
 .wti-detail-entry + .wti-detail-entry { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--rule); }
 .wti-summary-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* 代理閲覧バー — 誤操作防止のため常時可視にする。
+   意味色ベタ地の抜き文字は #fff ではなく var(--paper) を使う規約に従う。 */
+.impersonation-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--warning);
+  color: var(--paper);
+  font-size: 0.875rem;
+}
+.impersonation-bar .btn {
+  flex-shrink: 0;
+}

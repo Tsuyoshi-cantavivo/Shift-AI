@@ -91,6 +91,9 @@ function logoutLocal() {
   appState.businessHours = null;
   appState.patterns = null;
   wishState = {};
+  // 代理閲覧の状態も前セッションのものなので消す（残すと次ログインで誤表示になる）
+  window._impersonating = null;
+  renderImpersonationBar();
   document.getElementById('loginView')?.classList.remove('d-none');
   document.getElementById('appView')?.classList.add('d-none');
 }
@@ -318,6 +321,9 @@ function showApp() {
   }
 }
 function defaultScreen() {
+  // 代理閲覧中は role が admin のままでも店舗のダッシュボードを開く
+  // （リロード直後にナビだけ店舗用でホームが管理者画面のままになるのを防ぐ）
+  if (window._impersonating) return 'dashboard';
   if (currentRole === 'shop') return 'dashboard';
   if (currentRole === 'staff') return 'staffDashboard';
   if (currentRole === 'admin') return 'adminHome';
@@ -390,10 +396,47 @@ document.getElementById('sideOverlay')?.addEventListener('click', () => {
   document.getElementById('sideOverlay')?.classList.add('d-none');
 });
 
+/* ============================================================
+   代理閲覧（管理者が店舗画面を閲覧のみで開く）
+   状態は /api/me の impersonating をそのまま window._impersonating に保持する。
+   リロードしても /api/me から復元されるため、ページ内変数だけで完結する。
+   ============================================================ */
+window._impersonating = null;
+
+function renderImpersonationBar() {
+  const existing = document.getElementById('impersonationBar');
+  if (existing) existing.remove();
+  const info = window._impersonating;
+  if (!info) return;
+  const header = document.querySelector('.app-header');
+  if (!header) return;
+  const bar = document.createElement('div');
+  bar.id = 'impersonationBar';
+  bar.className = 'impersonation-bar';
+  bar.innerHTML = `<span><i class="bi bi-eye"></i> ${esc(info.shop_name)} を代理閲覧中（閲覧のみ・変更はできません）</span>` +
+    `<button class="btn btn-sm btn-light" id="stopImpersonateBtn">管理者に戻る</button>`;
+  header.insertAdjacentElement('afterend', bar);
+  document.getElementById('stopImpersonateBtn')?.addEventListener('click', stopImpersonation);
+}
+
+async function stopImpersonation() {
+  try {
+    await api('/admin/impersonate', { method: 'DELETE' });
+    window._impersonating = null;
+    renderImpersonationBar();
+    renderNav();
+    navigateTo('adminShops');
+    toast('管理者に戻りました', 'success');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
 (async function bootstrap() {
   if (authToken) {
     try {
       const data = await api('/me'); currentUser = data.user; currentRole = data.role;
+      // リロードしても代理閲覧中であることが分かるよう、/api/me の結果から復元する
+      window._impersonating = data.impersonating || null;
+      renderImpersonationBar();
       // ★ 自動ログイン時も前セッションの状態をクリア
       window._miniChat = null;
       window._shopChat = null;
@@ -487,7 +530,9 @@ const NAV_DEFS = {
 };
 
 function renderNav() {
-  const defs = NAV_DEFS[currentRole] || [];
+  // 代理閲覧中は店舗のナビを出す。管理者に戻るのは警告バーのボタンから。
+  const navKey = window._impersonating ? 'shop' : currentRole;
+  const defs = NAV_DEFS[navKey] || [];
   // Sidebar (PC)
   const side = document.getElementById('sideNav');
   side.innerHTML = `
@@ -516,7 +561,9 @@ function renderNav() {
 
 function setActiveNav() {
   document.querySelectorAll('.side-item, .bn-item').forEach((b) => b.classList.toggle('active', b.dataset.screen === currentScreen));
-  const defs = NAV_DEFS[currentRole] || [];
+  // renderNav() と同じ navKey を使う（代理閲覧中は店舗画面のキーで画面タイトルを引く）
+  const navKey = window._impersonating ? 'shop' : currentRole;
+  const defs = NAV_DEFS[navKey] || [];
   const label = defs.find((i) => i.key === currentScreen)?.label || 'ShiftAI';
   const titleEl = document.getElementById('headerTitle');
   if (titleEl) {
