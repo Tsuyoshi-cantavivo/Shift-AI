@@ -1197,17 +1197,87 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
         return jsonify({"ok": True})
 
 
+    _ANNOUNCE_MAX_ROWS = 5000
+
+    @app.post("/api/admin/announcements")
+    def admin_announce():
+        """全店舗一斉通知。宛先は「全店舗/選択店舗」×「店舗管理者のみ/全スタッフ」。"""
+        require_auth(["admin"])
+        body = request.get_json(silent=True) or {}
+        title = (body.get("title") or "").strip()
+        text = (body.get("body") or "").strip()
+        audience = body.get("audience") or "managers"
+        if not title:
+            raise ValueError("件名を入力してください")
+        if audience not in ("managers", "all"):
+            raise ValueError("配信対象が不正です")
+
+        shop_ids = body.get("shop_ids")
+        if shop_ids:
+            # shop_ids は IN (...) の展開に使うため、値を束縛する前に
+            # 中身が整数であることを検証する（文字列や配列混入を防ぐ）。
+            if not isinstance(shop_ids, list) or not all(
+                    isinstance(x, int) and not isinstance(x, bool) for x in shop_ids):
+                raise ValueError("shop_ids は整数の配列で指定してください")
+            shops = query_all(
+                "SELECT id FROM shops WHERE COALESCE(is_archived,0)=0 AND is_active=1 "
+                "AND id IN ({})".format(",".join("?" * len(shop_ids))), tuple(shop_ids))
+        else:
+            shops = query_all("SELECT id FROM shops WHERE COALESCE(is_archived,0)=0 AND is_active=1")
+        if not shops:
+            raise ValueError("配信先の店舗がありません")
+
+        # created_at はバッチで1つの値に揃える。配信履歴を (created_at, title) で
+        # グルーピングするため、datetime('now') 任せにすると行ごとにずれる。
+        stamp = jst_now().strftime("%Y-%m-%d %H:%M:%S")
+        rows = [(s["id"], None) for s in shops]
+        recipients = 0
+        if audience == "all":
+            ids = [s["id"] for s in shops]
+            staffs = query_all(
+                "SELECT id, shop_id FROM staffs WHERE is_resigned=0 AND shop_id IN ({})".format(
+                    ",".join("?" * len(ids))), tuple(ids))
+            rows += [(st["shop_id"], st["id"]) for st in staffs]
+            recipients = len(staffs)
+
+        if len(rows) > _ANNOUNCE_MAX_ROWS:
+            raise ValueError(f"配信件数が多すぎます（{len(rows)}件）。店舗を分けて配信してください")
+
+        # D1 は REST API の1往復＝1クエリのため、1件ずつ挿すと配信が実用速度にならない。
+        # 1文のまとめ INSERT にする。
+        placeholders = ",".join(["(?,?,?,?,?,0,?)"] * len(rows))
+        binds = []
+        for shop_id, staff_id in rows:
+            binds += [shop_id, staff_id, "announcement", title, text, stamp]
+        execute("INSERT INTO notifications (shop_id, staff_id, type, title, body, is_read, created_at) "
+                "VALUES " + placeholders, tuple(binds))
+
+        audit("admin.announce", target_type="announcement", detail=
+              f"{title} / 店舗{len(shops)}件 / 対象{'全員' if audience == 'all' else '店舗管理者'}")
+        return jsonify({"ok": True, "shops": len(shops), "recipients": recipients})
+
+
     @app.get("/api/admin/notifications")
     def admin_notifs():
+        """一斉通知の配信履歴。
+
+        notifications にバッチIDが無いため (created_at, title) で束ねる。
+        この2列で一意になるのは、配信時に created_at をバッチで揃えているため。
+        """
         require_auth(["admin"])
-        # システム管理者向け通知は現状なし（空リストを返す）。
-        # Phase 2 で一斉通知の配信履歴を返す実装に置き換える。
-        return jsonify({"notifications": [], "unread": 0})
+        rows = query_all(
+            "SELECT created_at, title, COUNT(DISTINCT shop_id) AS shops, "
+            "SUM(CASE WHEN staff_id IS NOT NULL THEN 1 ELSE 0 END) AS recipients "
+            "FROM notifications WHERE type='announcement' "
+            "GROUP BY created_at, title ORDER BY created_at DESC LIMIT 100")
+        return jsonify({"announcements": rows})
 
 
     @app.put("/api/admin/notifications/read-all")
     def admin_notifs_readall():
         require_auth(["admin"])
+        # 管理者は配信履歴を見るだけで、自分宛の未読という概念が無い。
+        # フロントの共通ヘッダが呼ぶため、互換のために残す。
         return jsonify({"ok": True})
 
 

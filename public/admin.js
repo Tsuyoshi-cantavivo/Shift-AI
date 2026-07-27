@@ -501,6 +501,7 @@ const AUDIT_ACTION_LABELS = {
   'admin.create': '管理者追加',
   'admin.delete': '管理者削除',
   'admin.migrate': 'DBマイグレーション適用',
+  'admin.announce': 'お知らせ配信',
 };
 function auditActionLabel(a) { return AUDIT_ACTION_LABELS[a] || a || '—'; }
 
@@ -824,6 +825,7 @@ SCREENS.adminSystem = async function (el) {
        <button class="tab ${adminSystemTab === 'admins' ? 'active' : ''}" data-tab="admins">管理者アカウント</button>
        <button class="tab ${adminSystemTab === 'migrations' ? 'active' : ''}" data-tab="migrations">マイグレーション</button>
        <button class="tab ${adminSystemTab === 'diagnostic' ? 'active' : ''}" data-tab="diagnostic">DB診断</button>
+       <button class="tab ${adminSystemTab === 'announce' ? 'active' : ''}" data-tab="announce">お知らせ配信</button>
      </div><div id="sysBody"></div>`;
   el.querySelectorAll('.tab').forEach((t) => t?.addEventListener('click', () => {
     adminSystemTab = t.dataset.tab;
@@ -835,7 +837,7 @@ SCREENS.adminSystem = async function (el) {
 
 function renderAdminSystemTab(body) {
   ({ admins: renderAdminAccountsTab, migrations: renderMigrationsTab,
-     diagnostic: renderDiagnosticTab }[adminSystemTab])(body);
+     diagnostic: renderDiagnosticTab, announce: renderAnnounceTab }[adminSystemTab])(body);
 }
 
 async function renderAdminAccountsTab(body) {
@@ -997,4 +999,75 @@ async function renderDiagnosticTab(body) {
     `<div class="mb-2">${badge(d.supports_student_role ? 'student ロール対応済み' : 'student ロール未対応', d.supports_student_role ? 'success' : 'warning')}
       ${badge(d.has_shop_holidays_table ? 'shop_holidays あり' : 'shop_holidays なし', d.has_shop_holidays_table ? 'success' : 'warning')}</div>
      <details><summary class="small text-secondary">技術詳細</summary><pre class="small" style="white-space:pre-wrap">${esc(JSON.stringify(d, null, 2))}</pre></details>`;
+}
+
+async function renderAnnounceTab(body) {
+  const tok = navToken();
+  const shops = await api('/admin/shops');
+  if (!isAlive(tok)) return;
+  body.innerHTML =
+    card(sectionTitle('bi-megaphone', 'お知らせ配信') +
+      `<label class="form-label" for="anTitle">件名 <span class="text-danger">*</span></label>
+       <input id="anTitle" class="form-control mb-2" placeholder="例: メンテナンスのお知らせ">
+       <label class="form-label" for="anBody">本文</label>
+       <textarea id="anBody" class="form-control mb-2" rows="4"></textarea>
+       <div class="row">
+         <div class="col-6"><label class="form-label" for="anScope">配信先の店舗</label>
+           <select id="anScope" class="form-select mb-2">
+             <option value="all">すべての稼働店舗</option>
+             <option value="select">店舗を選ぶ</option>
+           </select></div>
+         <div class="col-6"><label class="form-label" for="anAudience">受け取る人</label>
+           <select id="anAudience" class="form-select mb-2">
+             <option value="managers">店舗管理者のみ</option>
+             <option value="all">全スタッフ</option>
+           </select></div>
+       </div>
+       <div id="anShopPick" class="d-none mb-2">
+         ${shops.shops.map((s) => `<label class="me-3"><input type="checkbox" class="an-shop" value="${s.id}"> ${esc(s.shop_name || s.shop_code)}</label>`).join('')}
+       </div>
+       <div class="form-error" id="anErr"></div>
+       <button class="btn btn-primary btn-sm mt-2" id="anSend"><i class="bi bi-send"></i> 配信する</button>`) +
+    card(sectionTitle('bi-clock-history', '配信履歴') + '<div id="anHistory"></div>');
+
+  document.getElementById('anScope')?.addEventListener('change', (e) =>
+    document.getElementById('anShopPick').classList.toggle('d-none', e.target.value !== 'select'));
+
+  const loadHistory = async () => {
+    const d = await api('/admin/notifications');
+    const h = document.getElementById('anHistory');
+    if (!h) return;
+    h.innerHTML = d.announcements.length
+      ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>日時</th><th>件名</th><th class="t-num">店舗</th><th class="t-num">個人宛</th></tr></thead><tbody>` +
+        d.announcements.map((a) => `<tr>
+          <td class="small">${esc((a.created_at || '').replace('T', ' '))}</td>
+          <td>${esc(a.title || '')}</td>
+          <td class="t-num num">${a.shops}</td>
+          <td class="t-num num">${a.recipients || 0}</td></tr>`).join('') + '</tbody></table></div>'
+      : emptyState('bi-megaphone', '配信履歴がありません');
+  };
+
+  document.getElementById('anSend')?.addEventListener('click', () =>
+    openModal('<i class="bi bi-send"></i> 配信の確認',
+      '<p class="mb-0">この内容で配信します。配信後は取り消せません。</p>',
+      async (w, close) => {
+        const err = document.getElementById('anErr');
+        if (err) err.textContent = '';
+        const scope = document.getElementById('anScope').value;
+        const picked = Array.from(document.querySelectorAll('.an-shop:checked')).map((c) => +c.value);
+        try {
+          const r = await api('/admin/announcements', { method: 'POST', body: JSON.stringify({
+            shop_ids: scope === 'select' ? picked : null,
+            audience: document.getElementById('anAudience').value,
+            title: document.getElementById('anTitle').value.trim(),
+            body: document.getElementById('anBody').value.trim() }) });
+          close();
+          toast(`${r.shops}店舗に配信しました`, 'success');
+          document.getElementById('anTitle').value = '';
+          document.getElementById('anBody').value = '';
+          loadHistory();
+        } catch (e) { close(); if (err) err.textContent = e.message; }
+      }, { saveLabel: '配信する' }));
+
+  loadHistory();
 }
