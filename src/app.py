@@ -870,7 +870,8 @@ def login():
     # ---- 店舗管理者 / スタッフ: (shop_code, user_code) で一意検索 ----
     staff = query_one(
         "SELECT s.* FROM staffs s JOIN shops sh ON s.shop_id=sh.id "
-        "WHERE sh.shop_code=? AND s.staff_code=? AND s.is_resigned=0 AND sh.is_active=1",
+        "WHERE sh.shop_code=? AND s.staff_code=? AND s.is_resigned=0 AND sh.is_active=1 "
+        "AND COALESCE(sh.is_archived,0)=0",
         (shop_code, user_code))
     if staff and verify_password(pw, staff["password_hash"]):
         _clear_login_failures(attempt_key)
@@ -887,7 +888,8 @@ def login():
 
     # ---- 後方互換: shops テーブルによる旧店主ログイン（user_code == shop_code の場合） ----
     if user_code == shop_code:
-        shop = query_one("SELECT * FROM shops WHERE shop_code=? AND is_active=1", (shop_code,))
+        shop = query_one("SELECT * FROM shops WHERE shop_code=? AND is_active=1 "
+                         "AND COALESCE(is_archived,0)=0", (shop_code,))
         if shop and verify_password(pw, shop["password_hash"]):
             _clear_login_failures(attempt_key)
             audit("auth.login", target_type="shop", target_id=shop["id"], shop_id=shop["id"],

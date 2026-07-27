@@ -144,7 +144,14 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
     @app.get("/api/admin/shops")
     def admin_shops():
         require_auth(["admin"])
-        rows = query_all("SELECT id, shop_code, shop_name, is_active, settings, created_at FROM shops ORDER BY id")
+        cols = "id, shop_code, shop_name, is_active, settings, created_at"
+        # アーカイブ済みは既定で隠す。運営が普段見るのは稼働中の店舗だけのため。
+        # COALESCE を使うのは、ALTER TABLE ADD COLUMN 以前からある行の is_archived が
+        # NULL になり得るため。
+        if request.args.get("include_archived") == "1":
+            rows = query_all(f"SELECT {cols} FROM shops ORDER BY is_archived, id")
+        else:
+            rows = query_all(f"SELECT {cols} FROM shops WHERE COALESCE(is_archived,0)=0 ORDER BY id")
         return jsonify({"shops": rows})
 
 
@@ -253,6 +260,62 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         audit("shop.update", target_type="shop", target_id=sid, shop_id=sid,
               detail=",".join(changed))
         return jsonify({"ok": True})
+
+
+    # shops.settings で受け付けるキー（src/utils.py の parse_settings 利用箇所と対応）。
+    # 未知のキーを弾くのは、タイプミスが黙って保存されてシフト生成に効かない事故を防ぐため。
+    _SETTINGS_KEYS = {
+        "business_hours", "default_hourly_wage", "max_consecutive_days", "max_daily_hours",
+        "max_employee_daily_hours", "min_daily_hours", "night_premium_rate",
+        "period_mode", "shift_hours", "transport_per_day",
+    }
+
+    @app.post("/api/admin/shops/<int:sid>/archive")
+    def admin_shop_archive(sid):
+        require_auth(["admin"])
+        shop = query_one("SELECT id, shop_code FROM shops WHERE id=?", (sid,))
+        if shop is None:
+            abort(404, description="店舗が見つかりません")
+        now = jst_now().strftime("%Y-%m-%d %H:%M:%S")
+        execute("UPDATE shops SET is_archived=1, archived_at=?, is_active=0 WHERE id=?", (now, sid))
+        # ログイン中のユーザーを追い出す（アーカイブ後もセッションが生きていると
+        # 停止したはずの店舗が操作できてしまう）
+        execute("DELETE FROM sessions WHERE shop_id=?", (sid,))
+        audit("shop.archive", target_type="shop", target_id=sid, shop_id=sid,
+              detail=f"shop_code={shop['shop_code']}")
+        return jsonify({"ok": True})
+
+
+    @app.post("/api/admin/shops/<int:sid>/unarchive")
+    def admin_shop_unarchive(sid):
+        require_auth(["admin"])
+        shop = query_one("SELECT id, shop_code FROM shops WHERE id=?", (sid,))
+        if shop is None:
+            abort(404, description="店舗が見つかりません")
+        # is_active は 0 のまま。復元と再稼働は別の判断なので明示的に有効化させる。
+        execute("UPDATE shops SET is_archived=0, archived_at=NULL WHERE id=?", (sid,))
+        audit("shop.unarchive", target_type="shop", target_id=sid, shop_id=sid,
+              detail=f"shop_code={shop['shop_code']}")
+        return jsonify({"ok": True})
+
+
+    @app.put("/api/admin/shops/<int:sid>/settings")
+    def admin_shop_update_settings(sid):
+        require_auth(["admin"])
+        shop = query_one("SELECT id, settings FROM shops WHERE id=?", (sid,))
+        if shop is None:
+            abort(404, description="店舗が見つかりません")
+        body = request.get_json(silent=True) or {}
+        unknown = set(body.keys()) - _SETTINGS_KEYS
+        if unknown:
+            raise ValueError(f"未知の設定キーです: {', '.join(sorted(unknown))}")
+        merged = parse_settings(shop.get("settings"))
+        merged.update(body)
+        execute("UPDATE shops SET settings=? WHERE id=?",
+                (json.dumps(merged, ensure_ascii=False), sid))
+        audit("shop.update", target_type="shop", target_id=sid, shop_id=sid,
+              detail="settings:" + ",".join(sorted(body.keys())))
+        return jsonify({"ok": True, "settings": merged})
 
 
     @app.get("/api/admin/shops/stats/<int:sid>")
@@ -755,7 +818,7 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
     @app.post("/api/admin/impersonate/<int:shop_id>")
     def admin_impersonate_start(shop_id):
         require_auth(["admin"])
-        shop = query_one("SELECT id, shop_code, shop_name, is_active FROM shops WHERE id=?",
+        shop = query_one("SELECT id, shop_code, shop_name, is_active, is_archived FROM shops WHERE id=?",
                          (shop_id,))
         if shop is None:
             abort(404, description="店舗が見つかりません")
@@ -776,8 +839,11 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         # 見ていないため一貫している。サポート用途では停止中こそ中を見たい。
         # ただし運営者が承知の上で入ったことがログから読めるよう detail に明記する。
         suffix = "" if shop.get("is_active") else "（停止中）"
+        # アーカイブ済みも同じ方針：完全削除の前に中身を確認するサポート業務が
+        # 成立する必要があるため、閲覧自体は止めない。ただし detail に明記する。
+        archived_suffix = "（アーカイブ済み）" if shop.get("is_archived") else ""
         audit("admin.impersonate_start", target_type="shop", target_id=shop_id, shop_id=shop_id,
-              detail=f"{shop['shop_code']} の代理閲覧を開始（閲覧のみ）{suffix}")
+              detail=f"{shop['shop_code']} の代理閲覧を開始（閲覧のみ）{suffix}{archived_suffix}")
         return jsonify({"ok": True, "shop": {"id": shop["id"], "shop_code": shop["shop_code"],
                                              "shop_name": shop["shop_name"]}})
 
