@@ -1,4 +1,7 @@
 """全社ダッシュボード。"""
+from datetime import datetime
+
+import admin_api
 import db as dbmod
 from helpers import insert_admin, insert_shop, insert_staff
 
@@ -11,6 +14,13 @@ def _admin_token(client):
 
 def _hdr(t):
     return {"Authorization": f"Bearer {t}"}
+
+
+def _insert_shift(shop_id, staff_id, start, end, status="confirmed"):
+    dbmod.execute(
+        "INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, status) "
+        "VALUES (?,?,?,?,?)",
+        (shop_id, staff_id, start, end, status))
 
 
 class TestDashboardKpi:
@@ -35,6 +45,45 @@ class TestDashboardKpi:
         insert_staff(sid, "p2", "花子")
         k = client.get("/api/admin/dashboard", headers=_hdr(t)).get_json()["kpi"]
         assert k["staffs_total"] == 2
+
+
+class TestDashboardConfirmedThisMonth:
+    """「今月の確定シフト」が当月分だけを数え、前月・翌月分を含まないこと。
+
+    この製品の通常運用では締切前に翌月分を先に確定するため、上限を付けないと
+    実運用で恒常的に「今月」の看板で翌月分まで数えてしまう（レビュー指摘）。
+    """
+
+    def test_excludes_next_and_previous_month(self, client, monkeypatch):
+        monkeypatch.setattr(admin_api, "jst_now", lambda: datetime(2026, 7, 27, 12, 0, 0))
+        t = _admin_token(client)
+        sid = insert_shop("A", name="店")
+        staff_id = insert_staff(sid, "p1", "太郎")
+        _insert_shift(sid, staff_id, "2026-07-01T09:00:00", "2026-07-01T17:00:00")  # 当月
+        _insert_shift(sid, staff_id, "2026-06-30T09:00:00", "2026-06-30T17:00:00")  # 前月（除外）
+        _insert_shift(sid, staff_id, "2026-08-01T09:00:00", "2026-08-01T17:00:00")  # 翌月（除外）
+        k = client.get("/api/admin/dashboard", headers=_hdr(t)).get_json()["kpi"]
+        assert k["confirmed_this_month"] == 1
+
+    def test_year_boundary_december_to_january(self, client, monkeypatch):
+        monkeypatch.setattr(admin_api, "jst_now", lambda: datetime(2026, 12, 15, 12, 0, 0))
+        t = _admin_token(client)
+        sid = insert_shop("A", name="店")
+        staff_id = insert_staff(sid, "p1", "太郎")
+        _insert_shift(sid, staff_id, "2026-12-31T09:00:00", "2026-12-31T17:00:00")  # 当月（12月）
+        _insert_shift(sid, staff_id, "2027-01-01T09:00:00", "2027-01-01T17:00:00")  # 翌年1月（除外）
+        k = client.get("/api/admin/dashboard", headers=_hdr(t)).get_json()["kpi"]
+        assert k["confirmed_this_month"] == 1
+
+    def test_only_confirmed_status_counted(self, client, monkeypatch):
+        monkeypatch.setattr(admin_api, "jst_now", lambda: datetime(2026, 7, 27, 12, 0, 0))
+        t = _admin_token(client)
+        sid = insert_shop("A", name="店")
+        staff_id = insert_staff(sid, "p1", "太郎")
+        _insert_shift(sid, staff_id, "2026-07-10T09:00:00", "2026-07-10T17:00:00", status="confirmed")
+        _insert_shift(sid, staff_id, "2026-07-11T09:00:00", "2026-07-11T17:00:00", status="requested")
+        k = client.get("/api/admin/dashboard", headers=_hdr(t)).get_json()["kpi"]
+        assert k["confirmed_this_month"] == 1
 
 
 class TestDashboardAttention:

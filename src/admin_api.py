@@ -157,6 +157,13 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         now = jst_now()
         today = now.strftime("%Y-%m-%d")
         month_start = now.strftime("%Y-%m-01")
+        # 翌月月初（年またぎを考慮）。「今月の確定シフト」の上限に使う。
+        # この製品の通常運用では締切前に翌月分を先に確定するため、上限が無いと
+        # 「今月」の看板で翌月分まで数えてしまい、当月の確定状況を過大評価する
+        # （レビューで実DB上62件がすべて8月分＝翌月分だったことが判明した不具合）。
+        next_year = now.year + 1 if now.month == 12 else now.year
+        next_month = 1 if now.month == 12 else now.month + 1
+        month_end = f"{next_year:04d}-{next_month:02d}-01"
 
         shops = query_all("SELECT id, shop_name, shop_code, is_active, "
                           "COALESCE(is_archived,0) AS is_archived FROM shops")
@@ -168,8 +175,9 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         staffs_total = query_one(
             "SELECT COUNT(*) AS c FROM staffs WHERE is_resigned=0")["c"]
         confirmed = query_one(
-            "SELECT COUNT(*) AS c FROM shifts WHERE status='confirmed' AND start_datetime>=?",
-            (month_start + "T00:00:00",))["c"]
+            "SELECT COUNT(*) AS c FROM shifts WHERE status='confirmed' "
+            "AND start_datetime>=? AND start_datetime<?",
+            (month_start + "T00:00:00", month_end + "T00:00:00"))["c"]
 
         attention = []
 
