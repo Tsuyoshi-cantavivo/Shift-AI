@@ -60,6 +60,8 @@ test.describe('管理者によるスタッフ管理', () => {
     await page.click('button[data-screen="adminShops"]');
     await page.waitForSelector(`text=${SHOP.shopCode}`);
     await page.click(`text=${SHOP.shopCode}`);
+    // Phase 2: 店舗詳細がタブ化され、スタッフ一覧・追加・移行ボタンは「スタッフ」タブの中
+    await page.click('[data-tab="staffs"]');
     await page.waitForSelector('#addStaffBtn', { timeout: 10000 });
     await page.waitForSelector('#migrateBtn');
     expect(await page.locator('#addStaffBtn').isVisible()).toBeTruthy();
@@ -73,6 +75,7 @@ test.describe('管理者によるスタッフ管理', () => {
     await page.click('button[data-screen="adminShops"]');
     await page.waitForSelector(`text=${SHOP.shopCode}`);
     await page.click(`text=${SHOP.shopCode}`);
+    await page.click('[data-tab="staffs"]');
     await page.waitForSelector('#addStaffBtn');
 
     // 追加ボタン → モーダル
@@ -103,6 +106,7 @@ test.describe('管理者によるスタッフ管理', () => {
     await page.click('button[data-screen="adminShops"]');
     await page.waitForSelector(`text=${SHOP.shopCode}`);
     await page.click(`text=${SHOP.shopCode}`);
+    await page.click('[data-tab="staffs"]');
     await page.waitForSelector('#addStaffBtn');
 
     // テスト用スタッフを追加
@@ -155,6 +159,7 @@ test.describe('管理者によるスタッフ管理', () => {
     await page.click('button[data-screen="adminShops"]');
     await page.waitForSelector(`text=${SHOP.shopCode}`);
     await page.click(`text=${SHOP.shopCode}`);
+    await page.click('[data-tab="staffs"]');
     await page.waitForSelector('#addStaffBtn');
     // 最初のスタッフの鍵ボタンをクリック
     const pwBtn = page.locator('.list-row [data-pw-reset]').first();
@@ -197,6 +202,7 @@ test.describe('管理者によるスタッフ管理', () => {
     await page.click('button[data-screen="adminShops"]');
     await page.waitForSelector(`text=${legacyShopCode}`);
     await page.click(`text=${legacyShopCode}`);
+    await page.click('[data-tab="staffs"]');
     await page.waitForSelector('#migrateBtn');
     // migrate ボタンをクリック
     await page.click('#migrateBtn');
