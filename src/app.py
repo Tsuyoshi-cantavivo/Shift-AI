@@ -3759,14 +3759,27 @@ def _verify_critical_tables():
       列単位で再発しているだけなので、各テーブルで実際に使う列を明示して
       SELECT することで、テーブル・列どちらの欠落も検知する。
     """
-    # テーブル名 -> そのテーブルで実際に使う列（一貫性のため audit_logs /
-    # sessions も同じ形で検証する）。
-    checks = {
-        "login_attempts": "blocked_logged",
-        "audit_logs": "action",
-        "sessions": "role",
-    }
-    for table, column in checks.items():
+    # (テーブル名, そのテーブルで実際に使う列) の並び。dict にすると同じテーブルの
+    # 2列目（sessions.role と sessions.acting_shop_id）を書いたときにキーが衝突し、
+    # 片方の検証が黙って消えるため、タプルの並びで持つ。
+    checks = (
+        ("login_attempts", "blocked_logged"),
+        ("audit_logs", "action"),
+        ("sessions", "role"),
+        # ---- Phase 2（管理者コンソール）でログインが依存するようになった列 ----
+        # shops.is_archived が無いと POST /api/login の SELECT が
+        # 「no such column: sh.is_archived」で落ち、店舗管理者・スタッフ・旧店主の
+        # 全員がログインできなくなる。それでも /api/health は 200 を返し続けるので
+        # Railway のヘルスチェックは通り、既存トークン（最大7日有効）が切れた順に
+        # 顧客が締め出される「静かな全顧客障害」になる。ここで落として
+        # 「大声の起動失敗」に変える（この関数の docstring が述べている目的そのもの）。
+        ("shops", "is_archived"),
+        # 代理閲覧セッションの読み書きに必須（管理コンソールの店舗詳細）
+        ("sessions", "acting_shop_id"),
+        # 一斉通知の INSERT と配信履歴の GROUP BY に必須
+        ("notifications", "batch_id"),
+    )
+    for table, column in checks:
         try:
             query_all(f"SELECT {column} FROM {table} LIMIT 1")
         except Exception as e:

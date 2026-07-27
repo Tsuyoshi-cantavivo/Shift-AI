@@ -157,3 +157,102 @@ class TestHistory:
                                             "password": "pw12345678"})
         t = r.get_json()["token"]
         assert client.get("/api/admin/notifications", headers=_hdr(t)).status_code == 403
+
+
+# ============================================================
+# Cloudflare D1 のバインドパラメータ上限（1クエリあたり100個）
+# ============================================================
+# 本番は DB_MODE=d1（REST API）。D1 は「1クエリあたりのバインドパラメータ100個」を
+# 上限としており、超えると D1 がクエリ自体を拒否する。
+# 一斉通知は1行あたり (?,?,?,?,?,0,?,?) = 7バインドのまとめ INSERT なので、
+# チャンク分割しないと約14行（= 稼働2店舗・スタッフ17名の audience=all で 19行）で
+# 破綻する。ローカル SQLite は 500,000 変数まで許すため、この壁は
+# 「行数を増やしたテスト」では絶対に検出できない。バインド数そのものを数える。
+D1_MAX_BINDS = 100
+
+
+class _BindSpy:
+    """admin_api が呼ぶ execute / query_all をラップし、1回あたりのバインド数を記録する。"""
+
+    def __init__(self, monkeypatch):
+        import admin_api
+        self.counts = []
+        self.insert_counts = []
+        for name in ("execute", "query_all"):
+            orig = getattr(admin_api, name)
+            monkeypatch.setattr(admin_api, name, self._wrap(orig))
+
+    def _wrap(self, orig):
+        def spy(sql, params=()):
+            n = len(params or ())
+            self.counts.append(n)
+            if "INSERT INTO notifications" in sql:
+                self.insert_counts.append(n)
+            return orig(sql, params)
+        return spy
+
+
+def _many_shops(shop_count, staff_per_shop):
+    ids = []
+    for i in range(shop_count):
+        sid = insert_shop(f"S{i}", name=f"店{i}")
+        for j in range(staff_per_shop):
+            insert_staff(sid, f"p{i}_{j}", f"スタッフ{i}_{j}")
+        ids.append(sid)
+    return ids
+
+
+class TestD1BindLimit:
+    def test_announce_to_all_never_exceeds_d1_bind_limit(self, client, monkeypatch):
+        """本番規模（稼働2店舗・スタッフ17名 = 19行 = 133バインド）を超える規模で、
+        1回の execute / query_all あたりのバインド数が D1 の上限を超えないこと。"""
+        t = _admin_token(client)
+        _many_shops(6, 5)  # 店舗6 + スタッフ30 = 36行 = 252バインド
+        spy = _BindSpy(monkeypatch)
+        r = client.post("/api/admin/announcements", headers=_hdr(t),
+                        json={"shop_ids": None, "audience": "all",
+                              "title": "大規模配信", "body": "本文"})
+        assert r.status_code == 200
+        assert spy.insert_counts, "notifications への INSERT が観測できていない"
+        assert max(spy.counts) <= D1_MAX_BINDS, (
+            f"D1のバインド上限({D1_MAX_BINDS})を超えるクエリがある: "
+            f"最大{max(spy.counts)}バインド")
+
+    def test_announce_with_many_shop_ids_never_exceeds_d1_bind_limit(self, client, monkeypatch):
+        """shop_ids の IN (...) 展開も同じ壁に当たる（店舗数が100を超えると破綻）。"""
+        t = _admin_token(client)
+        ids = _many_shops(120, 0)
+        spy = _BindSpy(monkeypatch)
+        r = client.post("/api/admin/announcements", headers=_hdr(t),
+                        json={"shop_ids": ids, "audience": "managers",
+                              "title": "全店配信", "body": "本文"})
+        assert r.status_code == 200
+        assert r.get_json()["shops"] == 120
+        assert max(spy.counts) <= D1_MAX_BINDS, (
+            f"IN (...) の展開が上限を超えている: 最大{max(spy.counts)}バインド")
+
+    def test_staff_in_clause_never_exceeds_d1_bind_limit(self, client, monkeypatch):
+        """audience=all のスタッフ取得 `shop_id IN (...)` も店舗数ぶん展開される。"""
+        t = _admin_token(client)
+        _many_shops(120, 1)
+        spy = _BindSpy(monkeypatch)
+        r = client.post("/api/admin/announcements", headers=_hdr(t),
+                        json={"shop_ids": None, "audience": "all",
+                              "title": "全店配信", "body": "本文"})
+        assert r.status_code == 200
+        assert r.get_json()["recipients"] == 120
+        assert max(spy.counts) <= D1_MAX_BINDS, (
+            f"IN (...) の展開が上限を超えている: 最大{max(spy.counts)}バインド")
+
+    def test_all_rows_are_still_inserted_after_chunking(self, client):
+        """チャンク分割しても配信件数が欠けないこと（分割の実装ミス検出）。"""
+        t = _admin_token(client)
+        _many_shops(6, 5)
+        r = client.post("/api/admin/announcements", headers=_hdr(t),
+                        json={"shop_ids": None, "audience": "all",
+                              "title": "大規模配信", "body": "本文"})
+        assert r.status_code == 200
+        rows = dbmod.query_all(
+            "SELECT shop_id, staff_id, batch_id FROM notifications WHERE type='announcement'")
+        assert len(rows) == 36, "店舗6件 + スタッフ30件 = 36行にならない"
+        assert len({x["batch_id"] for x in rows}) == 1, "チャンクごとに batch_id が分かれている"

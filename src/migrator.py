@@ -125,16 +125,75 @@ def _mark_applied(filename, stmt_index):
             (filename, stmt_index))
 
 
-def _backfill_legacy():
-    """schema_migrations が空のときだけ、レガシーのマイグレーションを適用済みとして記録する。"""
-    if query_one("SELECT 1 AS x FROM schema_migrations LIMIT 1"):
-        return
+# Cloudflare D1 は「1クエリあたりのバインドパラメータ100個」が上限。
+# backfill は1行あたり2バインド（filename, stmt_index）なので50行まで1文に入る。
+# 現状のレガシーは39行で1文に収まるが、将来ファイルが増えても壊れないよう分割する。
+D1_MAX_BINDS = 100
+_BACKFILL_BINDS_PER_ROW = 2
+
+
+def _mark_applied_bulk(rows):
+    """(filename, stmt_index) のリストを、まとめ INSERT で記録する。
+
+    【なぜ1文にするのか】D1 は 1文 = 1 HTTP 往復でトランザクションが張れない。
+    39本の個別 INSERT だと 39 往復のあいだどこで落ちても部分適用になり、しかも
+    ロールバックできない。1文にすれば「全部書けたか、1行も書けなかったか」の
+    どちらかに収束する。
+    """
+    per_query = D1_MAX_BINDS // _BACKFILL_BINDS_PER_ROW
+    for i in range(0, len(rows), per_query):
+        chunk = rows[i:i + per_query]
+        placeholders = ",".join(["(?,?)"] * len(chunk))
+        binds = []
+        for filename, stmt_index in chunk:
+            binds += [filename, stmt_index]
+        execute("INSERT OR IGNORE INTO schema_migrations (filename, stmt_index) VALUES "
+                + placeholders, tuple(binds))
+
+
+def _legacy_rows():
+    """レガシーファイルの全ステートメントを (filename, stmt_index) で列挙する。"""
+    out = []
     for filename in LEGACY_FILES:
         path = os.path.join(MIGRATIONS_DIR, filename)
         if not os.path.exists(path):
             continue
         for i in range(len(_read_statements(filename))):
-            _mark_applied(filename, i)
+            out.append((filename, i))
+    return out
+
+
+def _backfill_legacy():
+    """レガシーのマイグレーションを「適用済み」として記録する。
+
+    【ガードの意味】記録が1つも無い＝このDBは migrator の管理外で運用されてきた、
+    ということ。0004 以前は手作業で適用済みの前提なので、再実行が危険な
+    レガシーを「適用済み」として記録してから運用を始める。
+
+    【なぜ「空かどうか」ではなく「レガシー以外の記録があるか」で判定するのか】
+    旧実装は「schema_migrations が完全に空のときだけ」だった。だが記録は
+    39本の個別 INSERT で、D1 ではトランザクションが張れない。途中で落ちて1行でも
+    書けると、その1行がガードを永久に閉じ、残りのレガシー文が恒久的に「未適用」の
+    ままになる。その状態で「未適用を適用」を押すと、0004 のバックアップ表作成
+    （CREATE TABLE _mig_* AS SELECT *）だけが「適用済み」としてスキップされ、
+    DELETE FROM shifts / wish_history / fixed_shifts / change_requests だけが
+    走ってデータが消える（レビュアーの実測で全消失を再現）。
+    「レガシー以外の記録が無い＝まだ管理下に入っていない」を条件にすることで、
+    途中失敗した backfill は次回の呼び出しで必ず完了する（自己修復）。
+    レガシー以外の記録が1つでもあれば、以降は二度と backfill しない。
+    """
+    legacy = _legacy_rows()
+    if not legacy:
+        return
+    existing = {(r["filename"], r["stmt_index"])
+                for r in query_all("SELECT filename, stmt_index FROM schema_migrations")}
+    if existing - set(legacy):
+        # レガシー以外の記録がある＝既に migrator の管理下。何もしない。
+        return
+    missing = [row for row in legacy if row not in existing]
+    if not missing:
+        return
+    _mark_applied_bulk(missing)
 
 
 def status():

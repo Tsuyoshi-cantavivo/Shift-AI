@@ -915,6 +915,31 @@ class TestStartupIntegrity:
         appmod.ensure_db()
         appmod._verify_critical_tables()
 
+    # ---- Phase 2 でログイン・管理コンソールが依存するようになった列 ----
+    # マイグレーション未適用のまま起動すると、/api/health は 200 のままなのに
+    # POST /api/login（店舗管理者・スタッフ・旧店主）が
+    # 「no such column: sh.is_archived」の 500 になる。既存トークンは最大7日
+    # 有効なので、静かな障害が7日かけて全顧客に広がる。
+    # 起動時にここで落とせば「静かな全顧客障害」を「大声の起動失敗」に変えられる。
+    @pytest.mark.parametrize("table,column", [
+        ("shops", "is_archived"),            # /api/login の SELECT が参照
+        ("sessions", "acting_shop_id"),      # 代理閲覧セッションの読み書き
+        ("notifications", "batch_id"),       # 一斉通知の INSERT / 配信履歴の GROUP BY
+    ])
+    def test_verification_raises_when_phase2_column_missing(self, client, table, column):
+        """列だけが欠けた状態（マイグレーション未適用）を RENAME COLUMN で再現する。
+
+        テーブルごと落とすと FK や後続テストへの影響が大きいので、列名を変えて
+        「テーブルはあるが列が無い」状態だけを作る。
+        """
+        dbmod.execute(f"ALTER TABLE {table} RENAME COLUMN {column} TO {column}_missing")
+        try:
+            with pytest.raises(Exception):
+                appmod._verify_critical_tables()
+        finally:
+            dbmod.execute(f"ALTER TABLE {table} RENAME COLUMN {column}_missing TO {column}")
+        appmod._verify_critical_tables()
+
     def test_verification_raises_when_blocked_logged_column_missing(self, client):
         """テーブルはあるが blocked_logged 列だけが無い状態を再現する。
 

@@ -8,9 +8,15 @@ app.py 側にしか無いヘルパ（require_auth / audit / summarize_shifts / c
 循環 import を避けるためキーワード引数で受け取る。csv_safe は CSV の
 Formula Injection 対策関数の実体で、二重管理を避けるため再実装しない。
 
-db_module_get_conn / _restore_staffs_table_internal は admin_db_migrate /
-admin_db_restore_staffs 専用の内部ヘルパで、app.py 側の状態には依存しないため
-モジュールレベル関数としてここに置く（register_admin_routes の外）。
+【削除済み】POST /api/admin/db/migrate と POST /api/admin/db/restore-staffs、および
+その内部ヘルパ（db_module_get_conn / _restore_staffs_table_internal）は削除した。
+どちらも db.get_conn() → _get_local_conn() を使っており、この関数は DB_MODE を
+無視して常に sqlite3.connect(DB_PATH) を返す。つまり本番（d1モード）で叩くと
+本番D1ではなくコンテナ内のローカルSQLiteに対して DROP TABLE staffs が走り、
+しかも ok: true を返していた。フロントからの呼び出し元は0件で、スキーマ変更の
+正規の経路は src/migrator.py（GET/POST /api/admin/migrations）。
+読み取り専用の GET /api/admin/db/diagnostic はシステム画面のDB診断タブが
+使っているため残している。
 """
 from flask import request, jsonify, abort, g, Response
 
@@ -26,121 +32,20 @@ import migrator
 from datetime import datetime
 
 
-def db_module_get_conn():
-    """db モジュル経由で生のコネクションを取得（マイグレーション用）。"""
-    import db as _db
-    return _db.get_conn()
+# Cloudflare D1 は「1クエリあたりのバインドパラメータ100個」を上限としており、
+# 超えるとクエリ自体が拒否される（公式ドキュメント記載）。本番は DB_MODE=d1 なので、
+# 束ねた INSERT や IN (...) の展開は必ずこの数以下に分割する必要がある。
+# ローカル SQLite は 500,000 変数まで許すため、行数を増やしただけのテストでは
+# この壁を絶対に検出できない（テストは「1回あたりのバインド数」を数えている）。
+D1_MAX_BINDS = 100
 
 
-def _restore_staffs_table_internal(log):
-    """staffs テーブル消失時の内部復元関数（log は破壊的に追記）。"""
-    # 候補: staffs_migrate_backup, staffs_backup, staffs_new
-    for backup_name in ("staffs_migrate_backup", "staffs_backup", "staffs_new"):
-        try:
-            rows = query_all(f"SELECT name FROM sqlite_master WHERE name='{backup_name}'")
-            if not rows:
-                continue
-            log.append(f"復元元発見: {backup_name}")
-            conn = db_module_get_conn()
-            try:
-                conn.execute("PRAGMA foreign_keys = OFF")
-                cur = conn.cursor()
-                # バックアップの列を取得
-                cur.execute(f"PRAGMA table_info({backup_name})")
-                cols = [r[1] for r in cur.fetchall()]
-                log.append(f"{backup_name} の列: {cols}")
-                # 新 staffs を作る
-                cur.execute("DROP TABLE IF EXISTS staffs")
-                cur.execute("""
-                    CREATE TABLE staffs (
-                      id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      shop_id INTEGER NOT NULL,
-                      staff_code TEXT NOT NULL,
-                      password_hash TEXT NOT NULL,
-                      name TEXT NOT NULL,
-                      role TEXT DEFAULT 'part_time'
-                        CHECK(role IN ('employee','part_time','manager','student')),
-                      hourly_wage INTEGER DEFAULT 1000,
-                      min_hours_per_month INTEGER DEFAULT 0,
-                      max_hours_per_month INTEGER DEFAULT 160,
-                      is_resigned INTEGER DEFAULT 0,
-                      created_at TEXT DEFAULT (datetime('now')),
-                      UNIQUE(shop_id, staff_code),
-                      FOREIGN KEY (shop_id) REFERENCES shops(id)
-                    )
-                """)
-                # バックアップからコピー（共通列のみ）
-                target_cols = ['id', 'shop_id', 'staff_code', 'password_hash', 'name', 'role',
-                               'hourly_wage', 'min_hours_per_month', 'max_hours_per_month',
-                               'is_resigned', 'created_at']
-                common_cols = [c for c in target_cols if c in cols]
-                col_list = ', '.join(common_cols)
-                if common_cols:
-                    cur.execute(f"INSERT INTO staffs ({col_list}) SELECT {col_list} FROM {backup_name}")
-                    cnt = cur.execute("SELECT COUNT(*) FROM staffs").fetchone()[0]
-                    log.append(f"✓ {cnt} 行復元完了")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_staffs_shop ON staffs(shop_id)")
-                conn.commit()
-                log.append(f"✓ staffs を {backup_name} から復元しました")
-                return True
-            finally:
-                try:
-                    conn.execute("PRAGMA foreign_keys = ON")
-                    conn.close()
-                except Exception:
-                    pass
-        except Exception as e:
-            log.append(f"⚠ {backup_name} からの復元失敗: {e}")
-            continue
-
-    # どのバックアップも無い → shops から最低限の manager を作る
-    log.append("バックアップが見つかりません。shops から最低限の manager を再構築します...")
-    try:
-        conn = db_module_get_conn()
-        try:
-            conn.execute("PRAGMA foreign_keys = OFF")
-            cur = conn.cursor()
-            cur.execute("DROP TABLE IF EXISTS staffs")
-            cur.execute("""
-                CREATE TABLE staffs (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  shop_id INTEGER NOT NULL,
-                  staff_code TEXT NOT NULL,
-                  password_hash TEXT NOT NULL,
-                  name TEXT NOT NULL,
-                  role TEXT DEFAULT 'part_time'
-                    CHECK(role IN ('employee','part_time','manager','student')),
-                  hourly_wage INTEGER DEFAULT 1000,
-                  min_hours_per_month INTEGER DEFAULT 0,
-                  max_hours_per_month INTEGER DEFAULT 160,
-                  is_resigned INTEGER DEFAULT 0,
-                  created_at TEXT DEFAULT (datetime('now')),
-                  UNIQUE(shop_id, staff_code),
-                  FOREIGN KEY (shop_id) REFERENCES shops(id)
-                )
-            """)
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_staffs_shop ON staffs(shop_id)")
-            # shops の各店舗に manager を PW 引き継ぎで作成
-            cur.execute("SELECT id, shop_code, shop_name, password_hash FROM shops")
-            shops = cur.fetchall()
-            for shop in shops:
-                cur.execute(
-                    "INSERT OR IGNORE INTO staffs (shop_id, staff_code, password_hash, name, role, "
-                    "hourly_wage, min_hours_per_month, max_hours_per_month) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
-                    (shop[0], "manager", shop[3], shop[2] + " 店主", "manager", 2000, 0, 200))
-            conn.commit()
-            log.append(f"✓ shops ({len(shops)} 店舗) から manager を再構築しました")
-            return True
-        finally:
-            try:
-                conn.execute("PRAGMA foreign_keys = ON")
-                conn.close()
-            except Exception:
-                pass
-    except Exception as e:
-        log.append(f"✗ shops からの復元も失敗: {e}")
-        return False
+def chunked(seq, size):
+    """seq を size 件ずつのリストに切り出して yield する（バインド上限対策）。"""
+    if size < 1:
+        raise ValueError("チャンクサイズは1以上で指定してください")
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
 
 
 def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_safe):
@@ -819,193 +724,6 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
         })
 
 
-    @app.post("/api/admin/db/migrate")
-    def admin_db_migrate():
-        """本番DBを最新スキーマにマイグレーション（安全版）。
-
-        【安全策】
-        1. PRAGMA foreign_keys = OFF（接続単位）
-        2. BEGIN TRANSACTION で囲む（DDLもロールバック可能）
-        3. CREATE staffs_new → INSERT FROM staffs → DROP staffs → RENAME
-        4. 既存 staffs の列構成を動的取得して互換性保持
-        5. COMMIT 後 foreign_keys = ON に戻す
-        """
-        require_auth(["admin"])
-        import sqlite3 as _sqlite3
-        log = []
-        # 1. 現在の staffs テーブル状態確認
-        try:
-            rows = query_all("SELECT sql FROM sqlite_master WHERE name='staffs'")
-            cur_schema = rows[0]["sql"] if rows else ""
-        except Exception as e:
-            cur_schema = ""
-            log.append(f"⚠ staffs スキーマ取得エラー: {e}")
-
-        # 既存 staffs が無い or 壊れている場合、まず復元を試みる
-        if not cur_schema or "staffs" not in cur_schema.lower():
-            log.append("⚠ staffs テーブルが見つかりません。復元モードに移行します。")
-            restore_result = _restore_staffs_table_internal(log)
-            if not restore_result:
-                return jsonify({"ok": False, "error": "staffs 復元に失敗しました", "log": log}), 500
-            # 復元後のスキーマ再取得
-            try:
-                rows = query_all("SELECT sql FROM sqlite_master WHERE name='staffs'")
-                cur_schema = rows[0]["sql"] if rows else ""
-            except Exception:
-                cur_schema = ""
-
-        needs_rebuild = "student" not in (cur_schema or "").lower()
-        if needs_rebuild:
-            log.append("staffs テーブルを 'student' ロール対応版に再構築します...")
-            conn = db_module_get_conn()
-            try:
-                # 外部キーを一時OFF（接続単位）
-                conn.execute("PRAGMA foreign_keys = OFF")
-                cur = conn.cursor()
-                # 既存 staffs の列を動的取得（互換性のため）
-                cur.execute("PRAGMA table_info(staffs)")
-                existing_cols = [r[1] for r in cur.fetchall()]
-                log.append(f"既存 staffs の列: {existing_cols}")
-                # 必要な列だけ安全にコピー
-                target_cols = ['id', 'shop_id', 'staff_code', 'password_hash', 'name', 'role',
-                               'hourly_wage', 'min_hours_per_month', 'max_hours_per_month',
-                               'is_resigned', 'created_at']
-                common_cols = [c for c in target_cols if c in existing_cols]
-                col_list = ', '.join(common_cols)
-                log.append(f"コピー対象列: {common_cols}")
-
-                cur.execute("BEGIN")
-                # バックアップ
-                cur.execute("DROP TABLE IF EXISTS staffs_migrate_backup")
-                cur.execute("CREATE TABLE staffs_migrate_backup AS SELECT * FROM staffs")
-                # 新スキーマで作成
-                cur.execute("DROP TABLE IF EXISTS staffs_new")
-                cur.execute("""
-                    CREATE TABLE staffs_new (
-                      id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      shop_id INTEGER NOT NULL,
-                      staff_code TEXT NOT NULL,
-                      password_hash TEXT NOT NULL,
-                      name TEXT NOT NULL,
-                      role TEXT DEFAULT 'part_time'
-                        CHECK(role IN ('employee','part_time','manager','student')),
-                      hourly_wage INTEGER DEFAULT 1000,
-                      min_hours_per_month INTEGER DEFAULT 0,
-                      max_hours_per_month INTEGER DEFAULT 160,
-                      is_resigned INTEGER DEFAULT 0,
-                      created_at TEXT DEFAULT (datetime('now')),
-                      UNIQUE(shop_id, staff_code),
-                      FOREIGN KEY (shop_id) REFERENCES shops(id)
-                    )
-                """)
-                # データコピー（共通列のみ・足りない列はデフォルト値）
-                if common_cols:
-                    cur.execute(f"INSERT INTO staffs_new ({col_list}) SELECT {col_list} FROM staffs")
-                    copy_count = cur.execute("SELECT COUNT(*) FROM staffs_new").fetchone()[0]
-                    log.append(f"✓ {copy_count} 行コピー完了")
-                # 入れ替え
-                cur.execute("DROP TABLE staffs")
-                cur.execute("ALTER TABLE staffs_new RENAME TO staffs")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_staffs_shop ON staffs(shop_id)")
-                cur.execute("COMMIT")
-                conn.commit()
-                log.append("✓ staffs テーブルを再構築しました（student ロール対応）")
-            except Exception as e:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                log.append(f"✗ staffs 再構築失敗: {e}")
-                # staffs_backup から自動復元
-                log.append("自動復元を試みます...")
-                _restore_staffs_table_internal(log)
-                return jsonify({"ok": False, "error": str(e), "log": log}), 500
-            finally:
-                try:
-                    conn.execute("PRAGMA foreign_keys = ON")
-                    conn.close()
-                except Exception:
-                    pass
-        else:
-            log.append("✓ staffs テーブルは既に 'student' ロール対応済み")
-
-        # 2. shop_holidays テーブル確認
-        try:
-            holiday_rows = query_all("SELECT name FROM sqlite_master WHERE name='shop_holidays'")
-            if not holiday_rows:
-                conn = db_module_get_conn()
-                try:
-                    conn.execute("""
-                        CREATE TABLE IF NOT EXISTS shop_holidays (
-                          id INTEGER PRIMARY KEY AUTOINCREMENT,
-                          shop_id INTEGER NOT NULL,
-                          holiday_date TEXT NOT NULL,
-                          note TEXT,
-                          UNIQUE(shop_id, holiday_date),
-                          FOREIGN KEY (shop_id) REFERENCES shops(id)
-                        )
-                    """)
-                    conn.execute("CREATE INDEX IF NOT EXISTS idx_holidays_shop ON shop_holidays(shop_id, holiday_date)")
-                    conn.commit()
-                    log.append("✓ shop_holidays テーブルを新規作成しました")
-                finally:
-                    try: conn.close()
-                    except Exception: pass
-            else:
-                log.append("✓ shop_holidays テーブルは存在します")
-        except Exception as e:
-            log.append(f"⚠ shop_holidays 確認/作成でエラー: {e}")
-
-        # 3. 各店舗に manager スタッフが無ければ shops.password_hash を引き継いで作成
-        try:
-            shops = query_all("SELECT id, shop_code, shop_name, password_hash FROM shops")
-            auto_created = 0
-            for shop in shops:
-                existing = query_one(
-                    "SELECT id FROM staffs WHERE shop_id=? AND role='manager'",
-                    (shop["id"],))
-                if existing:
-                    continue
-                try:
-                    execute(
-                        "INSERT INTO staffs (shop_id, staff_code, password_hash, name, role, "
-                        "hourly_wage, min_hours_per_month, max_hours_per_month) "
-                        "VALUES (?,?,?,?,?,?,?,?)",
-                        (shop["id"], "manager", shop["password_hash"],
-                         shop["shop_name"] + " 店主", "manager", 2000, 0, 200))
-                    auto_created += 1
-                    log.append(f"✓ 店舗 '{shop['shop_code']}' に manager スタッフを自動作成（PW引継ぎ）")
-                except Exception as e:
-                    log.append(f"⚠ 店舗 '{shop['shop_code']}' の manager 作成スキップ: {e}")
-            if auto_created == 0:
-                log.append("✓ 全店舗に manager スタッフが存在します")
-        except Exception as e:
-            log.append(f"⚠ manager 自動作成でエラー: {e}")
-
-        # 最終状態を確認
-        try:
-            final = query_all("SELECT sql FROM sqlite_master WHERE name='staffs'")
-            final_schema = final[0]["sql"] if final else ""
-        except Exception:
-            final_schema = ""
-        return jsonify({
-            "ok": True,
-            "log": log,
-            "migrated_staffs_table": needs_rebuild,
-            "final_schema": final_schema,
-            "supports_student_role": "student" in final_schema.lower(),
-        })
-
-
-    @app.post("/api/admin/db/restore-staffs")
-    def admin_db_restore_staffs():
-        """staffs テーブル消失時の緊急復元（単独エンドポイント）。"""
-        require_auth(["admin"])
-        log = []
-        ok = _restore_staffs_table_internal(log)
-        return jsonify({"ok": ok, "log": log})
-
-
     @app.get("/api/admin/db/diagnostic")
     def admin_db_diagnostic():
         """DBの全テーブル一覧と各スキーマを表示（障害調査用）。"""
@@ -1226,9 +944,13 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
                 raise ValueError("配信先の店舗を選択してください")
             if not all(isinstance(x, int) and not isinstance(x, bool) for x in shop_ids):
                 raise ValueError("shop_ids は整数の配列で指定してください")
-            shops = query_all(
-                "SELECT id FROM shops WHERE COALESCE(is_archived,0)=0 AND is_active=1 "
-                "AND id IN ({})".format(",".join("?" * len(shop_ids))), tuple(shop_ids))
+            # IN (...) は指定件数ぶん ? を展開するため、店舗数が D1 のバインド上限を
+            # 超えると D1 がクエリを拒否する。上限以下に分割して引く。
+            shops = []
+            for chunk in chunked(shop_ids, D1_MAX_BINDS):
+                shops += query_all(
+                    "SELECT id FROM shops WHERE COALESCE(is_archived,0)=0 AND is_active=1 "
+                    "AND id IN ({})".format(",".join("?" * len(chunk))), tuple(chunk))
         else:
             shops = query_all("SELECT id FROM shops WHERE COALESCE(is_archived,0)=0 AND is_active=1")
         if not shops:
@@ -1247,9 +969,12 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
         recipients = 0
         if audience == "all":
             ids = [s["id"] for s in shops]
-            staffs = query_all(
-                "SELECT id, shop_id FROM staffs WHERE is_resigned=0 AND shop_id IN ({})".format(
-                    ",".join("?" * len(ids))), tuple(ids))
+            staffs = []
+            # ここも IN (...) の展開。店舗数が100を超えると D1 が拒否するため分割する。
+            for chunk in chunked(ids, D1_MAX_BINDS):
+                staffs += query_all(
+                    "SELECT id, shop_id FROM staffs WHERE is_resigned=0 AND shop_id IN ({})".format(
+                        ",".join("?" * len(chunk))), tuple(chunk))
             rows += [(st["shop_id"], st["id"]) for st in staffs]
             recipients = len(staffs)
 
@@ -1257,14 +982,19 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
             raise ValueError(f"配信件数が多すぎます（{len(rows)}件）。店舗を分けて配信してください")
 
         # D1 は REST API の1往復＝1クエリのため、1件ずつ挿すと配信が実用速度にならない。
-        # 1文のまとめ INSERT にする。
-        placeholders = ",".join(["(?,?,?,?,?,0,?,?)"] * len(rows))
-        binds = []
-        for shop_id, staff_id in rows:
-            binds += [shop_id, staff_id, "announcement", title, text, stamp, batch_id]
-        execute("INSERT INTO notifications "
-                "(shop_id, staff_id, type, title, body, is_read, created_at, batch_id) "
-                "VALUES " + placeholders, tuple(binds))
+        # まとめ INSERT にするが、1行あたり 7 バインドなので D1 のバインド上限
+        # （1クエリ100個）に収まる行数（=14行）ずつに分割する。分割しないと
+        # 稼働2店舗・スタッフ17名（19行=133バインド）の本番規模で即座に破綻する。
+        binds_per_row = 7
+        rows_per_query = D1_MAX_BINDS // binds_per_row
+        for chunk in chunked(rows, rows_per_query):
+            placeholders = ",".join(["(?,?,?,?,?,0,?,?)"] * len(chunk))
+            binds = []
+            for shop_id, staff_id in chunk:
+                binds += [shop_id, staff_id, "announcement", title, text, stamp, batch_id]
+            execute("INSERT INTO notifications "
+                    "(shop_id, staff_id, type, title, body, is_read, created_at, batch_id) "
+                    "VALUES " + placeholders, tuple(binds))
 
         audit("admin.announce", target_type="announcement", detail=
               f"{title} / 店舗{len(shops)}件 / 対象{'全員' if audience == 'all' else '店舗管理者'}")
