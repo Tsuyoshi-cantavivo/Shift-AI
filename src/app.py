@@ -3654,7 +3654,8 @@ def static_files(path):
 # require_auth / audit / summarize_shifts は app.py 側にしか無いため引数で渡す。
 import admin_api
 admin_api.register_admin_routes(
-    app, require_auth=require_auth, audit=audit, summarize_shifts=summarize_shifts)
+    app, require_auth=require_auth, audit=audit, summarize_shifts=summarize_shifts,
+    csv_safe=_csv_safe)
 
 
 # ===========================================================

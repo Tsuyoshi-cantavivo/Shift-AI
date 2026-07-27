@@ -500,56 +500,112 @@ const AUDIT_ACTION_LABELS = {
   'admin.impersonate_end': '代理閲覧終了',
   'admin.create': '管理者追加',
   'admin.delete': '管理者削除',
+  'admin.migrate': 'DBマイグレーション適用',
 };
 function auditActionLabel(a) { return AUDIT_ACTION_LABELS[a] || a || '—'; }
 
 SCREENS.adminAudit = async function (el) {
+  const tok = navToken();
+  // include_archived=1: アーカイブ済み店舗の過去ログも店舗フィルタで絞り込めるようにする
+  const shopsResp = await api('/admin/shops?include_archived=1');
+  if (!isAlive(tok)) return;
+  const shops = shopsResp.shops || [];
   el.innerHTML = pageHead('監査ログ', 'bi-clipboard-data', '重要操作の履歴') +
     card(sectionTitle('bi-funnel', 'フィルタ') +
-      `<div class="row mb-2">
-         <div class="col-6"><label class="form-label" for="auShop">店舗</label><select id="auShop" class="form-select"><option value="">すべて</option></select></div>
-         <div class="col-6"><label class="form-label" for="auAction">操作</label><select id="auAction" class="form-select">
-           <option value="">すべて</option>${Object.keys(AUDIT_ACTION_LABELS).map((k) => `<option value="${k}">${esc(AUDIT_ACTION_LABELS[k])}</option>`).join('')}
-         </select></div>
-       </div>
-       <button class="btn btn-primary btn-sm" id="auLoad"><i class="bi bi-search"></i> 表示</button>`) +
-    card(`<div id="auBody"><div class="text-secondary small">「表示」を押してください</div></div>`);
-  // 店舗フィルタの選択肢
-  try {
-    const d = await api('/admin/shops');
-    const sel = document.getElementById('auShop');
-    if (sel) sel.innerHTML = '<option value="">すべて</option>' + (d.shops || []).map((s) => `<option value="${s.id}">${esc(s.shop_name)}</option>`).join('');
-  } catch {}
-  async function load() {
+      `<div class="row">
+         <div class="col-6 col-lg-3"><label class="form-label" for="auStart">開始日</label><input type="date" id="auStart" class="form-control mb-2"></div>
+         <div class="col-6 col-lg-3"><label class="form-label" for="auEnd">終了日</label><input type="date" id="auEnd" class="form-control mb-2"></div>
+         <div class="col-6 col-lg-3"><label class="form-label" for="auShop">店舗</label>
+           <select id="auShop" class="form-select mb-2"><option value="">すべて</option>
+             ${shops.map((s) => `<option value="${s.id}">${esc(s.shop_name || s.shop_code)}</option>`).join('')}
+           </select></div>
+         <div class="col-6 col-lg-3"><label class="form-label" for="auActor">操作者</label><input id="auActor" class="form-control mb-2" placeholder="氏名の一部"></div>
+         <div class="col-6 col-lg-3"><label class="form-label" for="auAction">操作</label>
+           <select id="auAction" class="form-select mb-2"><option value="">すべて</option>
+             ${Object.keys(AUDIT_ACTION_LABELS).map((a) => `<option value="${esc(a)}">${esc(AUDIT_ACTION_LABELS[a])}</option>`).join('')}
+           </select></div>
+         <div class="col-12 flex gap-2 items-end">
+           <button class="btn btn-primary btn-sm" id="auLoad"><i class="bi bi-search"></i> 表示</button>
+           <button class="btn btn-light btn-sm" id="auCsv"><i class="bi bi-download"></i> CSV</button>
+         </div>
+       </div>`) +
+    card('<div id="auBody"><div class="text-secondary small">「表示」ボタンを押してください</div></div>' +
+         '<div class="text-center mt-2"><button class="btn btn-light btn-sm d-none" id="auMore">もっと見る</button></div>');
+
+  // ページング中のログを溜め込む配列。「もっと見る」は追記、「表示」は置き換え。
+  let rows = [];
+  const qs = (beforeId) => {
+    const p = new URLSearchParams();
+    const v = (id) => document.getElementById(id).value.trim();
+    if (v('auStart')) p.set('start', v('auStart'));
+    if (v('auEnd')) p.set('end', v('auEnd'));
+    if (v('auShop')) p.set('shop', v('auShop'));
+    if (v('auActor')) p.set('actor', v('auActor'));
+    if (v('auAction')) p.set('action', v('auAction'));
+    p.set('limit', '100');
+    if (beforeId) p.set('before_id', beforeId);
+    return p;
+  };
+
+  const render = () => {
     const body = document.getElementById('auBody');
     if (!body) return;
-    const tok = navToken();
-    body.innerHTML = '<div class="text-secondary small">読み込み中...</div>';
-    const shop = document.getElementById('auShop').value;
-    const action = document.getElementById('auAction').value;
-    const qs = new URLSearchParams();
-    if (shop) qs.set('shop', shop);
-    if (action) qs.set('action', action);
-    qs.set('limit', '200');
-    try {
-      const r = await api('/admin/audit-logs?' + qs.toString());
-      if (!isAlive(tok) || !body.isConnected) return;
-      const logs = r.logs || [];
-      if (!logs.length) { body.innerHTML = '<div class="small text-secondary">該当するログはありません</div>'; return; }
-      body.innerHTML = `<div class="table-wrap"><table class="data-table"><thead><tr><th>日時</th><th>操作者</th><th>操作</th><th>対象</th><th>詳細</th></tr></thead><tbody>${logs.map((l) => `
-        <tr>
+    body.innerHTML = rows.length
+      ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>日時</th><th>操作者</th><th>操作</th><th>対象</th><th>詳細</th></tr></thead><tbody>` +
+        rows.map((l) => {
+          const a = l.action || '';
+          // 失敗・却下・削除系は目立たせる（要確認の意味で warning）
+          const isWarn = a.indexOf('reject') >= 0 || a.indexOf('fail') >= 0 ||
+            a.indexOf('blocked') >= 0 || a.indexOf('delete') >= 0;
+          return `<tr>
           <td class="small">${esc((l.created_at || '').replace('T', ' '))}</td>
           <td class="small">${esc(l.actor_name || l.actor_role || '—')}</td>
-          <td>${badge(auditActionLabel(l.action), l.action && l.action.indexOf('reject') >= 0 ? 'warning' : 'info')}</td>
+          <td>${badge(auditActionLabel(a), isWarn ? 'warning' : 'info')}</td>
           <td class="small">${esc(l.target_type || '')}${l.target_id != null ? ' #' + l.target_id : ''}</td>
-          <td class="small text-secondary">${esc(l.detail || '')}</td>
-        </tr>`).join('')}</tbody></table></div>`;
+          <td class="small text-secondary">${esc(l.detail || '')}</td></tr>`;
+        }).join('') + '</tbody></table></div>'
+      : emptyState('bi-clipboard-data', '該当するログがありません');
+  };
+
+  const load = async (beforeId) => {
+    const body = document.getElementById('auBody');
+    if (!body) return;
+    const tok2 = navToken();
+    if (!beforeId) body.innerHTML = '<div class="text-secondary small">読み込み中...</div>';
+    try {
+      const d = await api('/admin/audit-logs?' + qs(beforeId).toString());
+      if (!isAlive(tok2)) return;
+      rows = beforeId ? rows.concat(d.logs) : d.logs;
+      render();
+      const more = document.getElementById('auMore');
+      if (more) more.classList.toggle('d-none', !d.has_more);
     } catch (e) {
-      if (!isAlive(tok) || !body.isConnected) return;
+      if (!isAlive(tok2) || !body.isConnected) return;
       body.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
     }
-  }
-  document.getElementById('auLoad')?.addEventListener('click', load);
+  };
+
+  document.getElementById('auLoad')?.addEventListener('click', () => load());
+  document.getElementById('auMore')?.addEventListener('click', () => {
+    if (rows.length) load(rows[rows.length - 1].id);
+  });
+  document.getElementById('auCsv')?.addEventListener('click', async () => {
+    try {
+      // api() は JSON を返す前提なので、ファイル取得は fetch を直に使う
+      const p = qs();
+      p.delete('limit');
+      const res = await fetch('/api/admin/audit-logs.csv?' + p.toString(), {
+        headers: { Authorization: 'Bearer ' + localStorage.getItem('shift_token') } });
+      if (!res.ok) throw new Error('ダウンロードに失敗しました');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'audit-logs.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) { toast(e.message, 'error'); }
+  });
   load();
 };
 

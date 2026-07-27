@@ -4,8 +4,9 @@ src/app.py が4000行超で保守が難しくなっていたため切り出し�
 register_admin_routes(app, ...) の中で既存と同じ @app.get/post デコレータで登録する
 （url_prefix 等の新しい概念を持ち込まないため）。
 
-app.py 側にしか無いヘルパ（require_auth / audit / summarize_shifts）は
-循環 import を避けるためキーワード引数で受け取る。
+app.py 側にしか無いヘルパ（require_auth / audit / summarize_shifts / csv_safe）は
+循環 import を避けるためキーワード引数で受け取る。csv_safe は CSV の
+Formula Injection 対策関数の実体で、二重管理を避けるため再実装しない。
 
 db_module_get_conn / _restore_staffs_table_internal は admin_db_migrate /
 admin_db_restore_staffs 専用の内部ヘルパで、app.py 側の状態には依存しないため
@@ -141,7 +142,7 @@ def _restore_staffs_table_internal(log):
         return False
 
 
-def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
+def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_safe):
     """/api/admin/* の全ルートを app に登録する。"""
 
     @app.get("/api/admin/dashboard")
@@ -714,28 +715,79 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         return jsonify({"ok": True, "updated": len(fields)})
 
 
+    def _audit_filters():
+        """クエリ文字列から WHERE 句と bind を組み立てる。
+
+        列名は固定文字列のみを使い、外部入力から組み立てない。値は必ず
+        プレースホルダで束縛する（SQL インジェクション対策）。
+        """
+        where, binds = [], []
+        shop = request.args.get("shop")
+        if shop:
+            where.append("shop_id=?"); binds.append(int(shop))
+        action = request.args.get("action")
+        if action:
+            where.append("action=?"); binds.append(action)
+        start = request.args.get("start")
+        if start:
+            where.append("created_at>=?"); binds.append(start + " 00:00:00")
+        end = request.args.get("end")
+        if end:
+            where.append("created_at<=?"); binds.append(end + " 23:59:59")
+        actor = request.args.get("actor")
+        if actor:
+            where.append("actor_name LIKE ?"); binds.append(f"%{actor}%")
+        return where, binds
+
     @app.get("/api/admin/audit-logs")
     def admin_audit_logs():
-        """監査ログ一覧（新しい順）。shop / action でフィルタ可、既定 limit=100・上限500。"""
+        """監査ログ一覧（新しい順）。
+
+        shop / action / start / end / actor でフィルタ可。before_id カーソル方式の
+        ページングで、既定 limit=100・上限500。has_more は limit+1 件取って
+        超えた分があるかどうかで判定する。
+        """
         require_auth(["admin"])
-        shop = request.args.get("shop")
-        action = request.args.get("action")
+        where, binds = _audit_filters()
+        before_id = request.args.get("before_id")
+        if before_id:
+            where.append("id<?"); binds.append(int(before_id))
         try:
             limit = min(int(request.args.get("limit", 100)), 500)
         except (TypeError, ValueError):
             limit = 100
-        where = []
-        params = []
-        if shop:
-            where.append("shop_id=?")
-            params.append(shop)
-        if action:
-            where.append("action=?")
-            params.append(action)
         clause = ("WHERE " + " AND ".join(where)) if where else ""
-        params.append(limit)
-        rows = query_all(f"SELECT * FROM audit_logs {clause} ORDER BY id DESC LIMIT ?", tuple(params))
-        return jsonify({"logs": rows})
+        # has_more の判定のため1件多く取る
+        rows = query_all(f"SELECT * FROM audit_logs {clause} ORDER BY id DESC LIMIT ?",
+                          tuple(binds) + (limit + 1,))
+        has_more = len(rows) > limit
+        return jsonify({"logs": rows[:limit], "has_more": has_more})
+
+    @app.get("/api/admin/audit-logs.csv")
+    def admin_audit_logs_csv():
+        """監査ログの CSV ダウンロード。画面のページングとは無関係にフィルタ結果全件（上限5000）。
+
+        actor_name にはログイン失敗時の入力コードがそのまま入る（Phase 1）ため
+        攻撃者が内容を制御しうる値。csv_safe（= app.py の _csv_safe）で
+        Formula Injection (CWE-1236) を防ぐ。
+        """
+        require_auth(["admin"])
+        where, binds = _audit_filters()
+        clause = ("WHERE " + " AND ".join(where)) if where else ""
+        rows = query_all(f"SELECT * FROM audit_logs {clause} ORDER BY id DESC LIMIT 5000",
+                          tuple(binds))
+        header = ["日時", "操作者ロール", "操作者", "操作", "対象種別", "対象ID", "店舗ID", "詳細"]
+        lines = [",".join(csv_safe(h) for h in header)]
+        for r in rows:
+            lines.append(",".join(csv_safe(v) for v in [
+                r.get("created_at"), r.get("actor_role"), r.get("actor_name"), r.get("action"),
+                r.get("target_type"), r.get("target_id"), r.get("shop_id"), r.get("detail")]))
+        # Excel が UTF-8 と判定できるよう BOM を付ける
+        body = "﻿" + "\r\n".join(lines)
+        filename = f"audit-logs-{jst_now().strftime('%Y%m%d')}.csv"
+        resp = Response(body, content_type="text/csv; charset=utf-8")
+        resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        return resp
 
 
     @app.get("/api/admin/debug/db-schema")
