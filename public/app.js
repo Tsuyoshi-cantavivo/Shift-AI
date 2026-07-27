@@ -2198,8 +2198,8 @@ SCREENS.shifts = function (el) {
       const defFrom = past ? past.start_date : '', defTo = past ? past.end_date : '';
       const m = openModal('<i class="bi bi-files"></i> 前回シフトをコピー',
         `<p class="small text-muted">過去期間の確定シフトを、現在の期間へ日付をずらして複製します。</p>
-         <div class="row"><div class="col-6"><label class="form-label" for="cpFrom">コピー元 開始</label><input type="date"  id="cpFrom" class="form-control" value="${defFrom}"></div>
-         <div class="col-6"><label class="form-label" for="cpFromEnd">コピー元 終了</label><input type="date"  id="cpFromEnd" class="form-control" value="${defTo}"></div></div>
+         <div class="row"><div class="col-6"><label class="form-label" for="cpFrom">コピー元 開始</label><input type="date"  id="cpFrom" class="form-control" value="${esc(defFrom)}"></div>
+         <div class="col-6"><label class="form-label" for="cpFromEnd">コピー元 終了</label><input type="date"  id="cpFromEnd" class="form-control" value="${esc(defTo)}"></div></div>
          <label class="form-label mt-2">貼り付け先 開始</label><input type="date" id="cpTo" class="form-control" value="${cur().start}">
          <div class="small text-muted mt-1" id="cpPreview"></div>`,
         async (w, close) => {

@@ -592,6 +592,30 @@ class TestPeriodDateRenderEscaping:
         tpl = _grab(APP_JS, r'<input type="date" id="sStart"[^>]*>', "app.js シフト管理の開始日")
         assert 'value="2026-08-01"' in _render(tpl, {"p": {"start_date": "2026-08-01"}})
 
+    def test_copy_shift_modal_from_start_date_is_escaped(self):
+        """再レビュー指摘: 「前回シフトをコピー」モーダルのコピー元開始日
+        （defFrom = past.start_date、shift_request_periods 由来）が無エスケープだった。
+        代理閲覧中の運営管理者がシフト管理タブでこのモーダルを開くだけで発火する。"""
+        tpl = _grab(APP_JS, r'<input type="date"  id="cpFrom"[^>]*>',
+                    "app.js 前回シフトをコピーのコピー元開始日")
+        html = _render(tpl, {"defFrom": ATTR_ESCAPE_PAYLOAD})
+        _assert_attribute_is_not_escapable(html)
+
+    def test_copy_shift_modal_from_end_date_is_escaped(self):
+        """同モーダルのコピー元終了日（defTo = past.end_date）。"""
+        tpl = _grab(APP_JS, r'<input type="date"  id="cpFromEnd"[^>]*>',
+                    "app.js 前回シフトをコピーのコピー元終了日")
+        html = _render(tpl, {"defTo": ATTR_ESCAPE_PAYLOAD})
+        _assert_attribute_is_not_escapable(html)
+
+    def test_copy_shift_modal_dates_normal_value_unchanged(self):
+        tpl_from = _grab(APP_JS, r'<input type="date"  id="cpFrom"[^>]*>',
+                         "app.js 前回シフトをコピーのコピー元開始日")
+        assert 'value="2026-07-01"' in _render(tpl_from, {"defFrom": "2026-07-01"})
+        tpl_to = _grab(APP_JS, r'<input type="date"  id="cpFromEnd"[^>]*>',
+                       "app.js 前回シフトをコピーのコピー元終了日")
+        assert 'value="2026-07-15"' in _render(tpl_to, {"defTo": "2026-07-15"})
+
 
 class TestFixedShiftRenderEscaping:
     def test_fixed_shift_edit_start_time_is_escaped(self):
