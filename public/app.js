@@ -414,9 +414,14 @@ function effectiveRole() {
   return window._impersonating ? 'shop' : currentRole;
 }
 
+// バーの実高を監視する ResizeObserver。renderImpersonationBar() を呼ぶたびに
+// 必ず破棄してから作り直す（多重登録・古いバーへのゾンビ更新を防ぐため）。
+let _impBarObserver = null;
+
 function renderImpersonationBar() {
   const existing = document.getElementById('impersonationBar');
   if (existing) existing.remove();
+  if (_impBarObserver) { _impBarObserver.disconnect(); _impBarObserver = null; }
   // 高さオフセットも一旦リセット（非表示時は --header-h と同値に戻す）
   document.documentElement.classList.remove('has-impersonation-bar');
   document.documentElement.style.removeProperty('--imp-bar-h');
@@ -431,10 +436,32 @@ function renderImpersonationBar() {
     `<button class="btn btn-sm btn-light" id="stopImpersonateBtn">管理者に戻る</button>`;
   header.insertAdjacentElement('afterend', bar);
   document.getElementById('stopImpersonateBtn')?.addEventListener('click', stopImpersonation);
-  // side-nav / side-overlay がこのバーと重ならないよう、実測した高さで --imp-bar-h を
-  // 上書きする（フォント環境・ボタンの実高さで変わりうる値を決め打ちしないため）。
-  document.documentElement.style.setProperty('--imp-bar-h', bar.offsetHeight + 'px');
   document.documentElement.classList.add('has-impersonation-bar');
+  // side-nav / side-overlay がこのバーと重ならないよう、実測した高さで --imp-bar-h を
+  // 上書きする。offsetHeight の一回読みだけだと、
+  //   ・呼び出し時点で祖先の #appView に d-none が付いていて未レイアウト（0を測ってしまう）
+  //   ・ウィンドウ幅が変わってテキストが折り返し、バーの実高が変わる
+  // の2ケースで値がずれたまま固定される（レビューで実機確認済み）。ResizeObserver で
+  // バー自身の box を監視し、#appView が可視化された瞬間・折り返しで高さが変わった
+  // 瞬間の両方で測り直す。
+  const applyHeight = () => {
+    // 別の renderImpersonationBar() 呼び出しで既にこのバーが破棄されている場合、
+    // 遅延実行（rAF）の間に古い bar を測って新しいバーの高さを上書きしてしまう
+    // （ゾンビ更新）ことがあるため、DOM に残っているかを確認してから書き込む。
+    if (!bar.isConnected) return;
+    document.documentElement.style.setProperty('--imp-bar-h', bar.offsetHeight + 'px');
+  };
+  applyHeight();
+  if (typeof ResizeObserver !== 'undefined') {
+    // ResizeObserver のコールバック内で同期的にレイアウトへ影響する書き込みを行うと、
+    // ブラウザが「ResizeObserver loop completed with undelivered notifications」という
+    // 無害だが煩わしい警告を error イベントとして発生させることがある
+    // （本アプリはグローバルエラーハンドラで window の error を全てトースト表示するため、
+    // このままだと代理閲覧の開始/終了を素早く繰り返しただけでエラートーストが出てしまう）。
+    // 次フレームまで書き込みを遅延させるのが定石の回避策。
+    _impBarObserver = new ResizeObserver(() => requestAnimationFrame(applyHeight));
+    _impBarObserver.observe(bar);
+  }
 }
 
 async function stopImpersonation() {
