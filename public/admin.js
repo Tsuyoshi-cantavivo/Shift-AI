@@ -125,10 +125,20 @@ SCREENS.adminShops = async function (el) {
 // 店舗詳細のタブ状態。settingsTab（app.js）と同じ理由でモジュール変数にして
 // タブ切替のたびに再生成せず、画面再訪時も直前のタブを覚えておく。
 let adminShopTab = 'overview';
+// 直前に開いていた店舗のID。設定保存・アーカイブ操作の後は同じ店舗の詳細へ
+// navigateTo('adminShopDetail') で戻るため、その場合はタブを維持したい
+// （例: 設定タブで保存→設定タブのまま／危険な操作タブでアーカイブ→危険な操作タブのまま）。
+// 一方で「別の店舗」を開いたときは前の店舗で見ていたタブ（例: 危険な操作）を
+// 引き継ぐべきではない。id が変わったときだけ 'overview' にリセットする。
+let adminShopTabForId = null;
 
 SCREENS.adminShopDetail = async function (el) {
   const tok = navToken();
   const sid = window._adminShopId;
+  if (adminShopTabForId !== sid) {
+    adminShopTab = 'overview';
+    adminShopTabForId = sid;
+  }
   // include_archived=1 なのは、アーカイブ済み店舗の詳細（解除・完全削除）にも
   // このタブからしか到達できないため（一覧の既定表示では隠れている）。
   const shops = await api('/admin/shops?include_archived=1');
@@ -289,7 +299,10 @@ async function renderShopStaffsTab(body, shop) {
 /* ---- 設定タブ: 店舗名・店舗コード・シフト設定 ---- */
 async function renderShopSettingsTab(body, shop) {
   const s = shop.settings ? (typeof shop.settings === 'string' ? JSON.parse(shop.settings || '{}') : shop.settings) : {};
-  const num = (v) => (v === undefined || v === null ? '' : v);
+  // settings は店舗側の PUT /api/shop/settings 経由でも保存され得るため、値が
+  // 数値である保証はサーバ側バリデーションに頼れない（防御的にもここで esc() する）。
+  // num() 自身が esc() 済みの文字列を返すことで、呼び出し側での貼り忘れを防ぐ。
+  const num = (v) => (v === undefined || v === null ? '' : esc(String(v)));
   body.innerHTML =
     card(sectionTitle('bi-shop', '店舗情報') +
       `<label class="form-label" for="stName">店舗名</label>

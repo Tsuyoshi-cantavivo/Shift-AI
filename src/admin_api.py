@@ -16,7 +16,8 @@ from flask import request, jsonify, abort, g, Response
 from db import query_all, query_one, execute, insert_row
 from auth import hash_password, verify_password, strip_password
 from utils import (calc_next_period, jst_now, parse_settings, validate_password,
-                    sanitize_login_code, LOGIN_CODE_MAX)
+                    sanitize_login_code, LOGIN_CODE_MAX, validate_known_settings_values,
+                    SETTINGS_KEYS)
 import json
 import re
 import migrator
@@ -266,13 +267,10 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         return jsonify({"ok": True})
 
 
-    # shops.settings で受け付けるキー（src/utils.py の parse_settings 利用箇所と対応）。
+    # shops.settings で受け付けるキー。src/utils.py の SETTINGS_KEYS をそのまま使う
+    # （店舗側 PUT /api/shop/settings の値検証と定義を共有し、キー集合がドリフトしないようにする）。
     # 未知のキーを弾くのは、タイプミスが黙って保存されてシフト生成に効かない事故を防ぐため。
-    _SETTINGS_KEYS = {
-        "business_hours", "default_hourly_wage", "max_consecutive_days", "max_daily_hours",
-        "max_employee_daily_hours", "min_daily_hours", "night_premium_rate",
-        "period_mode", "shift_hours", "transport_per_day",
-    }
+    _SETTINGS_KEYS = SETTINGS_KEYS
 
     @app.post("/api/admin/shops/<int:sid>/archive")
     def admin_shop_archive(sid):
@@ -474,6 +472,11 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts):
         unknown = set(body.keys()) - _SETTINGS_KEYS
         if unknown:
             raise ValueError(f"未知の設定キーです: {', '.join(sorted(unknown))}")
+        # 値の型検証（保存型XSS対策）。管理コンソールの設定タブが shop.settings を
+        # JSON.parse() して無エスケープで描画していた箇所があり、数値キーに文字列
+        # （HTMLタグを含む値）が保存されると発火した。ここは全キーが既知（直前の
+        # unknown チェック済み）なので、body の全キーが検証対象になる。
+        validate_known_settings_values(body)
         merged = parse_settings(shop.get("settings"))
         merged.update(body)
         execute("UPDATE shops SET settings=? WHERE id=?",

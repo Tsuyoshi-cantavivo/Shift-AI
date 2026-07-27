@@ -1,5 +1,7 @@
 """utils.py - 共通ユーティリティ（Flask版・純粋Python）。"""
 import json
+import math
+import re
 from datetime import date, datetime, timedelta, timezone
 
 _JST = timezone(timedelta(hours=9))
@@ -413,6 +415,74 @@ def parse_settings(s):
         return json.loads(s or "{}")
     except Exception:
         return {}
+
+
+# shops.settings のうち、意味が固定されている既知キー。
+# src/admin_api.py の PUT /api/admin/shops/<id>/settings と
+# src/app.py の PUT /api/shop/settings（店舗ユーザー向け）の両方から使う。
+SETTINGS_KEYS = frozenset({
+    "business_hours", "default_hourly_wage", "max_consecutive_days", "max_daily_hours",
+    "max_employee_daily_hours", "min_daily_hours", "night_premium_rate",
+    "period_mode", "shift_hours", "transport_per_day",
+})
+
+_SETTINGS_NUMERIC_KEYS = frozenset({
+    "default_hourly_wage", "max_consecutive_days", "max_daily_hours",
+    "max_employee_daily_hours", "min_daily_hours", "night_premium_rate",
+    "transport_per_day",
+})
+
+_SETTINGS_PERIOD_MODES = frozenset({"half", "month"})
+
+# "HH:MM-HH:MM" 形式（旧 business_hours 設定）。日またぎ営業を表すため時は0-47まで許可
+# （src/app.py の _validate_hhmm / shift_hours の扱いと同じ範囲に揃えている）。
+_BUSINESS_HOURS_RE = re.compile(
+    r"^([01]?[0-9]|[2-3][0-9]|4[0-7]):[0-5][0-9]-([01]?[0-9]|[2-3][0-9]|4[0-7]):[0-5][0-9]$")
+
+
+def validate_known_settings_values(patch):
+    """shops.settings に部分更新でマージする patch のうち、既知キー（SETTINGS_KEYS）
+    だけを値の型で検証する。不正なら ValueError を送出する
+    （呼び出し元 Flask アプリの @app.errorhandler(ValueError) が 400 に変換する）。
+
+    【なぜ必要か】管理コンソールの店舗詳細「設定」タブ（public/admin.js）は
+    shop.settings を JSON.parse() してから 6つの数値項目を
+    `<input value="${num(s.xxx)}">` として描画していた。数値キーに文字列
+    （例: `1000"><img src=x onerror=...>`）が保存されると、無エスケープの
+    まま value 属性を抜けてタグを注入できる、保存型XSSが実際に成立した
+    （管理者が設定タブを開くだけでJSが実行される・クリック不要）。
+    描画側で esc() するだけでなく、そもそも数値以外を保存させない「入口」の
+    防御も入れることで、他の描画箇所（例: public/app.js の
+    深夜割増率表示・renderShopTab の value 属性、いずれも無エスケープ）が
+    将来同じ穴を持っていても、型で事前に塞がれる。
+
+    【未知キーは検証しない】PUT /api/shop/settings は既知キー以外の任意キーの
+    保存を許容する既存契約がある
+    （tests/test_admin_staff_apis.py::test_update_shop_name が
+    `{"new_key": 1}` の保存を 200 で期待している）。ここで弾くと後方互換が
+    壊れるため、既知キーだけを対象にする。
+    """
+    if not isinstance(patch, dict):
+        raise ValueError("settings はオブジェクトで指定してください")
+    for key, value in patch.items():
+        if key not in SETTINGS_KEYS:
+            continue
+        if key in _SETTINGS_NUMERIC_KEYS:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{key} は数値で指定してください")
+        elif key == "period_mode":
+            if value not in _SETTINGS_PERIOD_MODES:
+                raise ValueError("period_mode は half か month で指定してください")
+        elif key == "business_hours":
+            if not isinstance(value, str) or not _BUSINESS_HOURS_RE.match(value):
+                raise ValueError("business_hours の形式が不正です（例: 09:00-22:00）")
+        elif key == "shift_hours":
+            if not isinstance(value, dict):
+                raise ValueError("shift_hours はオブジェクトで指定してください")
+            # 内部の葉の値（時刻文字列等）は GET/PUT /api/shop/shift-hours 側の
+            # _normalize_shift_hours() が読み出し時に必ず正規化するため、
+            # ここでは dict であることだけを保証すれば描画時の安全は保たれる。
+    return patch
 
 
 def build_ics(shifts, staff_name, shop_name="ShiftAI"):

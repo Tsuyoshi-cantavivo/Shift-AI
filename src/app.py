@@ -24,7 +24,7 @@ from utils import (
     calc_next_period, jst_now, jst_today, minutes_between, compute_break_minutes,
     night_minutes, validate_password, parse_settings, build_ics, parse_iso, normalize_iso,
     norm_hhmm, norm_dt_iso, add_days, build_staff_tendency, combine_dt_overnight,
-    sanitize_login_code, LOGIN_CODE_MAX,
+    sanitize_login_code, LOGIN_CODE_MAX, validate_known_settings_values,
 )
 import shift_engine
 import ai
@@ -1211,8 +1211,14 @@ def shop_settings_put():
     shop, shop_id, settings = _shop_ctx()
     body = request.get_json(silent=True) or {}
     cur = dict(settings)
-    if body.get("settings"):
-        cur.update(body["settings"])
+    patch = body.get("settings")
+    if patch:
+        # 既知キー（default_hourly_wage 等）だけ値の型を検証する（保存型XSS対策。
+        # 詳細は utils.validate_known_settings_values のdocstring参照）。未知キーは
+        # 既存どおり素通しする——このエンドポイントは任意キーの保存を許容する契約が
+        # 既にある（tests/test_admin_staff_apis.py::test_update_shop_name）。
+        validate_known_settings_values(patch)
+        cur.update(patch)
     execute("UPDATE shops SET shop_name=?, settings=? WHERE id=?",
             (body.get("shop_name", shop["shop_name"]), json.dumps(cur, ensure_ascii=False), shop_id))
     return jsonify({"ok": True})
