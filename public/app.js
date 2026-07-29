@@ -4394,6 +4394,77 @@ SCREENS.staffMyshift = function (el) {
 };
 
 let wishState = {}; let wishMonth = null; let wishPeriod = null;
+/* 希望1件を、カレンダーのセルに載せる文字列にする。
+   【なぜ時刻を出すか】以前は種別名だけを出しており、時間指定の希望は実際に
+   何時で入れたかを固定文字「時間」で潰していた。日付を開き直しても既定値に
+   戻って見えたため、提出前に内容を確認する手段が画面上に無かった
+   （wishState には正しく入っていて提出も成功するので、表示だけの欠落）。
+   店長側の _wtiRenderCalendar と同じ _wtiShortTime を使い ":00" を省くことで、
+   font-size .56rem のセルにも収める（17:00-22:00 → 「17-22」）。
+   戻り値は HTML として安全な文字列。呼び出し側で再度 esc() しないこと。 */
+function wishMarkText(w) {
+  if (!w) return '';
+  const label = { any: 'いつでも', morning: '早番', evening: '遅番', rest: '休み' };
+  if (w.type === 'time') return `${_wtiShortTime(hm(w.start))}-${_wtiShortTime(hm(w.end))}`;
+  // 柔軟希望は時刻を持たないので種別名のまま。未知の type でも空文字にせず出す
+  // （将来 type を増やしたときにセルから静かに消えて気づけないのを防ぐ）。
+  return label[w.type] || esc(w.type);
+}
+
+/* 希望ピッカーの本文HTML。cur は wishState[day]（その日が未設定なら undefined）。
+   【なぜ cur を受けるか】以前は value="17:00"/"22:00" のハードコードで、
+   入力済みの値を読んでいなかった。開き直すと必ず既定値に見えるうえ、いま
+   どの種別が選ばれているかも分からなかった。 */
+function wishPickerBodyHtml(cur) {
+  const isTime = !!cur && cur.type === 'time';
+  // hm() は "HH:MM" か "--:--" しか返さないので、value に入れても壊れない
+  const st = isTime ? hm(cur.start) : '17:00';
+  const en = isTime ? hm(cur.end) : '22:00';
+  const btns = [['rest', '休み'], ['any', 'いつでも可'], ['morning', '早番'], ['evening', '遅番']]
+    .map(([t, lbl]) => {
+      const on = !!cur && cur.type === t;
+      return `<button class="btn ${on ? 'btn-primary' : 'btn-light'} flex-grow" data-t="${t}">${lbl}</button>`;
+    }).join('');
+  // 取り消しは設定済みの日だけ。従来は全ボタンが値を代入するだけで、
+  // 一度付けた希望を「未設定」に戻す手段がどこにも無かった。
+  const clear = cur
+    ? '<button class="btn btn-light w-full mt-2" data-clear><i class="bi bi-eraser"></i> この日の希望を取り消す</button>'
+    : '';
+  return `
+      <div class="flex flex-wrap gap-1">${btns}</div>
+      <div class="mt-2"><label class="form-label" for="wpStart">時間指定${isTime ? ' ' + badge('選択中', 'success') : ''}</label>
+      <div class="row"><div class="col-6"><input type="time" id="wpStart" class="form-control" value="${esc(st)}"></div><div class="col-6"><input type="time" id="wpEnd" class="form-control" value="${esc(en)}"></div></div>
+      <button class="btn btn-primary w-full mt-2" data-t="time">この時間で設定</button></div>${clear}`;
+}
+
+/* wishState を POST /api/staff/requests の shifts 配列にする。
+   【なぜ rest も送るか】以前は `if (w.type === 'rest') return;` で捨てていた。
+   サーバーは availability='rest' を受け付け、シフト生成でも尊重する（管理者側の
+   /api/shop/my-requests と同じ）のに、UI だけが破棄していたため、カレンダーに
+   「休み」と出したまま提出しても店舗には1件も届いていなかった。
+   時刻は設計書 §3 の表（_wish_times）に合わせる。 */
+function wishSubmitPayload(state) {
+  // 秒なし "YYYY-MM-DDTHH:MM" → "...HH:MM:00" に正規化（サーバーのパース対応）
+  const normDt = (dt) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(dt || '') ? dt + ':00' : dt;
+  const out = [];
+  Object.entries(state || {}).forEach(([day, w]) => {
+    if (!w || !w.type) return;
+    if (w.type === 'time') out.push({ start_datetime: normDt(w.start), end_datetime: normDt(w.end) });
+    else if (w.type === 'rest') out.push({ start_datetime: `${day}T00:00:00`, end_datetime: `${day}T23:59:59`, availability: 'rest' });
+    else out.push({ start_datetime: `${day}T09:00:00`, availability: w.type });
+  });
+  return out;
+}
+
+/* 提出済み一覧の1行に出す時間の文字列。
+   【なぜ availability を見るか】休希望は終日 00:00〜23:59 で保存されるため、
+   時刻だけ出すと「00:00-23:59」＝24時間働きたい希望のように見えていた。 */
+function reqRangeText(r) {
+  const label = { rest: '休み', any: 'いつでも', morning: '早番', evening: '遅番' };
+  // 'time' と、availability 列が無い旧データは実際の時刻を出す
+  return label[r.availability] || `${hm(r.start_datetime)}-${hm(r.end_datetime)}`;
+}
+
 SCREENS.request = async function (el) {
   // 募集期間に基づいてカレンダーの初期月を設定
   try {
@@ -4431,7 +4502,6 @@ SCREENS.request = async function (el) {
     document.getElementById('wTitle').textContent = `${wishMonth.y}年 ${wishMonth.m + 1}月`;
     const first = new Date(wishMonth.y, wishMonth.m, 1); const startWd = first.getDay();
     const dim = new Date(wishMonth.y, wishMonth.m + 1, 0).getDate();
-    const label = { any: 'いつでも', morning: '早番', evening: '遅番', time: '時間', rest: '休み' };
     const inPeriod = (ds) => wishPeriod && ds >= wishPeriod.start_date && ds <= wishPeriod.end_date;
     let cells = '';
     for (let i = 0; i < startWd; i++) cells += '<div class="wish-cell empty"></div>';
@@ -4441,7 +4511,7 @@ SCREENS.request = async function (el) {
       const cls = wd === 0 ? 'sun' : (wd === 6 ? 'sat' : '');
       const allowed = inPeriod(ds);
       const cellCls = allowed ? 'wish-cell' : 'wish-cell disabled';
-      const mark = w ? `<div class="wmark ${w.type === 'time' ? 'time' : w.type}">${label[w.type]}</div>` : '';
+      const mark = w ? `<div class="wmark ${w.type === 'time' ? 'time' : w.type}">${wishMarkText(w)}</div>` : '';
       cells += `<div class="${cellCls}" data-day="${ds}" data-allowed="${allowed ? 1 : 0}"><div class="wd ${cls}">${d}</div>${mark}</div>`;
     }
     document.getElementById('wishGrid').innerHTML = cells;
@@ -4454,15 +4524,11 @@ SCREENS.request = async function (el) {
     });
   }
   function openWishPicker(day) {
-    const w = openModal(`${day}（${wdName(day)}）の希望`, `
-      <div class="flex flex-wrap gap-1">
-        <button class="btn btn-light flex-grow" data-t="rest">休み</button>
-        <button class="btn btn-light flex-grow" data-t="any">いつでも可</button>
-        <button class="btn btn-light flex-grow" data-t="morning">早番</button>
-        <button class="btn btn-light flex-grow" data-t="evening">遅番</button>
-      </div>
-      <div class="mt-2"><label class="form-label" for="wpStart">時間指定</label><div class="row"><div class="col-6"><input type="time" id="wpStart" class="form-control" value="17:00"></div><div class="col-6"><input type="time" id="wpEnd" class="form-control" value="22:00"></div></div>
-      <button class="btn btn-primary w-full mt-2" data-t="time">この時間で設定</button></div>`, null);
+    // 入力済みの内容を渡して復元する。開き直したときに何を入れたか分かるように
+    const w = openModal(`${day}（${wdName(day)}）の希望`, wishPickerBodyHtml(wishState[day]), null);
+    w.querySelector('[data-clear]')?.addEventListener('click', () => {
+      delete wishState[day]; buzz(10); w.remove(); drawWish();
+    });
     w.querySelectorAll('[data-t]').forEach((b) => b?.addEventListener('click', () => {
       const t = b.dataset.t;
       if (t === 'time') {
@@ -4540,14 +4606,7 @@ SCREENS.request = async function (el) {
     finally { setLoading(false); }
   });
   document.getElementById('submitWish')?.addEventListener('click', async () => {
-    const shifts = [];
-    // 秒なし "YYYY-MM-DDTHH:MM" → "YYYY-MM-DDTHH:MM:00" に正規化（サーバーパース対応）
-    const normDt = (dt) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(dt || '') ? dt + ':00' : dt;
-    Object.entries(wishState).forEach(([day, w]) => {
-      if (w.type === 'rest') return;
-      if (w.type === 'time') shifts.push({ start_datetime: normDt(w.start), end_datetime: normDt(w.end) });
-      else shifts.push({ start_datetime: `${day}T09:00:00`, availability: w.type });
-    });
+    const shifts = wishSubmitPayload(wishState);
     if (!shifts.length) { toast('希望を選択してください', 'error'); return; }
     try {
       const d = await api('/staff/requests', { method: 'POST', body: JSON.stringify({ shifts }) });
@@ -4558,7 +4617,7 @@ SCREENS.request = async function (el) {
   const loadMyReqs = async () => {
     try {
       const d = await api('/staff/requests');
-      document.getElementById('myReqs').innerHTML = d.requests.length ? d.requests.map((r) => `<div class="list-row"><div><strong class="num">${esc(r.start_datetime.slice(5,10))} ${hm(r.start_datetime)}-${hm(r.end_datetime)}</strong> ${badge('調整待ち','warning')}</div><button class="btn btn-sm btn-outline-danger" data-cancel="${r.id}"><i class="bi bi-x"></i></button></div>`).join('') : '<div class="small text-secondary">提出済みの希望はありません</div>';
+      document.getElementById('myReqs').innerHTML = d.requests.length ? d.requests.map((r) => `<div class="list-row"><div><strong class="num">${esc(r.start_datetime.slice(5,10))} ${esc(reqRangeText(r))}</strong> ${badge('調整待ち','warning')}</div><button class="btn btn-sm btn-outline-danger" data-cancel="${r.id}"><i class="bi bi-x"></i></button></div>`).join('') : '<div class="small text-secondary">提出済みの希望はありません</div>';
       document.getElementById('myReqs').querySelectorAll('[data-cancel]').forEach((b) => b?.addEventListener('click', async () => { await api(`/staff/requests/${b.dataset.cancel}`, { method: 'DELETE' }); loadMyReqs(); }));
     } catch {}
   };

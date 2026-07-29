@@ -1120,7 +1120,18 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .wish-cell.empty { background: transparent; border: none; }
 .wish-cell.disabled { opacity: .35; cursor: not-allowed; }
 .wish-cell .wd { font-size: .66rem; font-weight: 700; }
-.wish-cell .wmark { font-size: .56rem; font-weight: 700; padding: 2px 3px; border-radius: 5px; text-align: center; color: var(--paper); margin-top: auto; }
+/* 左右 padding は 3px → 1px。375px 幅（iPhone SE）ではセル 39.6px に対し文字の
+   入る幅が 23.6px しかなく、「17-22」（約26px）すら1行に収まらず折り返していた。
+   1px にすると 27.6px 確保でき、時刻の短縮形が1行に収まる。 */
+.wish-cell .wmark { font-size: .56rem; font-weight: 700; padding: 2px 1px; line-height: 1.2; border-radius: 5px; text-align: center; color: var(--paper); margin-top: auto; }
+/* 時間指定だけ一段小さく。分が 00 でない「17:30-22:45」は短縮できず約46px あり、
+   .56rem のままだと折り返した各行（28.7px）が 27.6px を超えて横に切れていた。
+   .5rem なら 1行目 25.4px / 2行目 23.2px で、2行に折り返しても欠けない。
+   【既知の限界】320px 幅（iPhone 5/SE 初代）では文字幅が 19.7px しか残らず、
+   分ありの時刻はどうしても切れる。7列グリッドで読める字径を保つ以上は避けられ
+   ないため、その幅では日付をタップしてピッカーで正確な値を確認する運用とする
+   （店長側の .wti-cal も同じ .wmark を使っており、同じ限界を共有する）。 */
+.wish-cell .wmark.time { font-size: .5rem; letter-spacing: -.01em; }
 /* --warning を #8F6718 に沈めたことで morning も --paper で 4.88:1 出るようになり、
    morning だけ文字色を特例にする必要が無くなった（5種とも --paper に統一）。 */
 .wmark.any{background:var(--info);} .wmark.morning{background:var(--warning);} .wmark.evening{background:var(--info);} .wmark.rest{background:var(--ink-2);} .wmark.time{background:var(--success);}

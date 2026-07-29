@@ -2974,7 +2974,9 @@ def staff_notifs_readall():
 @app.get("/api/staff/requests")
 def staff_requests_list():
     require_auth(["staff"]); staff = g.user
-    rows = query_all("SELECT id, start_datetime, end_datetime, status, reason FROM shifts WHERE staff_id=? AND status='requested' ORDER BY start_datetime", (staff["id"],))
+    # availability を返すのは、休希望が 00:00〜23:59 で保存されるため。
+    # これが無いと提出済み一覧が「00:00-23:59」＝24時間働きたい希望として描画される。
+    rows = query_all("SELECT id, start_datetime, end_datetime, status, reason, availability FROM shifts WHERE staff_id=? AND status='requested' ORDER BY start_datetime", (staff["id"],))
     return jsonify({"requests": rows})
 
 
@@ -2993,23 +2995,40 @@ def staff_requests_post():
         abort(400, description=f"締切（{period['deadline']}）を過ぎています")
     count = 0
     skipped_overlap = 0
+    # 語彙外の availability は 1件でも混ざっていれば全体を拒否する（保存前に検査）。
+    # 通すと shifts.availability に任意の文字列が入り、希望表・カレンダーの
+    # .wmark が知らない値で描画される。語彙は _WISH_AVAILABILITY_VALUES に一本化。
+    for sh in items:
+        a = sh.get("availability")
+        if a and a not in _WISH_AVAILABILITY_VALUES:
+            abort(400, description=f"希望の種別 '{a}' は不正です")
     for sh in items:
         avail = sh.get("availability")
         # 秒なし datetime を正規化（"YYYY-MM-DDTHH:MM" → "...HH:MM:00"）
         start_dt = normalize_iso(sh["start_datetime"])
-        if avail:
+        if avail == "rest":
+            # 休希望は終日扱い（設計書 §3 の表 / _wish_times と同じ）。
+            # 店舗終業時刻で切ると「その時刻以降は働ける」意味になってしまう。
+            end_dt = normalize_iso(sh.get("end_datetime")) or (start_dt[:10] + "T23:59:59")
+        elif avail:
             # 店舗のシフト時間設定から終了時刻デフォルトを取得
             shop_end = _get_shop_shift_end_time(staff["shop_id"])
             end_dt = normalize_iso(sh.get("end_datetime")) or (start_dt[:10] + f"T{shop_end}:00")
         else:
             end_dt = normalize_iso(sh["end_datetime"])
-        # 同一スタッフの同日内で、確定シフト OR 既に出している希望と時間帯が重なる場合はスキップ（重複防止）
-        overlap, _conflict = _check_staff_overlap(
-            staff["shop_id"], staff["id"], start_dt, end_dt, include_requested=True)
-        if overlap:
-            skipped_overlap += 1
-            continue
-        if avail:
+        # 同一スタッフの同日内で、確定シフト OR 既に出している希望と時間帯が重なる場合はスキップ（重複防止）。
+        # ただし休希望は 00:00〜23:59 でその日の全てと必ず重なるため対象外
+        # （管理者側 /api/shop/my-requests と同じ扱い）。
+        if avail != "rest":
+            overlap, _conflict = _check_staff_overlap(
+                staff["shop_id"], staff["id"], start_dt, end_dt, include_requested=True)
+            if overlap:
+                skipped_overlap += 1
+                continue
+        if avail == "rest":
+            execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, status, reason, availability) VALUES (?,?,?,?,?,?,?)",
+                    (staff["shop_id"], staff["id"], start_dt, end_dt, "requested", "スタッフ:休希望", avail))
+        elif avail:
             execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, status, reason, availability) VALUES (?,?,?,?,?,?,?)",
                     (staff["shop_id"], staff["id"], start_dt, end_dt, "requested", "スタッフ希望(柔軟)", avail))
         else:

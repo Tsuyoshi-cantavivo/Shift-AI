@@ -141,3 +141,41 @@ def count_staff_in_hour(shifts, day, hour):
         if ss < target_end and ee > target_start:
             cnt += 1
     return cnt
+
+
+# ============================================================
+# フロントエンドの実関数を Node で実行するためのヘルパ
+# ------------------------------------------------------------
+# public/*.js の関数定義を「実ファイルから抜き出して」テストする。
+# テスト側にロジックを書き写すと、実装が変わってもテストが緑のまま
+# 乖離するため（Phase 2 のレビューで実際にその型の空振りテストが
+# 見つかっている）、定義そのものを持ってくる。
+# ※ tests/test_settings_xss.py には同等の関数のコピーがある。
+#    あちらはセキュリティ回帰テストなので今回は触らず、新規テストは
+#    こちらを使う。将来まとめる場合はあちらをこちらに寄せること。
+# ============================================================
+def extract_js_function(source, name):
+    """`function name(...) { ... }` を波括弧の対応を数えて丸ごと抜き出す。"""
+    import re
+    m = re.search(rf"function {re.escape(name)}\s*\([^)]*\)\s*{{", source)
+    assert m, f"{name} の定義が見つかりません（JS の構造が変わった？）"
+    depth = 0
+    i = m.end() - 1  # '{' の位置
+    while i < len(source):
+        if source[i] == "{":
+            depth += 1
+        elif source[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[m.start():i + 1]
+        i += 1
+    raise AssertionError(f"{name} の終端 '}}' が見つかりません")
+
+
+def run_js(fragments, expr):
+    """JS 断片群を読み込んだうえで expr を評価し、その文字列を返す。"""
+    import subprocess
+    script = "\n".join(fragments) + f"\nprocess.stdout.write(String({expr}));\n"
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, f"Node実行に失敗: {result.stderr}\n--- script ---\n{script}"
+    return result.stdout
