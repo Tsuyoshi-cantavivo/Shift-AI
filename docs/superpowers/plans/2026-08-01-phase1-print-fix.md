@@ -660,8 +660,14 @@ Expected: PASS（8件）
 `e2e/print_view.spec.js` に追記:
 
 ```js
-test('印刷メディアでタイムラインが横にはみ出さない', async ({ page }) => {
+test('用紙幅が狭くてもタイムラインが横にはみ出さない', async ({ page }) => {
   await openPrint(page);
+  // 画面用の .tl-row は min-width:480px を持つ。用紙幅がそれを下回ると、
+  // .tl-wrap の overflow-x:auto があふれた分を切り捨てる（印刷では横方向に
+  // ページ分割されないため、そのまま消える）。emulateMedia だけではレイアウト
+  // 幅が実ビューポート(1280px)のままで 480px の制約に届かないので、
+  // ビューポート自体を縮めて狭い用紙を再現する。
+  await page.setViewportSize({ width: 400, height: 800 });
   await page.emulateMedia({ media: 'print' });
 
   const overflow = await page.evaluate(() => {
@@ -674,14 +680,24 @@ test('印刷メディアでタイムラインが横にはみ出さない', async
   expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
 
   await page.emulateMedia({ media: 'screen' });
+  await page.setViewportSize({ width: 1280, height: 800 });
 });
 ```
+
+**このテストは CSS 修正の後に書くため、放っておくと一度も赤を経ない。** 必ず次を実際に行うこと。
+
+1. `public/style.css` の印刷ブロックを一時的に修正前に戻す（`overflow-x: visible` と 2 箇所の `min-width: 0` を消す）
+2. `npx playwright test e2e/print_view.spec.js` を実行し、**このテストが落ちること**と `scrollWidth` / `clientWidth` の実測値を記録する
+3. CSS を修正後の状態に戻す
+4. 再実行して全件緑になることと実測値を記録する
+
+2 で落ちないなら、そのテストはまだ何も守っていない。ビューポート幅をさらに狭める、検証対象を `.tl-row` 自体の `scrollWidth`/`clientWidth` に変えるなど、実際に赤になる形を見つけること。
 
 Run:
 ```bash
 npx playwright test e2e/print_view.spec.js
 ```
-Expected: 5 件すべて PASS
+Expected: 既存 7 件 + 本件 = 8 件すべて PASS（先行タスクでテストが増えているため、件数は実際のファイル内容に従う）
 
 - [ ] **Step 6: 全体が緑であることを確認してコミット**
 
