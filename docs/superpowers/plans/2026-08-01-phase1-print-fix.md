@@ -913,6 +913,140 @@ localStorage に保持する。縦向きは印刷可能幅が狭いため名前�
 
 ---
 
+### Task 6: E2E を CI に載せる
+
+Task 3 のレビューで「印刷バグの実挙動を守っているのは E2E だけなのに、CI は pytest しか回していない。pytest 側の構造テストは検出できる形が狭い」という指摘が出た。Task 1 は「E2E はこの段階では CI に含めない」としていたが、人間の判断で**載せる**ことに決まった。
+
+CI 化には既存スクリプトの2つの非互換を先に潰す必要がある。
+
+1. `e2e/run_server.sh` が `./.venv/bin/python` を決め打ちしている。CI には venv が無い。
+2. 同スクリプトの `stat -f%z` は BSD/macOS 構文。Ubuntu の GNU stat は `-c%s` で、そのままでは診断出力が壊れる（致命的ではないがノイズになる）。
+
+**Files:**
+- Modify: `e2e/run_server.sh`
+- Modify: `.github/workflows/test.yml`
+
+**Interfaces:**
+- Consumes: なし
+- Produces: CI 上で `npx playwright test` が通る状態
+
+- [ ] **Step 1: ローカルで E2E 全件が現状通ることを確認する**
+
+Run:
+```bash
+npx playwright test
+```
+Expected: 全件 PASS。ここで落ちるテストがあるなら、それは CI 化とは別の既存問題。**件数と失敗したテスト名を記録してから**次に進むこと（CI 化で新たに壊したのか、元から落ちていたのかを区別できなくなる）。
+
+- [ ] **Step 2: `e2e/run_server.sh` を移植可能にする**
+
+`./.venv/bin/python` の決め打ちを、venv があればそれを使い、無ければ `python3` にフォールバックする形に変える。スクリプト冒頭の `export ALLOW_INIT=1` の直後に追加:
+
+```bash
+# CI には .venv が無いので、あればそれを使い、無ければ python3 にフォールバックする。
+# ローカルの挙動は従来どおり（.venv/bin/python が使われる）。
+if [ -n "$E2E_PYTHON" ]; then
+  PY="$E2E_PYTHON"
+elif [ -x ./.venv/bin/python ]; then
+  PY=./.venv/bin/python
+else
+  PY=python3
+fi
+echo "[e2e] PY=$PY" >&2
+
+# stat のオプションは BSD(-f%z) と GNU(-c%s) で違う。両方で動く wc を使う。
+filesize() { wc -c < "$1" 2>/dev/null | tr -d ' '; }
+```
+
+そのうえで、スクリプト内の `./.venv/bin/python` を 2 箇所とも `"$PY"` に置き換え、`stat -f%z "$DB_PATH" 2>/dev/null` を使っている 2 箇所を `filesize "$DB_PATH"` に置き換える。
+
+- [ ] **Step 3: ローカルで E2E が引き続き通ることを確認する**
+
+Run:
+```bash
+npx playwright test e2e/print_view.spec.js
+```
+Expected: 全件 PASS。サーバ起動ログに `[e2e] PY=./.venv/bin/python` が出ていること（ローカルでは venv が使われる）。
+
+- [ ] **Step 4: フォールバック経路を確認する**
+
+Run:
+```bash
+E2E_PYTHON=$(which python3) npx playwright test e2e/print_view.spec.js
+```
+Expected: サーバ起動ログに `[e2e] PY=/usr/.../python3` が出る。ここでテストが落ちる場合、システムの python3 に Flask が入っていないだけなので、その旨をレポートに書いて次に進んでよい（CI では `pip install -r requirements.txt` 済みの python が使われる）。
+
+- [ ] **Step 5: CI にジョブを追加する**
+
+`.github/workflows/test.yml` に3つ目のジョブを追加する:
+
+```yaml
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Python 依存パッケージをインストール
+        run: pip install -r requirements.txt
+      - name: Node 依存パッケージをインストール
+        run: npm ci
+      - name: Playwright のブラウザをインストール
+        run: npx playwright install --with-deps chromium
+      - name: E2E テスト
+        # run_server.sh は .venv があればそれを使う。CI には無いので
+        # pip でインストールした python を明示的に渡す。
+        env:
+          E2E_PYTHON: python
+        run: npx playwright test
+      - name: 失敗時のレポートを保存
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+```
+
+- [ ] **Step 6: `npm ci` が通ることを確認する**
+
+Run:
+```bash
+npm ci --dry-run
+```
+Expected: エラーなく完了。`package-lock.json` が `package.json` と同期していない場合は `npm ci` が失敗するので、その場合はワークフローの `npm ci` を `npm install` に変え、理由をコミットメッセージに書くこと。
+
+- [ ] **Step 7: YAML の構文を確認する**
+
+Run:
+```bash
+.venv/bin/python -c "import json,sys; print('yaml module unavailable, skipping')" 2>/dev/null; node -e "const fs=require('fs');const s=fs.readFileSync('.github/workflows/test.yml','utf8');if(!/^  e2e:$/m.test(s))throw new Error('e2e job not found');if(!/playwright install/.test(s))throw new Error('browser install missing');console.log('OK')"
+```
+Expected: `OK`
+
+- [ ] **Step 8: 全体が緑であることを確認してコミット**
+
+```bash
+.venv/bin/python -m pytest tests/ -q
+node --check public/app.js
+git add e2e/run_server.sh .github/workflows/test.yml
+git commit -m "ci: E2E を CI で回す
+
+印刷バグの実挙動を守っているのは E2E だけで、pytest 側の構造テストは
+検出できる形が狭い（afterprint 内の innerHTML='' 再導入のみ）という
+レビュー指摘を受けての対応。
+
+run_server.sh が ./.venv/bin/python を決め打ちしていて CI で動かなかった
+ため、venv があればそれを使い無ければ python3 に落ちる形にした。
+stat -f%z も BSD 構文で Ubuntu では壊れるので wc -c に置き換えた。"
+```
+
+---
+
 ## Self-Review
 
 **仕様カバレッジ（設計書 Phase 0 と Phase 1）**
