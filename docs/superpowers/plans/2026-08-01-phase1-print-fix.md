@@ -137,9 +137,14 @@ class TestMediaPrintSplit:
     def test_screen_css_keeps_rules_after_first_media_print(self):
         css = _read_css()
         screen, _printed = _split_media_print(css)
-        # .tl-legend は 1 つ目の @media print(アニメーション停止) より後にある画面用CSS。
-        # 単純 split ではここが検査対象から落ちる。
-        assert ".tl-legend" in screen
+        # .matrix-input / .shortage-chip は 1 つ目の @media print（アニメーション停止、
+        # style.css:1015）より後にある画面用CSS。単純 split ではここが丸ごと落ちる。
+        # 落ちていたことを実証するため、旧実装との差も同時に確認する。
+        assert ".matrix-input" in screen
+        assert ".shortage-chip" in screen
+        naive = css.split("@media print")[0]
+        assert ".matrix-input" not in naive, \
+            "旧実装でも拾えるセレクタでは、この回帰テストは何も守っていない"
 
     def test_print_css_contains_page_rule(self):
         css = _read_css()
@@ -166,13 +171,23 @@ Expected: FAIL with `NameError: name '_split_media_print' is not defined`
 `tests/test_design_tokens.py` の既存ヘルパ群（`_read_css` の隣）に追加:
 
 ```python
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+
+
 def _split_media_print(css):
     """CSS を (画面用, 印刷用) に分ける。
 
     @media print は複数箇所にあるため split では足りない。開き波括弧から
     対応する閉じ波括弧までを数え、ブロックごとに正確に切り出す。
+
+    先にコメントを落とすのが要。style.css:998 のようにコメント文中へ
+    "@media print" と書かれている箇所があり、落とさないとそこをブロック開始と
+    誤認して、直後の画面用ルールを印刷ブロックとして取り込んでしまう
+    （＝その範囲がコントラスト検査から漏れる）。
+
     戻り値の印刷用は @media print の中身のみ（外側の波括弧を含まない）。
     """
+    css = _CSS_COMMENT_RE.sub("", css)
     screen_parts, print_parts = [], []
     i = 0
     while True:
@@ -261,9 +276,16 @@ def _read_appjs():
     return _read("public/app.js")
 
 
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+
+
 def _print_css():
-    """style.css の @media print ブロックの中身をすべて連結して返す。"""
-    css = _read_css()
+    """style.css の @media print ブロックの中身をすべて連結して返す。
+
+    コメント文中の "@media print"（style.css:998 など）をブロック開始と
+    誤認しないよう、先にコメントを落とす。
+    """
+    css = _CSS_COMMENT_RE.sub("", _read_css())
     parts = []
     i = 0
     while True:
@@ -330,6 +352,10 @@ git commit -m "test: 印刷CSSを検査対象に入れる
 
 **方針**: 印刷内容を `appState.printPayload` に保持し、`afterprint` で DOM を破棄しない。加えて `beforeprint` でも空なら payload から組み立て直す。ブラウザが `beforeprint` を発火せずにプレビューを再描画する場合にも耐えるため、**DOM を残す方を主、`beforeprint` を保険**とする。
 
+**レビュー対応で追加した2点（「印刷DOMをページに残す」設計の安全性がこの2つに依存しているため明記する）**:
+- `clearPrintView()`（`public/app.js`）— `logoutLocal` / `stopImpersonation` / `openPrintView` の catch から呼ぶ。`#printView` を afterprint で消さなくした結果、ログアウト後のログイン画面で Ctrl+P すると前ユーザーのシフトが印刷されてしまう経路ができたため、セッション境界で明示的に破棄する。
+- `beforeprint` の案内ページと `data-print-placeholder` 属性 — 印刷ボタンを一度も押していない状態（`appState.printPayload` が無い）での Ctrl+P が白紙になるのを防ぐ。`openPrintView` が本物の内容で上書きする際にこの属性を消す。
+
 **Files:**
 - Modify: `public/app.js:975-978`（`afterprint` リスナ）
 - Modify: `public/app.js:1144-1148`（`openPrintView` の DOM 反映部）
@@ -376,7 +402,7 @@ test.beforeEach(async ({ page, request }) => {
     managerCode: SHOP.managerCode,
     password: SHOP.managerPassword,
   });
-  await page.click('[data-nav="shifts"]');
+  await page.click('.side-item[data-screen="shifts"]');
   await page.waitForSelector('#printBtn');
 });
 
@@ -437,7 +463,7 @@ npx playwright test e2e/print_view.spec.js
 ```
 Expected: 「afterprint の後も…」と「beforeprint が発火しない…」の 2 件が FAIL（`expect(count).toBe(1)` に対し `0`）。残り 2 件は PASS。
 
-失敗しない場合は、`ensureShop` / `loginAsManager` / `[data-nav="shifts"]` のセレクタが実装と合っていない可能性がある。`e2e/helpers.js` と `public/app.js:615-643`（`renderNav`）を読んで実際の属性名に合わせること。
+失敗しない場合は、テストが実装に届いていない（ログイン失敗・画面遷移失敗）ことを疑う。`page.content()` をダンプして確認すること。ナビは `renderNav()`（`public/app.js:615-643`）が `.side-item[data-screen="<key>"]` を生成する。E2E のビューポートは 1280x800（PC）なのでサイドバーが見えている。
 
 - [ ] **Step 3: `openPrintView` が payload を保持するようにする**
 
@@ -502,13 +528,22 @@ class TestPrintDomLifecycle:
     いたため、プレビューの再描画・Ctrl+P・2回目の印刷がすべて白紙になっていた。
     """
 
-    def test_afterprint_does_not_clear_print_view(self):
+    def test_print_view_is_not_cleared_after_print(self):
+        """afterprint リスナの中で printView を破棄していないこと。
+
+        リスナ自体を置かない実装も条件を満たす（そちらが本タスクの正解）。
+        「printView を空文字にする記述が afterprint の中にある」場合だけ落とす。
+        リスナが無いときに素通りするのを補うのが下の 2 テスト。
+        """
         js = _read_appjs()
-        # afterprint リスナの中で printView を空文字にしていないこと
-        m = re.search(r"addEventListener\(\s*['\"]afterprint['\"][\s\S]{0,400}", js)
-        if m:
-            assert "innerHTML = ''" not in m.group(0), \
-                "afterprint で printView を破棄すると、向き変更や2回目の印刷が白紙になる"
+        offenders = []
+        for m in re.finditer(r"addEventListener\(\s*['\"]afterprint['\"]", js):
+            body = js[m.start():m.start() + 400]
+            if re.search(r"printView[\s\S]{0,200}innerHTML\s*=\s*(''|\"\")", body):
+                offenders.append(body.splitlines()[0])
+        assert not offenders, \
+            "afterprint で printView を破棄している（向き変更や2回目の印刷が白紙になる）: " \
+            + "; ".join(offenders)
 
     def test_beforeprint_listener_exists(self):
         assert re.search(r"addEventListener\(\s*['\"]beforeprint['\"]", _read_appjs())
@@ -629,8 +664,14 @@ Expected: PASS（8件）
 `e2e/print_view.spec.js` に追記:
 
 ```js
-test('印刷メディアでタイムラインが横にはみ出さない', async ({ page }) => {
+test('用紙幅が狭くてもタイムラインが横にはみ出さない', async ({ page }) => {
   await openPrint(page);
+  // 画面用の .tl-row は min-width:480px を持つ。用紙幅がそれを下回ると、
+  // .tl-wrap の overflow-x:auto があふれた分を切り捨てる（印刷では横方向に
+  // ページ分割されないため、そのまま消える）。emulateMedia だけではレイアウト
+  // 幅が実ビューポート(1280px)のままで 480px の制約に届かないので、
+  // ビューポート自体を縮めて狭い用紙を再現する。
+  await page.setViewportSize({ width: 400, height: 800 });
   await page.emulateMedia({ media: 'print' });
 
   const overflow = await page.evaluate(() => {
@@ -643,14 +684,24 @@ test('印刷メディアでタイムラインが横にはみ出さない', async
   expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
 
   await page.emulateMedia({ media: 'screen' });
+  await page.setViewportSize({ width: 1280, height: 800 });
 });
 ```
+
+**このテストは CSS 修正の後に書くため、放っておくと一度も赤を経ない。** 必ず次を実際に行うこと。
+
+1. `public/style.css` の印刷ブロックを一時的に修正前に戻す（`overflow-x: visible` と 2 箇所の `min-width: 0` を消す）
+2. `npx playwright test e2e/print_view.spec.js` を実行し、**このテストが落ちること**と `scrollWidth` / `clientWidth` の実測値を記録する
+3. CSS を修正後の状態に戻す
+4. 再実行して全件緑になることと実測値を記録する
+
+2 で落ちないなら、そのテストはまだ何も守っていない。ビューポート幅をさらに狭める、検証対象を `.tl-row` 自体の `scrollWidth`/`clientWidth` に変えるなど、実際に赤になる形を見つけること。
 
 Run:
 ```bash
 npx playwright test e2e/print_view.spec.js
 ```
-Expected: 5 件すべて PASS
+Expected: 既存 7 件 + 本件 = 8 件すべて PASS（先行タスクでテストが増えているため、件数は実際のファイル内容に従う）
 
 - [ ] **Step 6: 全体が緑であることを確認してコミット**
 
@@ -713,7 +764,7 @@ test('選んだ向きは再読み込み後も保たれる', async ({ page }) => 
 
   await page.reload();
   await page.waitForSelector('#appView:not(.d-none)');
-  await page.click('[data-nav="shifts"]');
+  await page.click('.side-item[data-screen="shifts"]');
   await page.waitForSelector('#printOrientBtn');
 
   await expect(page.locator('#printOrientLabel')).toHaveText('縦');
@@ -878,6 +929,140 @@ git commit -m "feat(print): 用紙の縦／横切替をアプリ内に新設
 localStorage に保持する。縦向きは印刷可能幅が狭いため名前欄と時間軸を
 詰めるレイアウト調整を入れた。あわせて、アイコンのみで何のボタンか
 分からなかった印刷ボタンに「印刷」のラベルを追加した。"
+```
+
+---
+
+### Task 6: E2E を CI に載せる
+
+Task 3 のレビューで「印刷バグの実挙動を守っているのは E2E だけなのに、CI は pytest しか回していない。pytest 側の構造テストは検出できる形が狭い」という指摘が出た。Task 1 は「E2E はこの段階では CI に含めない」としていたが、人間の判断で**載せる**ことに決まった。
+
+CI 化には既存スクリプトの2つの非互換を先に潰す必要がある。
+
+1. `e2e/run_server.sh` が `./.venv/bin/python` を決め打ちしている。CI には venv が無い。
+2. 同スクリプトの `stat -f%z` は BSD/macOS 構文。Ubuntu の GNU stat は `-c%s` で、そのままでは診断出力が壊れる（致命的ではないがノイズになる）。
+
+**Files:**
+- Modify: `e2e/run_server.sh`
+- Modify: `.github/workflows/test.yml`
+
+**Interfaces:**
+- Consumes: なし
+- Produces: CI 上で `npx playwright test` が通る状態
+
+- [ ] **Step 1: ローカルで E2E 全件が現状通ることを確認する**
+
+Run:
+```bash
+npx playwright test
+```
+Expected: 全件 PASS。ここで落ちるテストがあるなら、それは CI 化とは別の既存問題。**件数と失敗したテスト名を記録してから**次に進むこと（CI 化で新たに壊したのか、元から落ちていたのかを区別できなくなる）。
+
+- [ ] **Step 2: `e2e/run_server.sh` を移植可能にする**
+
+`./.venv/bin/python` の決め打ちを、venv があればそれを使い、無ければ `python3` にフォールバックする形に変える。スクリプト冒頭の `export ALLOW_INIT=1` の直後に追加:
+
+```bash
+# CI には .venv が無いので、あればそれを使い、無ければ python3 にフォールバックする。
+# ローカルの挙動は従来どおり（.venv/bin/python が使われる）。
+if [ -n "$E2E_PYTHON" ]; then
+  PY="$E2E_PYTHON"
+elif [ -x ./.venv/bin/python ]; then
+  PY=./.venv/bin/python
+else
+  PY=python3
+fi
+echo "[e2e] PY=$PY" >&2
+
+# stat のオプションは BSD(-f%z) と GNU(-c%s) で違う。両方で動く wc を使う。
+filesize() { wc -c < "$1" 2>/dev/null | tr -d ' '; }
+```
+
+そのうえで、スクリプト内の `./.venv/bin/python` を 2 箇所とも `"$PY"` に置き換え、`stat -f%z "$DB_PATH" 2>/dev/null` を使っている 2 箇所を `filesize "$DB_PATH"` に置き換える。
+
+- [ ] **Step 3: ローカルで E2E が引き続き通ることを確認する**
+
+Run:
+```bash
+npx playwright test e2e/print_view.spec.js
+```
+Expected: 全件 PASS。サーバ起動ログに `[e2e] PY=./.venv/bin/python` が出ていること（ローカルでは venv が使われる）。
+
+- [ ] **Step 4: フォールバック経路を確認する**
+
+Run:
+```bash
+E2E_PYTHON=$(which python3) npx playwright test e2e/print_view.spec.js
+```
+Expected: サーバ起動ログに `[e2e] PY=/usr/.../python3` が出る。ここでテストが落ちる場合、システムの python3 に Flask が入っていないだけなので、その旨をレポートに書いて次に進んでよい（CI では `pip install -r requirements.txt` 済みの python が使われる）。
+
+- [ ] **Step 5: CI にジョブを追加する**
+
+`.github/workflows/test.yml` に3つ目のジョブを追加する:
+
+```yaml
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Python 依存パッケージをインストール
+        run: pip install -r requirements.txt
+      - name: Node 依存パッケージをインストール
+        run: npm ci
+      - name: Playwright のブラウザをインストール
+        run: npx playwright install --with-deps chromium
+      - name: E2E テスト
+        # run_server.sh は .venv があればそれを使う。CI には無いので
+        # pip でインストールした python を明示的に渡す。
+        env:
+          E2E_PYTHON: python
+        run: npx playwright test
+      - name: 失敗時のレポートを保存
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+```
+
+- [ ] **Step 6: `npm ci` が通ることを確認する**
+
+Run:
+```bash
+npm ci --dry-run
+```
+Expected: エラーなく完了。`package-lock.json` が `package.json` と同期していない場合は `npm ci` が失敗するので、その場合はワークフローの `npm ci` を `npm install` に変え、理由をコミットメッセージに書くこと。
+
+- [ ] **Step 7: YAML の構文を確認する**
+
+Run:
+```bash
+.venv/bin/python -c "import json,sys; print('yaml module unavailable, skipping')" 2>/dev/null; node -e "const fs=require('fs');const s=fs.readFileSync('.github/workflows/test.yml','utf8');if(!/^  e2e:$/m.test(s))throw new Error('e2e job not found');if(!/playwright install/.test(s))throw new Error('browser install missing');console.log('OK')"
+```
+Expected: `OK`
+
+- [ ] **Step 8: 全体が緑であることを確認してコミット**
+
+```bash
+.venv/bin/python -m pytest tests/ -q
+node --check public/app.js
+git add e2e/run_server.sh .github/workflows/test.yml
+git commit -m "ci: E2E を CI で回す
+
+印刷バグの実挙動を守っているのは E2E だけで、pytest 側の構造テストは
+検出できる形が狭い（afterprint 内の innerHTML='' 再導入のみ）という
+レビュー指摘を受けての対応。
+
+run_server.sh が ./.venv/bin/python を決め打ちしていて CI で動かなかった
+ため、venv があればそれを使い無ければ python3 に落ちる形にした。
+stat -f%z も BSD 構文で Ubuntu では壊れるので wc -c に置き換えた。"
 ```
 
 ---

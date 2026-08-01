@@ -10,10 +10,23 @@ export FLASK_DEBUG="${FLASK_DEBUG:-0}"
 # e2e/helpers.js の ensureAdmin() が /api/init を叩くため、e2e 環境でのみ有効化する。
 # 本番では既定 0（.env.example 参照）。
 export ALLOW_INIT=1
+# CI には .venv が無いので、あればそれを使い、無ければ python3 にフォールバックする。
+# ローカルの挙動は従来どおり（.venv/bin/python が使われる）。
+if [ -n "$E2E_PYTHON" ]; then
+  PY="$E2E_PYTHON"
+elif [ -x ./.venv/bin/python ]; then
+  PY=./.venv/bin/python
+else
+  PY=python3
+fi
+echo "[e2e] PY=$PY" >&2
+
+# stat のオプションは BSD(-f%z) と GNU(-c%s) で違う。両方で動く wc を使う。
+filesize() { wc -c < "$1" 2>/dev/null | tr -d ' '; }
 echo "[e2e] DB_PATH=${DB_PATH}" >&2
 # 既存のDBファイルをクリーンアップ（スキーマ更新を確実に反映）
 if [ -f "$DB_PATH" ]; then
-  echo "[e2e] Removing old $DB_PATH ($(stat -f%z "$DB_PATH" 2>/dev/null) bytes)" >&2
+  echo "[e2e] Removing old $DB_PATH ($(filesize "$DB_PATH") bytes)" >&2
   rm -f "$DB_PATH"
 fi
 # スキーマを事前適用
@@ -22,7 +35,7 @@ fi
 # 決め打ちしている 'admin123' でのログインが軒並み失敗してしまう。ここで
 # 既知パスワードの管理者を先に作っておけば、ensureAdmin() の /api/init 呼び出しは
 # 「既に存在します」の no-op になり、既存 e2e spec の admin123 決め打ちを変えずに済む。
-./.venv/bin/python -c "
+"$PY" -c "
 import os, sys, sqlite3
 sys.path.insert(0, 'src')
 import db
@@ -38,8 +51,8 @@ tables = [r[0] for r in conn.execute(\"SELECT name FROM sqlite_master WHERE type
 print('[init] tables after init_schema:', tables)
 print('[init] file size:', os.path.getsize('$DB_PATH'))
 " >&2
-echo "[e2e] DB file size before exec: $(stat -f%z "$DB_PATH" 2>/dev/null) bytes" >&2
-exec ./.venv/bin/python src/app.py
+echo "[e2e] DB file size before exec: $(filesize "$DB_PATH") bytes" >&2
+exec "$PY" src/app.py
 
 
 

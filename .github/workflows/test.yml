@@ -1,0 +1,73 @@
+# pytest は全件が数秒〜十数秒で終わるため、push のたびに全件回しても十分安い。
+# E2E (Playwright) は数分（実測 2.7〜3.2分程度）かかりサーバ起動も伴うが、印刷バグの実挙動を
+# 守っているのは E2E だけであり pytest 側の構造テストは検出できる形が狭いため、
+# 人間の判断で CI に含めることにした（詳細は e2e ジョブ内「E2E テスト」ステップ
+# 直前のコメント参照）。
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: 依存パッケージをインストール
+        run: pip install -r requirements.txt
+      - name: ユニットテスト
+        run: python -m pytest tests/ -q
+      - name: シフトエンジン不変量テスト
+        run: python tests/run_tests.py
+
+  jscheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: フロントエンドの構文チェック
+        run: |
+          node --check public/app.js
+          node --check public/admin.js
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Python 依存パッケージをインストール
+        run: pip install -r requirements.txt
+      - name: Node 依存パッケージをインストール
+        run: npm ci
+      - name: Playwright のブラウザをインストール
+        run: npx playwright install --with-deps chromium
+      # 印刷が白紙になるバグ（向き変更やCtrl+Pで再現）は、実ブラウザで
+      # beforeprint/afterprint を dispatch する E2E でしか実行時の挙動として
+      # 検出できない。tests/test_print_view.py 側の構造テスト（ソースの
+      # 正規表現検査）は「afterprint 内で innerHTML を空にしていないか」等の
+      # 限られた形しか検出できず、E2E の代わりにはならない。数分かかっても
+      # 人間の判断で毎回 CI を回すことにした。
+      - name: E2E テスト
+        # run_server.sh は .venv があればそれを使う。CI には無いので
+        # pip でインストールした python を明示的に渡す。
+        env:
+          E2E_PYTHON: python
+        run: npx playwright test
+      - name: 失敗時のレポートを保存
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

@@ -10,7 +10,7 @@ let currentUser = null;
 let currentRole = null;
 let currentScreen = null;
 let chartInstances = {};
-const appState = { period: null, businessHours: null, patterns: null }; // 全画面で共有する期間状態・営業時間・パターン
+const appState = { period: null, businessHours: null, patterns: null, printPayload: null }; // 全画面で共有する期間状態・営業時間・パターン・印刷内容
 
 // ============================================================
 // グローバルエラー捕捉：同期エラー・Promise未捕捉rejectの両方を
@@ -78,6 +78,23 @@ function $q(parent, selector) {
   try { return parent.querySelector(selector); } catch { return null; }
 }
 
+/* 印刷用DOMと appState.printPayload を破棄する。
+   afterprint で消さなくなった（白紙バグ修正）ため、ログアウト・代理閲覧解除の
+   ように「前セッションの状態を持ち越してはいけない」タイミングで明示的に呼ぶ。
+   #printView は #appView の外側の兄弟要素で、@media print は #loginView も
+   隠すため、残したままだとログイン画面で Ctrl+P したときに前ユーザーの
+   シフトが印刷されてしまう。 */
+function clearPrintView() {
+  appState.printPayload = null;
+  const pv = document.getElementById('printView');
+  if (pv) {
+    pv.innerHTML = '';
+    // 案内ページの目印（data-print-placeholder）は innerHTML ではなく
+    // 要素自身の属性なので、innerHTML のクリアとは別に消す必要がある。
+    delete pv.dataset.printPlaceholder;
+  }
+}
+
 function logoutLocal() {
   authToken = null; currentUser = null; currentRole = null;
   localStorage.removeItem('shift_token');
@@ -93,6 +110,7 @@ function logoutLocal() {
   wishState = {};
   // 代理閲覧の状態も前セッションのものなので消す（残すと次ログインで誤表示になる）
   window._impersonating = null;
+  clearPrintView();
   renderImpersonationBar();
   document.getElementById('loginView')?.classList.remove('d-none');
   document.getElementById('appView')?.classList.add('d-none');
@@ -468,6 +486,8 @@ async function stopImpersonation() {
   try {
     await api('/admin/impersonate', { method: 'DELETE' });
     window._impersonating = null;
+    // ログアウトと同じ理由：代理閲覧していた店舗の印刷内容を持ち越さない。
+    clearPrintView();
     renderImpersonationBar();
     renderNav();
     navigateTo('adminShops');
@@ -972,9 +992,36 @@ function shiftDetailHtml(s, editable) {
 /* ============================================================
    Print / PDF (1日1ページ・タイムライン形式) — 印刷時にのみ表示されるビューを構築
    ============================================================ */
-window?.addEventListener('afterprint', () => {
+// 印刷用DOMは afterprint で破棄しない。
+// ブラウザの印刷プレビューは向き・用紙・倍率・余白を変更するたびに
+// ライブDOMから再レンダリングする。破棄してしまうと、向きを変えた瞬間・
+// Ctrl+P・「システムダイアログを使用して印刷」・2回目の印刷がすべて白紙になる。
+// beforeprint は「何らかの理由で空になっていた場合」の保険として置く。
+window?.addEventListener('beforeprint', () => {
   const pv = document.getElementById('printView');
-  if (pv) pv.innerHTML = '';
+  if (!pv) return;
+  // pv.innerHTML が空、または前回この保険で入れた案内ページ（目印
+  // data-print-placeholder）の場合だけ「空」とみなす。印刷ボタンから
+  // openPrintView() が本物の内容を書き込むときは pv.innerHTML を丸ごと
+  // 上書きするので、この目印属性はそちらで明示的に消している。
+  const isEmpty = !pv.innerHTML.trim() || pv.dataset.printPlaceholder === '1';
+  if (!isEmpty) return;
+  const payload = appState.printPayload;
+  if (payload && payload.html) {
+    pv.innerHTML = payload.html;
+    delete pv.dataset.printPlaceholder;
+    return;
+  }
+  // 印刷ボタンを一度も押さずに Ctrl+P / システムダイアログから印刷された場合の
+  // 保険。@media print が画面アプリ（#appView・#loginView）を隠すため、
+  // ここで何も入れないと完全な白紙が出てしまう。
+  pv.innerHTML = `<section class="print-page"><div class="print-empty">`
+    + `シフト表を印刷するには、シフト管理画面の「印刷」ボタンから期間を指定してください。`
+    + `</div></section>`;
+  // 案内ページである目印。印刷ボタンを押さないまま次の beforeprint が来ても
+  // 「空」とみなして本物の印刷内容（appState.printPayload）に差し替えられる
+  // ようにする。
+  pv.dataset.printPlaceholder = '1';
 });
 
 function _tlTimeMin(iso) {
@@ -1094,6 +1141,60 @@ function buildStaticTimelineHtml(list, anchorDate) {
   </div>`;
 }
 
+const PRINT_ORIENTATION_KEY = 'shift_print_orientation';
+// 実行中の選択値。localStorage が使えない環境（プライベートモード等）でも
+// トグルが効くように、真の現在値はこちらを優先する。
+// localStorage は「次回起動時に復元する」ためだけに使う。
+let _printOrientation = null;
+
+/** 現在の用紙の向きを返す。初回だけ localStorage から復元する。既定は横。 */
+function getPrintOrientation() {
+  if (_printOrientation) return _printOrientation;
+  try {
+    _printOrientation = localStorage.getItem(PRINT_ORIENTATION_KEY) === 'portrait' ? 'portrait' : 'landscape';
+  } catch (e) {
+    _printOrientation = 'landscape';  // プライベートモード等で localStorage が使えない場合
+  }
+  return _printOrientation;
+}
+
+/** 用紙の向きを切り替えて即座に反映する。保存に失敗しても表示は切り替わる。 */
+function setPrintOrientation(value) {
+  _printOrientation = value === 'portrait' ? 'portrait' : 'landscape';
+  try {
+    localStorage.setItem(PRINT_ORIENTATION_KEY, _printOrientation);
+  } catch (e) {
+    // 保存できないのは次回起動時に復元できないというだけ。今回の切替は _printOrientation が担う。
+  }
+  applyPrintOrientation();
+}
+
+/** @page の size を差し替え、印刷ビューに向きを伝える。
+ *  style.css の @page（A4 landscape）より後に挿入されるため後勝ちで上書きされる。 */
+function applyPrintOrientation() {
+  const o = getPrintOrientation();
+  let st = document.getElementById('printPageRule');
+  if (!st) {
+    st = document.createElement('style');
+    st.id = 'printPageRule';
+    document.head.appendChild(st);
+  }
+  st.textContent = `@media print { @page { size: A4 ${o}; margin: 10mm; } }`;
+  const pv = document.getElementById('printView');
+  if (pv) pv.dataset.orientation = o;
+  const label = document.getElementById('printOrientLabel');
+  if (label) label.textContent = (o === 'portrait' ? '縦' : '横');
+  const btn = document.getElementById('printOrientBtn');
+  if (btn) btn.title = (o === 'portrait' ? '現在: 縦向き / クリックで横向きに' : '現在: 横向き / クリックで縦向きに');
+}
+// アプリ起動時（スクリプト読み込み時）にも保存済みの向きを反映しておく。
+// #printView はシフト管理画面を開く前から存在する静的要素（index.html）で、
+// beforeprint の保険や案内ページもログイン画面から Ctrl+P した場合に動く。
+// 呼び出しを SCREENS.shifts のバインドだけに任せると、シフト管理画面を
+// 一度も開かずに Ctrl+P したときの @page が保存値ではなく style.css の
+// 既定（landscape）のまま残ってしまうため、ここでも一度適用する。
+applyPrintOrientation();
+
 async function openPrintView(start, end) {
   if (!start || !end) { toast('期間を指定してください'); return; }
   setLoading(true);
@@ -1142,12 +1243,24 @@ async function openPrintView(start, end) {
     }).join('');
 
     const pv = document.getElementById('printView');
+    // 印刷用DOMは印刷が終わっても消さない（appState にも保持する）。
+    // ブラウザの印刷プレビューは向き・用紙・倍率を変えるたびにライブDOMから
+    // 再レンダリングするため、afterprint で消すと2回目以降が白紙になる。
+    // @media print が #appView を display:none にしているので代替表示も無い。
+    appState.printPayload = { start, end, html: pagesHtml };
     pv.innerHTML = pagesHtml;
+    // beforeprint の保険が入れた案内ページの目印が残っていると、次回
+    // beforeprint が「まだ空」と誤認してしまうため、本物の内容を書いた
+    // ここで確実に消す。
+    delete pv.dataset.printPlaceholder;
     setLoading(false);
     // レンダリングを1フレーム待ってから印刷ダイアログを開く
     requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
   } catch (e) {
     setLoading(false);
+    // 取得に失敗したまま古い期間の印刷内容を残すと、その後の Ctrl+P で
+    // 古い期間のシフトが印刷されてしまうため、失敗時は印刷用DOMも無効化する。
+    clearPrintView();
     toast('印刷ビューの生成に失敗: ' + e.message, 'error');
   }
 }
@@ -2133,7 +2246,8 @@ SCREENS.shifts = function (el) {
       <div class="flex gap-2 flex-wrap">
         <button class="btn btn-light flex-grow" id="addShiftBtn"><i class="bi bi-plus-lg"></i> 手動追加</button>
         <button class="btn btn-light flex-grow" id="copyBtn"><i class="bi bi-files"></i> コピー</button>
-        <button class="btn btn-light" id="printBtn"><i class="bi bi-printer"></i></button>
+        <button class="btn btn-light" id="printBtn" title="印刷"><i class="bi bi-printer"></i> 印刷</button>
+        <button class="btn btn-light" id="printOrientBtn" title="用紙の向きを切り替える"><i class="bi bi-arrow-repeat"></i> <span id="printOrientLabel">横</span></button>
         <button class="btn btn-success flex-grow" id="finalizeDraftBtn" title="AIドラフト保存中のシフトを一括確定して通知"><i class="bi bi-megaphone"></i> ドラフトを確定・通知</button>
       </div>
       <div id="genResult" class="mt-2"></div>`) +
@@ -2225,6 +2339,12 @@ SCREENS.shifts = function (el) {
     const { start, end } = cur();
     openPrintView(start, end);
   });
+  document.getElementById('printOrientBtn')?.addEventListener('click', () => {
+    setPrintOrientation(getPrintOrientation() === 'portrait' ? 'landscape' : 'portrait');
+    toast(`用紙を${getPrintOrientation() === 'portrait' ? '縦' : '横'}向きにしました`);
+  });
+  // 画面を開いた時点で保存済みの向きをボタンラベルと @page に反映する
+  applyPrintOrientation();
   document.getElementById('openCreq2')?.addEventListener('click', () => openChangeRequests());
 
   // ドラフト保存中のシフトを一括確定して通知
