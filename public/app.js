@@ -4268,6 +4268,14 @@ function reqBarCountFromPx(px) {
   return Math.max(0, Math.round(((px || 0) - REQ_BAR_MIN_PX) / REQ_BAR_UNIT_PX));
 }
 
+/** 段（レーン）1つぶんの高さ(px)。renderReqBarTrack（初期描画・全体再描画）と
+ *  syncReqBarTrackHeight（入力中の軽量再同期）の両方がこれを呼ぶ。
+ *  式を2箇所に複製すると Task3・レビュー N2 で塞いだのと同じ「定数の食い違い」
+ *  が再発するため、必ずここ1箇所だけで計算する。 */
+function reqBarLaneHeightPx(maxCount) {
+  return reqBarHeightPx(maxCount) + REQ_BAR_LANE_GAP_PX;
+}
+
 /** 曜日を考慮した実効必要人数。weekday が null なら基本値。 */
 function reqBarEffective(pattern, weekday) {
   const base = Math.max(0, Math.round(pattern.required_staff || 0));
@@ -4395,7 +4403,7 @@ function renderReqBarTrack(body) {
   // 持っていて定数が食い違っていた（Task3で除去したはずの「複製された定数」と
   // 同じ問題。レビュー指摘 N2）。
   const lanes = reqBarLanes(pats);
-  const laneHeightPx = reqBarHeightPx(maxCount) + REQ_BAR_LANE_GAP_PX;
+  const laneHeightPx = reqBarLaneHeightPx(maxCount);
 
   const bars = pats.map((p) => {
     const eff = reqBarEffective(p, wd);
@@ -4463,6 +4471,10 @@ function bindReqBarRows(body) {
     applyReqBarCount(inp.dataset.pid, n);
     const bar = host.querySelector(`.rq-bar[data-pid="${CSS.escape(inp.dataset.pid)}"]`);
     if (bar) updateReqBarVisual(bar, n);
+    // 入力中はバー自身の高さしか更新しないため、これを呼ばないと
+    // 現在の最大人数を超えたときにバーがトラックからはみ出したまま
+    // 固定される（レビュー指摘: N1修正の副作用）。
+    syncReqBarTrackHeight(body);
   }));
   // 確定時（フォーカスが外れたとき）に自分の表示値だけを正規化する。
   // 全体を再描画すると、行内ボタン（＋/−/編集/削除）への
@@ -4539,6 +4551,25 @@ function updateReqBarVisual(bar, count) {
   if (label) label.textContent = `${bar.dataset.name || ''} ${countLabel}`;
   const titleBase = bar.dataset.titleBase || '';
   bar.title = `${titleBase} / ${countLabel}`;
+}
+
+/** トラックの高さ関連の CSS 変数だけを現在の state から再計算する。
+ *  updateReqBarVisual は入力中にバー自身の高さしか更新しないため、これを
+ *  呼ばないと、今表示されている最大人数を超えて入力したときにバーが
+ *  トラックからはみ出したまま固定される（renderReqBarTrack を呼ばなくなった
+ *  N1修正の副作用）。DOM ツリーは作り直さない（作り直すと入力中のフォーカスが
+ *  飛び、C1が再発する）。
+ *  --rq-lanes（段数）は更新しない: reqBarLanes は start_time/end_time だけで
+ *  決まり、必要人数（required_staff/weekday_required）を参照しないため、
+ *  人数の変更だけでは段数は変わらない（reqBarLanes の実装で確認済み）。 */
+function syncReqBarTrackHeight(body) {
+  const track = body.querySelector('#reqBarTrack');
+  if (!track) return;
+  const wd = reqBarState.weekday;
+  const maxCount = Math.max(1, ...reqBarState.patterns.map((p) => reqBarEffective(p, wd).count));
+  // renderReqBarTrack と同じ reqBarLaneHeightPx() を呼ぶ。式を複製すると
+  // Task3・レビューN2で塞いだのと同じ「定数の食い違い」が再発する。
+  track.style.setProperty('--rq-lane-h', `${reqBarLaneHeightPx(maxCount)}px`);
 }
 
 /** 人数を設定して再描画する。± ボタンなど「再描画してよい」経路から使う。

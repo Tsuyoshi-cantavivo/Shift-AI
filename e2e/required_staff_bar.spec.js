@@ -125,6 +125,27 @@ test('数値欄に複数桁を1文字ずつ入力できる（10人以上）', as
   await expect(inp).toHaveValue('12');
 });
 
+// レビュー Important（N1修正の副作用）: 入力中はバー自身の高さしか
+// 更新しないため、トラック側の高さ（--rq-lane-h）を再同期しないと、
+// 現在の最大人数を超えて入力した瞬間からバーが枠外へ突き抜けたまま
+// 固定される（blurがrenderReqBarTrackを呼ばなくなったN1修正の副作用）。
+test('人数を増やしてもバーがトラックからはみ出さない', async ({ page }) => {
+  // 早番(基本2人)・夜番(基本3人=maxCount)。早番を9人にすると新しい最大人数になる。
+  const inp = page.locator('.rq-count[data-name="早番"]');
+  await inp.click();
+  await inp.fill('');
+  await page.keyboard.type('9');
+  await page.keyboard.press('Tab');
+
+  const rects = await page.evaluate(() => {
+    const t = document.querySelector('#reqBarTrack').getBoundingClientRect();
+    const b = document.querySelector('.rq-bar[data-name="早番"]').getBoundingClientRect();
+    return { trackTop: t.top, trackBottom: t.bottom, barTop: b.top, barBottom: b.bottom };
+  });
+  expect(rects.barTop).toBeGreaterThanOrEqual(rects.trackTop - 1);
+  expect(rects.barBottom).toBeLessThanOrEqual(rects.trackBottom + 1);
+});
+
 // レビュー Minor N3: C1 のうち最も危険な経路。空欄のまま離れると
 // parseInt('')=NaN → 0（＝Task1の契約で「募集しない」）に誤って
 // 保存されかねない。直前の正常値に戻ることを検証する。
