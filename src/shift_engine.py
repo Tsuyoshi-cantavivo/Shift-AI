@@ -80,13 +80,16 @@ def _day_requirements(patterns, gran=GRAN, weekday=None, weekday_overrides=None,
             ov = weekday_overrides.get((pat.get("id"), weekday))
             if ov is not None:
                 needed = ov
-        if needed <= 0:
-            continue
+        if needed < 0:
+            needed = 0
         if pe <= ps:
             pe += 1440  # overnight: 当日ベースで +1440 した拡張スロットに
         s = (ps // gran) * gran
         while s < pe:
-            if needed > req.get(s, 0):
+            # キーの有無で「パターン圏外」を、値0で「明示的に0人（配置禁止）」を表す。
+            # 以前は needed<=0 のとき continue でキーを書かず、cap_ok から見て
+            # 圏外と区別できなかった（＝0人と設定すると上限なしになっていた）。
+            if s not in req or needed > req[s]:
                 req[s] = needed
             s += gran
     return req
@@ -339,9 +342,10 @@ def auto_generate(shop_id, settings, start_date, end_date):
         cov, _ = state(day)
         req_map = req_map_for(day)
         for sl in _shift_slots(start_iso, end_iso, GRAN):
-            required = req_map.get(sl, 0)
-            if required <= 0:
-                continue  # パターン外のスロットは上限なし
+            required = req_map.get(sl)
+            if required is None:
+                continue  # パターンが1つも被っていないスロットは上限なし
+            # required == 0 は「その時間帯は募集しない」。1人でも置けないので下の比較で弾かれる。
             if cov.get(sl, 0) + 1 > required:
                 return False
         return True

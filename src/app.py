@@ -415,14 +415,20 @@ def _check_slot_cap(shop_id, start_iso, end_iso, exclude_id=None, force=False):
         applied.append(p)
     req_map = shift_engine._day_requirements(applied, shift_engine.GRAN, wd, weekday_overrides)
     slots = shift_engine._shift_slots(start_iso, end_iso, shift_engine.GRAN)
-    # シフトが触れるスロットのうち最も厳しい要件
-    max_req = 0
+    # シフトが触れるスロットのうち最も厳しい要件。
+    # キーの有無で「パターン圏外＝上限なし」を判定する（cap_ok と同じ契約）。
+    # 以前は req_map.get(sl, 0) で圏外(キー無し)と明示的な0人を同じ0として
+    # 扱っており、0人設定の時間帯だけを触れるシフトが「上限なし」に
+    # 誤判定されて手動追加を通してしまっていた。
+    max_req = None
     for sl in slots:
-        r = req_map.get(sl, 0)
-        if r > max_req:
+        r = req_map.get(sl)
+        if r is None:
+            continue
+        if max_req is None or r > max_req:
             max_req = r
-    if max_req == 0:
-        return (False, None, 0)
+    if max_req is None:
+        return (False, None, 0)  # 触れるスロットが全てパターン圏外＝上限なし
     rows = query_all("SELECT id, start_datetime, end_datetime FROM shifts WHERE shop_id=? AND status='confirmed' AND start_datetime>=? AND start_datetime<=?",
                      (shop_id, day + "T00:00:00", day + "T23:59:59"))
     coverage = {}
@@ -432,8 +438,10 @@ def _check_slot_cap(shop_id, start_iso, end_iso, exclude_id=None, force=False):
         for sl in shift_engine._shift_slots(r["start_datetime"], r["end_datetime"], shift_engine.GRAN):
             coverage[sl] = coverage.get(sl, 0) + 1
     for sl in slots:
-        r = req_map.get(sl, 0)
-        if r > 0 and coverage.get(sl, 0) + 1 > r:
+        r = req_map.get(sl)
+        if r is None:
+            continue  # パターン圏外のスロットは上限なし
+        if coverage.get(sl, 0) + 1 > r:
             return (True, r, coverage.get(sl, 0))
     return (False, max_req, max((coverage.get(sl, 0) for sl in slots), default=0))
 
@@ -1907,8 +1915,12 @@ def shop_patterns_post():
     # required_staff は必要人数マトリクスで無エスケープの value 属性として描画される。
     # 数値以外を保存させない（保存型XSS の入口封じ）。
     req = validate_numeric_field(body.get("required_staff"), "必要人数")
+    # 0 は「その時間帯は募集しない」という意味を持つため、1 に丸めてはいけない。
+    # 未指定（None）のときだけ既定値 1 を使う。
+    if req is None:
+        req = 1
     meta = execute("INSERT INTO shift_patterns (shop_id, pattern_name, start_time, end_time, required_staff) VALUES (?,?,?,?,?)",
-                   (shop_id, body["pattern_name"], body["start_time"], body["end_time"], req or 1))
+                   (shop_id, body["pattern_name"], body["start_time"], body["end_time"], req))
     return jsonify({"ok": True, "id": meta["last_row_id"], "warning": warning})
 
 
@@ -1920,8 +1932,12 @@ def shop_patterns_put(pid):
     if not ok:
         abort(400, description=warning)
     req = validate_numeric_field(body.get("required_staff"), "必要人数")
+    # 0 は「その時間帯は募集しない」という意味を持つため、1 に丸めてはいけない。
+    # 未指定（None）のときだけ既定値 1 を使う。
+    if req is None:
+        req = 1
     execute("UPDATE shift_patterns SET pattern_name=?, start_time=?, end_time=?, required_staff=? WHERE id=? AND shop_id=?",
-            (body["pattern_name"], body["start_time"], body["end_time"], req or 1, pid, shop_id))
+            (body["pattern_name"], body["start_time"], body["end_time"], req, pid, shop_id))
     return jsonify({"ok": True, "warning": warning})
 
 
