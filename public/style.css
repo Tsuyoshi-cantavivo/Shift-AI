@@ -1565,6 +1565,20 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 }
 .rq-bar-label { padding: 0 4px; }
 
+/* 上端の掴みしろ。バーが低いときも掴めるよう、バーの外側にもはみ出させる。
+   touch-action:none でブラウザ既定のスクロール等ジェスチャーと競合しないようにする
+   （installDraftTimelineDrag のタイムラインバーと同じ理由）。 */
+.rq-drag-top {
+  position: absolute; left: 0; right: 0; top: -6px; height: 14px;
+  cursor: ns-resize; touch-action: none;
+}
+.rq-drag-top::after {
+  content: ''; position: absolute; left: 50%; top: 6px;
+  width: 24px; height: 3px; margin-left: -12px; border-radius: 2px;
+  background: var(--ink-3); opacity: .5;
+}
+.rq-bar.rq-dragging { outline: 2px solid var(--info); outline-offset: 1px; }
+
 .rq-rows { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
 .rq-row {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;

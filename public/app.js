@@ -4351,6 +4351,7 @@ function renderReqBarTab(body) {
      </div>`);
   loadReqBar(body);
   body.querySelector('#reqBarAdd')?.addEventListener('click', () => openPatternModal(null, () => loadReqBar(body)));
+  body.querySelector('#reqBarSave')?.addEventListener('click', () => saveReqBar(body));
 }
 
 async function loadReqBar(body) {
@@ -4426,6 +4427,7 @@ function renderReqBarTrack(body) {
       data-pid="${esc(p.id)}" data-name="${esc(p.pattern_name)}" data-title-base="${titleBase}" data-lane="${laneIdx}"
       style="left:${pos.left.toFixed(2)}%;width:${pos.width.toFixed(2)}%;height:${h}px;bottom:${bottom}px"
       title="${titleBase} / ${countLabel}">
+      <span class="rq-drag-top" title="上下にドラッグして人数を変える"></span>
       <span class="rq-bar-label">${esc(p.pattern_name)} ${countLabel}</span>
     </div>`;
   }).join('');
@@ -4439,7 +4441,7 @@ function renderReqBarTrack(body) {
       <input type="number" class="rq-count" min="0" data-pid="${esc(p.id)}" data-name="${esc(p.pattern_name)}" value="${esc(eff.count)}">
       <span class="rq-unit">人</span>
       <button class="rq-step" data-step="1" data-pid="${esc(p.id)}" title="1人増やす">＋</button>
-      ${wd !== null && eff.isOverride ? `<button class="rq-reset" data-pid="${esc(p.id)}" title="基本に戻す"><i class="bi bi-arrow-counterclockwise"></i></button>` : ''}
+      <button class="rq-reset" data-pid="${esc(p.id)}" title="基本に戻す"${wd !== null && eff.isOverride ? '' : ' hidden'}><i class="bi bi-arrow-counterclockwise"></i></button>
       <button class="rq-edit" data-pid="${esc(p.id)}" title="時間帯を編集"><i class="bi bi-pencil"></i></button>
       <button class="rq-del" data-pid="${esc(p.id)}" title="削除"><i class="bi bi-trash"></i></button>
     </div>`;
@@ -4478,8 +4480,13 @@ function bindReqBarRows(body) {
     const n = Math.max(0, Math.round(parseInt(raw, 10)));
     if (isNaN(n)) return;
     applyReqBarCount(inp.dataset.pid, n);
-    const bar = host.querySelector(`.rq-bar[data-pid="${CSS.escape(inp.dataset.pid)}"]`);
-    if (bar) updateReqBarVisual(bar, n);
+    // バーの見た目（rq-override / rq-zero / 高さ）と「基本に戻す」ボタンの
+    // 出し分けを refreshReqBarRowVisual に一元化する。曜日タブでまだ上書きが
+    // 無い欄に入力すると applyReqBarCount が即座に weekday_required へ書くため
+    // isOverride が true になるが、以前はここでバーの高さしか更新しておらず、
+    // 上書き色（rq-override）とリセットボタンが入力に追従していなかった
+    // （Task4持ち越し課題）。
+    refreshReqBarRowVisual(body, inp.dataset.pid);
     // 入力中はバー自身の高さしか更新しないため、これを呼ばないと
     // 現在の最大人数を超えたときにバーがトラックからはみ出したまま
     // 固定される（レビュー指摘: N1修正の副作用）。
@@ -4526,6 +4533,7 @@ function bindReqBarRows(body) {
       loadReqBar(body);
     } catch (e) { toast(e.message, 'error'); }
   }));
+  installReqBarDrag(host, body);
 }
 
 function findReqPattern(pid) {
@@ -4548,18 +4556,40 @@ function applyReqBarCount(pid, count) {
   reqBarState.dirty = true;
 }
 
-/** バー要素の見た目（高さ・0人ラベル・rq-zeroクラス・title）だけを直接書き換える。
- *  入力中の再描画を避けるための専用関数（C1）。イベントハンドラの再バインドは
- *  行わない（要素自体を作り直していないので不要）。 */
-function updateReqBarVisual(bar, count) {
-  const h = reqBarHeightPx(count);
+/** バー要素の見た目（高さ・0人ラベル・rq-zero/rq-overrideクラス・title）だけを
+ *  直接書き換える。入力中の再描画を避けるための専用関数（C1）。イベントハンドラの
+ *  再バインドは行わない（要素自体を作り直していないので不要）。
+ *  第2引数は reqBarEffective() が返す { count, isOverride }。 */
+function updateReqBarVisual(bar, eff) {
+  const h = reqBarHeightPx(eff.count);
   bar.style.height = `${h}px`;
-  bar.classList.toggle('rq-zero', count === 0);
+  bar.classList.toggle('rq-zero', eff.count === 0);
+  bar.classList.toggle('rq-override', !!eff.isOverride);
   const label = bar.querySelector('.rq-bar-label');
-  const countLabel = reqBarCountLabel(count);
+  const countLabel = reqBarCountLabel(eff.count);
   if (label) label.textContent = `${bar.dataset.name || ''} ${countLabel}`;
   const titleBase = bar.dataset.titleBase || '';
   bar.title = `${titleBase} / ${countLabel}`;
+}
+
+/** 数値欄の入力・バーのドラッグ、どちらの経路でも「バーの見た目」と
+ *  「基本に戻すボタン」の出し分けを同じ手順で揃えるための共通処理（再描画はしない）。
+ *  Task4持ち越し課題: 曜日タブでまだ曜日別上書きが無い（基本値を表示中の）欄に
+ *  入力すると applyReqBarCount が weekday_required に即座に書き込むため、
+ *  state 上はその瞬間から isOverride:true になる。しかしバーの rq-override
+ *  クラスと .rq-reset ボタンは行HTML生成時にしか出し分けていなかったため、
+ *  実際は上書き済みなのに見た目が追従しなかった（色が変わらず、リセットボタンも
+ *  出てこない）。ここで両方を state から直接同期する。 */
+function refreshReqBarRowVisual(body, pid) {
+  const host = body.querySelector('#reqBarBody');
+  const p = findReqPattern(pid);
+  if (!host || !p) return;
+  const eff = reqBarEffective(p, reqBarState.weekday);
+  const bar = host.querySelector(`.rq-bar[data-pid="${CSS.escape(pid)}"]`);
+  if (bar) updateReqBarVisual(bar, eff);
+  const reset = host.querySelector(`.rq-reset[data-pid="${CSS.escape(pid)}"]`);
+  if (reset) reset.hidden = !(reqBarState.weekday !== null && eff.isOverride);
+  return eff;
 }
 
 /** トラックの高さと、各バーの縦位置(bottom)を現在の state から再計算する。
@@ -4594,6 +4624,102 @@ function syncReqBarTrackHeight(body) {
 function setReqBarCount(body, pid, count) {
   applyReqBarCount(pid, count);
   renderReqBarTrack(body);
+}
+
+/** バー上端の上下ドラッグで人数を変える。
+ *  シフト表の installDraftTimelineDrag と同じ作法（Pointer Events + setPointerCapture、
+ *  ドラッグ中は preventDefault でスクロール等の既定動作を止める）を踏襲する。
+ *
+ *  ただし setReqBarCount（renderReqBarTrack を呼んで #reqBarBody 全体を作り直す）は
+ *  使わない。ドラッグ中に毎回 DOM を作り直すと、setPointerCapture の対象である
+ *  .rq-drag-top 自身が消えてしまい、次の pointermove を取りこぼしてドラッグが
+ *  1px 動くたびに途切れる（brief記載の既知の落とし穴）。
+ *  代わりに `.rq-count` の input ハンドラと全く同じ3段構え
+ *  （applyReqBarCount → refreshReqBarRowVisual(=updateReqBarVisual等) → syncReqBarTrackHeight）
+ *  を使い、移動のたびに直接 DOM の値だけを書き換える。DOM ツリー自体は
+ *  一度も作り直さないため、ドラッグ中もハンドル要素の参照が保たれ、
+ *  pointerup を待たずに人数欄・バーとも見た目が追従する。 */
+function installReqBarDrag(host, body) {
+  let drag = null;
+
+  const onMove = (ev) => {
+    if (!drag) return;
+    // 上に動かすほど人数が増える。1人あたり REQ_BAR_UNIT_PX。
+    const dy = drag.startY - ev.clientY;
+    const next = reqBarCountFromPx(reqBarHeightPx(drag.startCount) + dy);
+    if (next !== drag.lastCount) {
+      drag.lastCount = next;
+      applyReqBarCount(drag.pid, next);
+      refreshReqBarRowVisual(body, drag.pid);
+      syncReqBarTrackHeight(body);
+      // ドラッグは数値欄を経由しないため、欄の表示もここで直接合わせる
+      // （保存ボタンは reqBarState を送るので必須ではないが、見た目が
+      // 食い違ったままだと利用者が不安になる）。
+      const inp = host.querySelector(`.rq-count[data-pid="${CSS.escape(drag.pid)}"]`);
+      if (inp) inp.value = String(next);
+    }
+    ev.preventDefault();
+  };
+
+  const onUp = () => {
+    if (!drag) return;
+    drag.bar.classList.remove('rq-dragging');
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onUp);
+    drag = null;
+  };
+
+  host.querySelectorAll('.rq-drag-top').forEach((handle) => {
+    handle.addEventListener('pointerdown', (ev) => {
+      const bar = ev.target.closest('.rq-bar');
+      if (!bar) return;
+      const pid = bar.dataset.pid;
+      const p = findReqPattern(pid);
+      if (!p) return;
+      drag = {
+        pid, bar,
+        startY: ev.clientY,
+        startCount: reqBarEffective(p, reqBarState.weekday).count,
+        lastCount: null,
+      };
+      bar.classList.add('rq-dragging');
+      try { ev.target.setPointerCapture(ev.pointerId); } catch (e) { /* 未対応でも動く */ }
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+      ev.preventDefault();
+    });
+  });
+}
+
+/** 編集中の state を一括APIで保存する。
+ *  従来は画面の文字列 "09:00 - 22:00" を再パースして行ごとに2リクエスト送っていた。
+ *  表示を変えると壊れるうえ N 件で 2N 回の往復が発生していたため、state から一括で送る。 */
+async function saveReqBar(body) {
+  const msg = body.querySelector('#reqBarMsg');
+  const payload = {
+    patterns: reqBarState.patterns.map((p) => ({
+      id: p.id,
+      pattern_name: p.pattern_name,
+      start_time: p.start_time,
+      end_time: p.end_time,
+      required_staff: Math.max(0, Math.round(p.required_staff || 0)),
+      weekday_required: p.weekday_required || {},
+    })),
+  };
+  try {
+    const r = await api('/shop/patterns/bulk', { method: 'PUT', body: JSON.stringify(payload) });
+    reqBarState.dirty = false;
+    toast('保存しました', 'success');
+    // サーバが返す労働時間の警告（9h/13h 超）は従来フロントで捨てていた。必ず見せる。
+    (r.warnings || []).forEach((w) => toast(`${w.pattern_name}: ${w.warning}`, 'warning'));
+    if (msg) msg.textContent = '';
+    loadReqBar(body);
+  } catch (e) {
+    if (msg) safeSetHTML(msg, `<span class="text-danger">${esc(e.message)}</span>`);
+    toast(e.message, 'error');
+  }
 }
 function openPatternModal(data, onDone) {
   const isEdit = !!data;

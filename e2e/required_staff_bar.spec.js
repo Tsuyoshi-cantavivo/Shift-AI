@@ -333,3 +333,106 @@ test('0人のバーは「募集しない」と表示される', async ({ page, r
   await expect(bar).toHaveClass(/rq-zero/);
   await expect(bar.locator('.rq-bar-label')).toContainText('募集しない');
 });
+
+// Task4持ち越し: 曜日タブでまだ曜日別上書きが無い（基本値を表示中）欄に
+// 入力すると applyReqBarCount が weekday_required に即座に書き込むため、
+// state 上はその瞬間から isOverride:true になる。しかしバーの rq-override
+// クラスは行DOM生成時にしか出し分けていなかったため、色で上書き中と
+// 分からなかった（見た目と state が食い違う）。
+test('曜日タブで基本値の欄に入力すると即座にバーが上書き色になる', async ({ page }) => {
+  await page.click('#reqBarTabs .rq-tab[data-wd="6"]');
+  const inp = page.locator('.rq-count[data-name="早番"]');
+  const bar = page.locator('.rq-bar[data-name="早番"]');
+
+  // 入力前は基本値表示（上書きではない）
+  await expect(bar).not.toHaveClass(/rq-override/);
+
+  await inp.click();
+  await expect(inp).toBeFocused();
+  await inp.fill('');
+  await page.keyboard.type('5');
+
+  await expect(bar).toHaveClass(/rq-override/);
+});
+
+// Task4持ち越し（もう一つ）: 「基本に戻す」ボタン（.rq-reset）も行HTML生成時にしか
+// 出し分けていないため、上と同じ操作をしても実際は上書き済みなのにボタンが
+// 出てこない。常に描画しておいて hidden を切り替える形にする。
+test('曜日タブで基本値の欄に入力すると「基本に戻す」ボタンが即座に出る', async ({ page }) => {
+  await page.click('#reqBarTabs .rq-tab[data-wd="6"]');
+  const inp = page.locator('.rq-count[data-name="早番"]');
+  const pid = await inp.getAttribute('data-pid');
+  const reset = page.locator(`.rq-reset[data-pid="${pid}"]`);
+
+  // 入力前はまだ上書きしていないので隠れている
+  await expect(reset).toBeHidden();
+
+  await inp.click();
+  await expect(inp).toBeFocused();
+  await inp.fill('');
+  await page.keyboard.type('5');
+
+  await expect(reset).toBeVisible();
+});
+
+test('数値欄を変えて保存できる', async ({ page }) => {
+  let sent = null;
+  await page.route('**/api/shop/patterns/bulk', async (route) => {
+    sent = JSON.parse(route.request().postData());
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, warnings: [] }) });
+  });
+
+  await page.fill('.rq-count[data-name="早番"]', '5');
+  await page.click('#reqBarSave');
+  await expect.poll(() => sent).not.toBeNull();
+
+  const asa = sent.patterns.find((p) => p.pattern_name === '早番');
+  expect(asa.required_staff).toBe(5);
+});
+
+test('曜日タブで変えた人数は曜日別として送られる', async ({ page }) => {
+  let sent = null;
+  await page.route('**/api/shop/patterns/bulk', async (route) => {
+    sent = JSON.parse(route.request().postData());
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, warnings: [] }) });
+  });
+
+  await page.click('#reqBarTabs .rq-tab[data-wd="6"]');
+  await page.fill('.rq-count[data-name="早番"]', '4');
+  await page.click('#reqBarSave');
+  await expect.poll(() => sent).not.toBeNull();
+
+  const asa = sent.patterns.find((p) => p.pattern_name === '早番');
+  expect(asa.required_staff).toBe(2);          // 基本値は変わらない
+  expect(asa.weekday_required['6']).toBe(4);   // 土曜だけ4人
+});
+
+test('＋ボタンでバーの高さが伸びる', async ({ page }) => {
+  const before = await page.evaluate(() =>
+    document.querySelector('.rq-bar[data-name="早番"]').getBoundingClientRect().height);
+  const pid = await page.getAttribute('.rq-count[data-name="早番"]', 'data-pid');
+  await page.click(`.rq-step[data-step="1"][data-pid="${pid}"]`);
+  const after = await page.evaluate(() =>
+    document.querySelector('.rq-bar[data-name="早番"]').getBoundingClientRect().height);
+  expect(after).toBeGreaterThan(before);
+});
+
+test('バーを上にドラッグすると人数が増える', async ({ page }) => {
+  const box = await page.locator('.rq-bar[data-name="早番"] .rq-drag-top').boundingBox();
+  expect(box).not.toBeNull();
+
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2, box.y - 28, { steps: 6 });
+  await page.mouse.up();
+
+  const v = await page.inputValue('.rq-count[data-name="早番"]');
+  expect(parseInt(v, 10)).toBeGreaterThan(2);
+});
+
+test('0人未満にはならない', async ({ page }) => {
+  const pid = await page.getAttribute('.rq-count[data-name="早番"]', 'data-pid');
+  for (let i = 0; i < 5; i++) await page.click(`.rq-step[data-step="-1"][data-pid="${pid}"]`);
+  const v = await page.inputValue('.rq-count[data-name="早番"]');
+  expect(parseInt(v, 10)).toBe(0);
+});
