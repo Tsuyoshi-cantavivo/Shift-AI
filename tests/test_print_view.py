@@ -71,3 +71,34 @@ class TestPrintCssStructure:
 
     def test_page_rule_exists(self):
         assert "@page" in _print_css()
+
+
+class TestPrintDomLifecycle:
+    """白紙バグの再発を構造レベルで防ぐ。
+
+    #printView は印刷ボタン押下時にしか組み立てられず afterprint で破棄されて
+    いたため、プレビューの再描画・Ctrl+P・2回目の印刷がすべて白紙になっていた。
+    """
+
+    def test_print_view_is_not_cleared_after_print(self):
+        """afterprint リスナの中で printView を破棄していないこと。
+
+        リスナ自体を置かない実装も条件を満たす（そちらが本タスクの正解）。
+        「printView を空文字にする記述が afterprint の中にある」場合だけ落とす。
+        リスナが無いときに素通りするのを補うのが下の 2 テスト。
+        """
+        js = _read_appjs()
+        offenders = []
+        for m in re.finditer(r"addEventListener\(\s*['\"]afterprint['\"]", js):
+            body = js[m.start():m.start() + 400]
+            if re.search(r"printView[\s\S]{0,200}innerHTML\s*=\s*(''|\"\")", body):
+                offenders.append(body.splitlines()[0])
+        assert not offenders, \
+            "afterprint で printView を破棄している（向き変更や2回目の印刷が白紙になる）: " \
+            + "; ".join(offenders)
+
+    def test_beforeprint_listener_exists(self):
+        assert re.search(r"addEventListener\(\s*['\"]beforeprint['\"]", _read_appjs())
+
+    def test_print_payload_is_retained(self):
+        assert "printPayload" in _read_appjs()

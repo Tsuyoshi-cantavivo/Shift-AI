@@ -972,9 +972,16 @@ function shiftDetailHtml(s, editable) {
 /* ============================================================
    Print / PDF (1日1ページ・タイムライン形式) — 印刷時にのみ表示されるビューを構築
    ============================================================ */
-window?.addEventListener('afterprint', () => {
+// 印刷用DOMは afterprint で破棄しない。
+// ブラウザの印刷プレビューは向き・用紙・倍率・余白を変更するたびに
+// ライブDOMから再レンダリングする。破棄してしまうと、向きを変えた瞬間・
+// Ctrl+P・「システムダイアログを使用して印刷」・2回目の印刷がすべて白紙になる。
+// beforeprint は「何らかの理由で空になっていた場合」の保険として置く。
+window?.addEventListener('beforeprint', () => {
   const pv = document.getElementById('printView');
-  if (pv) pv.innerHTML = '';
+  if (!pv || pv.innerHTML.trim()) return;
+  const payload = appState.printPayload;
+  if (payload && payload.html) pv.innerHTML = payload.html;
 });
 
 function _tlTimeMin(iso) {
@@ -1142,6 +1149,11 @@ async function openPrintView(start, end) {
     }).join('');
 
     const pv = document.getElementById('printView');
+    // 印刷用DOMは印刷が終わっても消さない（appState にも保持する）。
+    // ブラウザの印刷プレビューは向き・用紙・倍率を変えるたびにライブDOMから
+    // 再レンダリングするため、afterprint で消すと2回目以降が白紙になる。
+    // @media print が #appView を display:none にしているので代替表示も無い。
+    appState.printPayload = { start, end, html: pagesHtml };
     pv.innerHTML = pagesHtml;
     setLoading(false);
     // レンダリングを1フレーム待ってから印刷ダイアログを開く
