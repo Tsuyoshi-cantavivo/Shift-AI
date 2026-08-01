@@ -45,45 +45,22 @@ jobs:
           python-version: '3.10'
       - name: 依存パッケージをインストール
         run: pip install -r requirements.txt
-      - name: 'diag-node-exists'
-        continue-on-error: true
-        run: node --version
-      - name: 'diag-locale-is-utf8'
-        continue-on-error: true
-        run: |
-          python -c "import locale,sys; e=locale.getpreferredencoding(False); print(e); sys.exit(0 if 'utf' in e.lower() else 1)"
-      - name: 'diag-xss'
-        continue-on-error: true
-        run: python -m pytest tests/test_settings_xss.py -q
-      - name: 'diag-wish-display'
-        continue-on-error: true
-        run: python -m pytest tests/test_staff_wish_display.py -q
-      - name: 'diag-rest-request'
-        continue-on-error: true
-        run: python -m pytest tests/test_staff_rest_request.py -q
-      - name: 'diag-design-tokens'
-        continue-on-error: true
-        run: python -m pytest tests/test_design_tokens.py -q
-      - name: 'diag-print-view'
-        continue-on-error: true
-        run: python -m pytest tests/test_print_view.py -q
-      - name: 'diag-app'
-        continue-on-error: true
-        run: python -m pytest tests/test_app.py -q
-      - name: 'diag-security'
-        continue-on-error: true
-        run: python -m pytest tests/test_security.py -q
-      - name: 'diag-rest-of-suite'
+      # 全件を1プロセスで走らせたときだけ落ちる（ファイル単位・グループ単位では通る）。
+      # 失敗内容をジョブサマリに書き出す。サマリは check-runs API の output.text として
+      # 公開で読めるため、ログの取得権限が無くても中身を確認できる。
+      - name: 'diag-full-suite'
         continue-on-error: true
         run: |
-          python -m pytest tests/ -q \
-            --ignore=tests/test_settings_xss.py \
-            --ignore=tests/test_staff_wish_display.py \
-            --ignore=tests/test_staff_rest_request.py \
-            --ignore=tests/test_design_tokens.py \
-            --ignore=tests/test_print_view.py \
-            --ignore=tests/test_app.py \
-            --ignore=tests/test_security.py
+          set +e
+          python -m pytest tests/ -q --tb=long -rf > /tmp/pytest.log 2>&1
+          code=$?
+          {
+            echo "## pytest exit=$code"
+            echo '```'
+            tail -c 55000 /tmp/pytest.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
   jscheck:
     runs-on: ubuntu-latest
