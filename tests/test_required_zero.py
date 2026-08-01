@@ -156,4 +156,122 @@ class TestPatternZeroPersistence:
         assert r.status_code == 200
 
         d = client.get("/api/shop/patterns", headers=auth(token)).get_json()
-        assert d["patterns"][0]["required_staff"] == 0
+        # 位置ではなく名前で引く（姉妹テスト test_post_pattern_with_zero と揃える。
+        # 位置指定だとテスト間の実行順序やDBの並びに依存して壊れやすい）。
+        pat = [p for p in d["patterns"] if p["pattern_name"] == "夜"][0]
+        assert pat["required_staff"] == 0
+
+
+class TestShortenToCapZero:
+    """_shorten_to_cap が0人枠を「配置可能」と誤判定しないこと（レビュー指摘 C1）。
+
+    _shorten_to_cap の all_slots は req_map.keys() から作るため、そこに現れる
+    値は必ず「パターン圏内の実値」であり、キー欠落(圏外)はそもそも混ざらない。
+    したがって `req_s == 0` を「配置可（上限なし）」として扱う分岐は、
+    _day_requirements が0人パターンにキーを書かなかった旧実装の下では
+    到達不能な死んだコードだったが、今回0人にもキーを書くようにしたことで
+    生きてしまい、0人枠全体を「配置可能な区間」として返してしまっていた。
+
+    /api/shop/shifts/auto-confirm 経由（_try_confirm_with_adjust → 経路C →
+    _shorten_to_cap）で確認する。0人設定の土曜に requested を1件だけ置くと、
+    他に確定シフトが無いので _auto_adjust_for_overlap では何も解消できず、
+    最終的に _shorten_to_cap の結果だけで confirmed/skipped が決まる。
+    """
+
+    def test_zero_weekday_not_confirmed_via_shorten_to_cap(self, client):
+        from helpers import make_session, auth
+        from db import execute, query_one
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "P1", "アルバイトA", role="part_time")
+        pid = insert_pattern(shop_id, "通し", "09:00", "22:00", 2)
+        # 2026-08-01 は土曜。土曜(6)だけ 0 人にする
+        execute("INSERT INTO shift_pattern_weekday_required (pattern_id, shop_id, weekday, required_staff) VALUES (?,?,?,?)",
+                (pid, shop_id, 6, 0))
+        req_id = insert_request(shop_id, staff_id, "2026-08-01", "09:00", "17:00")
+        token = make_session("shop", shop_id, shop_id)
+
+        r = client.post("/api/shop/shifts/auto-confirm", json={
+            "start_date": "2026-08-01", "end_date": "2026-08-01",
+        }, headers=auth(token))
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["confirmed"] == 0, (
+            f"0人設定の土曜の希望が _shorten_to_cap 経由で confirmed された "
+            f"（上限なし扱いのまま）: results={body['results']}"
+        )
+        row = query_one("SELECT status FROM shifts WHERE id=?", (req_id,))
+        assert row["status"] != "confirmed", f"DB上も confirmed になっていた: {row}"
+
+
+class TestFlagOverCapZero:
+    """_flag_over_cap_shifts が0人枠の confirmed シフトを超過フラグすること
+    （レビュー指摘 I1）。
+
+    cap_ok / _check_slot_cap と同じ契約（キーの有無で圏外判定）に揃える。
+    """
+
+    def test_zero_weekday_confirmed_shift_is_flagged(self, client):
+        from app import _flag_over_cap_shifts
+        import db as dbmod
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "社員A", role="employee")
+        pid = insert_pattern(shop_id, "通し", "09:00", "22:00", 2)
+        dbmod.execute("INSERT INTO shift_pattern_weekday_required (pattern_id, shop_id, weekday, required_staff) VALUES (?,?,?,?)",
+                      (pid, shop_id, 6, 0))
+        # 0人設定の土曜に confirmed を1件（曜日を後から0に変えた想定）
+        shift_id = dbmod.execute(
+            "INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, status, reason) "
+            "VALUES (?,?,?,?,?,?)",
+            (shop_id, staff_id, "2026-08-01T09:00:00", "2026-08-01T17:00:00", "confirmed", "確定"),
+        )["last_row_id"]
+
+        flagged = _flag_over_cap_shifts(shop_id, "2026-08-01T00:00:00", "2026-08-01T23:59:59")
+        assert flagged == 1, "0人設定の土曜のconfirmedシフトが超過フラグされなかった"
+        row = dbmod.query_one("SELECT over_cap_flag FROM shifts WHERE id=?", (shift_id,))
+        assert (row["over_cap_flag"] or 0) == 1
+
+
+class TestCountOverCapSlotsZero:
+    """_count_over_cap_slots が0人枠への追加を超過として数えること（レビュー指摘 I2）。"""
+
+    def test_zero_weekday_counts_as_over(self, client):
+        from app import _count_over_cap_slots
+        import db as dbmod
+        shop_id = insert_shop()
+        pid = insert_pattern(shop_id, "通し", "09:00", "22:00", 2)
+        dbmod.execute("INSERT INTO shift_pattern_weekday_required (pattern_id, shop_id, weekday, required_staff) VALUES (?,?,?,?)",
+                      (pid, shop_id, 6, 0))
+        over_count = _count_over_cap_slots(shop_id, "2026-08-01T09:00:00", "2026-08-01T17:00:00")
+        assert over_count > 0, "0人設定の土曜への配置が超過として数えられなかった"
+
+
+class TestPatternNegativeRejected:
+    """必要人数の負値をAPIで明示的に拒否すること（レビュー指摘 M2）。
+
+    負値は shift_engine._day_requirements 側で 0（配置禁止）に丸められるため
+    実害は限定的だが、「必要人数」に負を保存させること自体が誤りなので
+    入口(API)で 400 を返す。
+    """
+
+    def test_post_pattern_with_negative_required_staff_is_rejected(self, client):
+        from helpers import make_session, auth
+        shop_id = insert_shop()
+        token = make_session("shop", shop_id, shop_id)
+
+        r = client.post("/api/shop/patterns", json={
+            "pattern_name": "不正", "start_time": "09:00", "end_time": "12:00",
+            "required_staff": -1,
+        }, headers=auth(token))
+        assert r.status_code == 400
+
+    def test_put_pattern_with_negative_required_staff_is_rejected(self, client):
+        from helpers import make_session, auth
+        shop_id = insert_shop()
+        pid = insert_pattern(shop_id, "夜", "17:00", "22:00", 3)
+        token = make_session("shop", shop_id, shop_id)
+
+        r = client.put(f"/api/shop/patterns/{pid}", json={
+            "pattern_name": "夜", "start_time": "17:00", "end_time": "22:00",
+            "required_staff": -5,
+        }, headers=auth(token))
+        assert r.status_code == 400

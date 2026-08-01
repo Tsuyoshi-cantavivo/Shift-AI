@@ -547,7 +547,10 @@ def _shorten_to_cap(shop_id, staff_id, start_dt, end_dt, exclude_id=None):
     best_start = None; best_len = 0; cur_start = None; cur_len = 0
     for sl in all_slots:
         req_s = req_map.get(sl, 0)
-        can_place = (req_s == 0) or (coverage.get(sl, 0) + 1 <= req_s)
+        # 値0は「募集しない」。キーがある＝パターン圏内なので、0 は必ず不可。
+        # 旧実装では0人枠にキーが無く all_slots に入らなかったため、
+        # `req_s == 0` は到達不能な枝だった。キーを書くようにした今は生きてしまう。
+        can_place = coverage.get(sl, 0) + 1 <= req_s
         if can_place:
             if cur_start is None:
                 cur_start = sl
@@ -593,8 +596,9 @@ def _count_over_cap_slots(shop_id, start_iso, end_iso, exclude_id=None):
             coverage[sl] = coverage.get(sl, 0) + 1
     over_count = 0
     for sl in slots:
-        req = req_map.get(sl, 0)
-        if req > 0 and coverage.get(sl, 0) + 1 > req:
+        # キーの有無で圏外を判定する（cap_ok / _check_slot_cap と同じ契約）。
+        req = req_map.get(sl)
+        if req is not None and coverage.get(sl, 0) + 1 > req:
             over_count += 1
     return over_count
 
@@ -642,8 +646,9 @@ def _flag_over_cap_shifts(shop_id, start_iso, end_iso):
 
     over = set()                # (day, slot_min) が超過
     for (day, sl), cnt in coverage.items():
-        req = _req_for(day).get(sl, 0)
-        if req and req > 0 and cnt > req:
+        # キーの有無で圏外を判定する（cap_ok / _check_slot_cap と同じ契約）。
+        req = _req_for(day).get(sl)
+        if req is not None and cnt > req:
             over.add((day, sl))
     # 注意: reason はスタッフ側 API も返すため書き換えない（超過情報は over_cap_flag のみで表現）。
     # 店長 UI は over_cap_flag から警告表示を導出する。
@@ -1919,6 +1924,10 @@ def shop_patterns_post():
     # 未指定（None）のときだけ既定値 1 を使う。
     if req is None:
         req = 1
+    # 負値は shift_engine 側で 0（配置禁止）に丸められて意味は破綻しないが、
+    # 「必要人数」として負を保存させること自体が誤り。入口で明示的に弾く。
+    if req < 0:
+        abort(400, description="必要人数は0以上で指定してください")
     meta = execute("INSERT INTO shift_patterns (shop_id, pattern_name, start_time, end_time, required_staff) VALUES (?,?,?,?,?)",
                    (shop_id, body["pattern_name"], body["start_time"], body["end_time"], req))
     return jsonify({"ok": True, "id": meta["last_row_id"], "warning": warning})
@@ -1936,6 +1945,8 @@ def shop_patterns_put(pid):
     # 未指定（None）のときだけ既定値 1 を使う。
     if req is None:
         req = 1
+    if req < 0:
+        abort(400, description="必要人数は0以上で指定してください")
     execute("UPDATE shift_patterns SET pattern_name=?, start_time=?, end_time=?, required_staff=? WHERE id=? AND shop_id=?",
             (body["pattern_name"], body["start_time"], body["end_time"], req, pid, shop_id))
     return jsonify({"ok": True, "warning": warning})

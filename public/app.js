@@ -4284,7 +4284,7 @@ function openPatternModal(data, onDone) {
     `<label class="form-label" for="pName">時間帯名</label><input id="pName" class="form-control mb-2" value="${esc(data?.n || '')}" placeholder="例: 夜">
      <div class="row"><div class="col-6"><label class="form-label" for="pSt">開始</label><input id="pSt" class="form-control" value="${esc(data?.st || '17:00')}"></div>
      <div class="col-6"><label class="form-label" for="pEt">終了</label><input id="pEt" class="form-control" value="${esc(data?.et || '22:00')}"></div></div>
-     <label class="form-label mt-2">基本必要人数</label><input id="pReq" type="number" class="form-control" value="${esc(data?.req || 2)}">
+     <label class="form-label mt-2">基本必要人数</label><input id="pReq" type="number" class="form-control" value="${esc(data?.req ?? 2)}">
      <div class="small text-secondary mt-2">作成後、マトリクスで曜日別の人数を設定できます。</div>`,
     async (w, close) => {
       try {
