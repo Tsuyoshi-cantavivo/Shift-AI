@@ -1609,9 +1609,19 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
    ではこれが容易に起こる。左右ハンドルの開始位置を top:8px にして
    .rq-drag-top の実効領域（上8px）と縦方向で競合しないようにする。
    幅も min(12px, 25%) にして、幅24px未満のバーで start/end 同士が
-   重なって片方が完全に潰れる副次的な問題（軽微）もあわせて緩和する。 */
+   重なって片方が完全に潰れる副次的な問題（軽微）もあわせて緩和する。
+   【レビュー指摘 N1】固定の top:8px は、0人のバー（reqBarHeightPx(0)＝
+   REQ_BAR_MIN_PX＝6px）では高さが負になり0にクランプされ、左右ハンドルの
+   ヒット領域が消えてしまう回帰を生んだ（実測: 12×0px）。0人は「その時間帯は
+   募集しない」を明示的にサポートしている状態（rq-zeroクラス。REQ_BAR_MIN_PX
+   のコメントにもある「0人のときも掴めるように残す高さ」）であり、曜日別で
+   0にした曜日タブではその時間帯をまったく変更できなくなる後退だった。
+   top:min(8px, 50%) にして、6pxバー（3px以下しか使えない）でも上端ハンドル
+   に完全には明け渡さず、下半分（3px≒実測12×2px程度）を確保する。
+   1人/2人/15分幅など8px以上の高さを持つバーは min(8px,50%) が常にちょうど
+   8px になるため計測値は変わらない。 */
 .rq-drag-start, .rq-drag-end {
-  position: absolute; top: 8px; bottom: 0; width: min(12px, 25%);
+  position: absolute; top: min(8px, 50%); bottom: 0; width: min(12px, 25%);
   cursor: ew-resize; touch-action: none;
 }
 .rq-drag-start { left: 0; }

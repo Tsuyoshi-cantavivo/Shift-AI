@@ -687,3 +687,50 @@ test('時間帯ドラッグで重なりが生じると、確定後に段が組�
   });
   expect(lanesAfter.asa).not.toBe(lanesAfter.yoru);
 });
+
+// レビュー指摘 N1: I2修正（左右ハンドルの開始位置を top:8px に固定）の副作用で、
+// 0人のバー（reqBarHeightPx(0)=REQ_BAR_MIN_PX=6px）は 8px の起点自体が
+// バーの高さを超えるため高さが負→0にクランプされ、左右ハンドルのヒット
+// 領域が消えていた（実測: 12×0px）。0人は「その時間帯は募集しない」を
+// 明示的にサポートしている状態（rq-zeroクラス。REQ_BAR_MIN_PXのコメントにも
+// 「0人のときも掴めるように残す高さ」とある）で、曜日別で0にした曜日タブでは
+// その時間帯をまったく変更できなくなる後退だった。
+test('0人のバーでも左右ハンドルが掴めて時間帯を変えられる', async ({ page, request }) => {
+  const res = await request.post('/api/login', {
+    data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
+  });
+  const token = (await res.json()).token;
+  // 早番(09-17)の枠内に収め、軸(9-22時)を変えないようにする。
+  await request.post('/api/shop/patterns', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { pattern_name: '休止', start_time: '10:00', end_time: '10:15', required_staff: 0 },
+  });
+  await page.reload();
+  await page.waitForSelector('#appView:not(.d-none)');
+  await page.click('.side-item[data-screen="settings"]');
+  await page.waitForSelector('#reqBarTrack');
+
+  // 前提確認: このバーが本当に0人（最小高さ＝掴みにくい状態）であることを見る。
+  // ここが崩れるとテストが何も守らなくなる。
+  const barHeight = await page.evaluate(() =>
+    document.querySelector('.rq-bar[data-name="休止"]').getBoundingClientRect().height);
+  expect(barHeight).toBeLessThan(8);
+  await expect(page.locator('.rq-bar[data-name="休止"]')).toHaveClass(/rq-zero/);
+
+  const row = page.locator('.rq-row').filter({ has: page.locator('.rq-count[data-name="休止"]') });
+  const before = await row.locator('.rq-row-time').textContent();
+
+  const box = await page.locator('.rq-bar[data-name="休止"] .rq-drag-end').boundingBox();
+  expect(box).not.toBeNull();
+  const trackBox = await page.locator('#reqBarTrack').boundingBox();
+  const handleCenterX = box.x + box.width / 2;
+  const pxPerMin = trackBox.width / (13 * 60);   // この仕込みは9-22時の13時間軸のまま
+
+  await page.mouse.move(handleCenterX, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handleCenterX + pxPerMin * 30, box.y + box.height / 2, { steps: 5 });
+  await page.mouse.up();
+
+  const after = await row.locator('.rq-row-time').textContent();
+  expect(after).not.toBe(before);
+});
