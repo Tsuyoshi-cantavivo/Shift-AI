@@ -1,0 +1,34 @@
+# pytest は 1109 件が約 13 秒で終わるため、push のたびに全件回しても十分安い。
+# E2E (Playwright) は約 1.5 分かかるうえサーバ起動を伴うので、ここには含めない。
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: 依存パッケージをインストール
+        run: pip install -r requirements.txt
+      - name: ユニットテスト
+        run: python -m pytest tests/ -q
+      - name: シフトエンジン不変量テスト
+        run: python tests/run_tests.py
+
+  jscheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: フロントエンドの構文チェック
+        run: |
+          node --check public/app.js
+          node --check public/admin.js
