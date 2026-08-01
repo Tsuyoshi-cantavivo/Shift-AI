@@ -4378,9 +4378,19 @@ function renderReqBarTabs(body) {
     return `<button class="rq-tab${isActive ? ' active' : ''}${wdClass}" data-wd="${it.wd}">${esc(it.label)}</button>`;
   }).join(''));
   tabs.querySelectorAll('.rq-tab').forEach((b) => b.addEventListener('click', () => {
-    if (reqBarState.dirty && !confirm('保存していない変更があります。タブを切り替えると失われます。よろしいですか？')) return;
-    reqBarState.weekday = b.dataset.wd === '' ? null : parseInt(b.dataset.wd, 10);
-    reqBarState.dirty = false;
+    const nextWd = b.dataset.wd === '' ? null : parseInt(b.dataset.wd, 10);
+    if (reqBarState.dirty) {
+      if (!confirm('保存していない変更があります。タブを切り替えると失われます。よろしいですか？')) return;
+      // 「失われます」と了承させておきながら dirty=false にして手元の
+      // reqBarState.patterns（編集済みの値）を再描画するだけだと、編集内容は
+      // メモリに残り続ける。後で別の曜日を編集して保存すると、破棄したはずの
+      // この編集も一緒に一括APIへ送られてしまう（レビュー Important I1）。
+      // メッセージどおり実際に破棄するため、サーバから読み直す。
+      reqBarState.weekday = nextWd;
+      loadReqBar(body);
+      return;
+    }
+    reqBarState.weekday = nextWd;
     renderReqBarTabs(body);
     renderReqBarTrack(body);
   }));

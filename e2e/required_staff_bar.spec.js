@@ -379,7 +379,14 @@ test('数値欄を変えて保存できる', async ({ page }) => {
   let sent = null;
   await page.route('**/api/shop/patterns/bulk', async (route) => {
     sent = JSON.parse(route.request().postData());
-    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, warnings: [] }) });
+    // レビュー M4: サーバが返す労働時間の警告（9h/13h超）を従来フロントは
+    // 読み捨てていた。保存テストの一つにこれを1件混ぜて、toast に実際に
+    // 表示されることまで検証する。
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, warnings: [{ pattern_name: '早番', warning: '1シフトが13時間を超えています' }] }),
+    });
   });
 
   await page.fill('.rq-count[data-name="早番"]', '5');
@@ -388,9 +395,34 @@ test('数値欄を変えて保存できる', async ({ page }) => {
 
   const asa = sent.patterns.find((p) => p.pattern_name === '早番');
   expect(asa.required_staff).toBe(5);
+
+  // saveReqBar が (r.warnings || []).forEach(w => toast(`${w.pattern_name}: ${w.warning}`, 'warning'))
+  // を呼ぶ経路。モックが常に warnings:[] を返すとこの表示が一度も検証されない
+  // （レビュー M4: 「従来フロントが読み捨てていた」まさにその回帰クラス）。
+  await expect(page.locator('#toastWrap .toast.warning')).toContainText('早番: 1シフトが13時間を超えています');
 });
 
-test('曜日タブで変えた人数は曜日別として送られる', async ({ page }) => {
+test('曜日タブで変えた人数は曜日別として送られる', async ({ page, request }) => {
+  // レビュー M5: 保存パスが「他曜日の上書きを消さない」ことはコードレビューで
+  // 確認済みだが、それを守る自動テストが無かった。ここでは触らない曜日（水曜）
+  // に夜番の上書きを先に仕込んでおき、土曜を編集して保存したペイロードに
+  // 水曜の上書きがそのまま含まれていることを検証する。
+  const loginRes = await request.post('/api/login', {
+    data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
+  });
+  const token = (await loginRes.json()).token;
+  const headers = { Authorization: `Bearer ${token}` };
+  const patternsRes = await (await request.get('/api/shop/patterns', { headers })).json();
+  const yoru = patternsRes.patterns.find((p) => p.pattern_name === '夜番');
+  await request.put(`/api/shop/patterns/${yoru.id}/weekday-required`, {
+    headers,
+    data: { weekday_required: { '3': 5 } },   // 水曜だけ5人
+  });
+  await page.reload();
+  await page.waitForSelector('#appView:not(.d-none)');
+  await page.click('.side-item[data-screen="settings"]');
+  await page.waitForSelector('#reqBarTrack');
+
   let sent = null;
   await page.route('**/api/shop/patterns/bulk', async (route) => {
     sent = JSON.parse(route.request().postData());
@@ -405,6 +437,46 @@ test('曜日タブで変えた人数は曜日別として送られる', async ({
   const asa = sent.patterns.find((p) => p.pattern_name === '早番');
   expect(asa.required_staff).toBe(2);          // 基本値は変わらない
   expect(asa.weekday_required['6']).toBe(4);   // 土曜だけ4人
+
+  // 一度も触っていない夜番・水曜の上書きが、保存の一括送信で消えていないこと。
+  const yoruSent = sent.patterns.find((p) => p.pattern_name === '夜番');
+  expect(yoruSent.weekday_required['3']).toBe(5);
+});
+
+// レビュー Important I1: タブ切替時の確認ダイアログで「破棄する」を選んでも、
+// dirty=false にして再描画するだけでは reqBarState.patterns の編集内容が
+// メモリに残ったままになる。後で別の曜日を編集して保存すると、破棄した
+// はずの編集も一緒に一括APIへ送られてしまう（メッセージが嘘になる）。
+test('曜日タブの確認ダイアログで破棄を了承すると、その曜日の編集は保存に含まれない', async ({ page }) => {
+  page.on('dialog', (d) => d.accept());
+
+  let sent = null;
+  await page.route('**/api/shop/patterns/bulk', async (route) => {
+    sent = JSON.parse(route.request().postData());
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, warnings: [] }) });
+  });
+
+  // 土曜タブで早番を4人に変更（このあと破棄するはずの編集）
+  await page.click('#reqBarTabs .rq-tab[data-wd="6"]');
+  await page.fill('.rq-count[data-name="早番"]', '4');
+
+  // 日曜タブへ移動 → 確認ダイアログで「破棄する」を選ぶ（dialogハンドラでOK）
+  await page.click('#reqBarTabs .rq-tab[data-wd="0"]');
+  // loadReqBar のフェッチは非同期のため、クリック直後はまだ再描画が終わって
+  // いないことがある。日曜は元々上書きが無い曜日なので、基本値(2)に戻る
+  // ことを待ってから次の操作をする（fill を即打つと再描画で消される）。
+  const inp = page.locator('.rq-count[data-name="早番"]');
+  await expect(inp).toHaveValue('2');
+
+  // 日曜側は別の値に変更して保存する
+  await page.fill('.rq-count[data-name="早番"]', '7');
+  await page.click('#reqBarSave');
+  await expect.poll(() => sent).not.toBeNull();
+
+  const asa = sent.patterns.find((p) => p.pattern_name === '早番');
+  expect(asa.weekday_required['0']).toBe(7);
+  // 破棄したはずの土曜の4人がここに紛れ込んでいないこと。
+  expect(asa.weekday_required['6']).toBeUndefined();
 });
 
 test('＋ボタンでバーの高さが伸びる', async ({ page }) => {
@@ -428,6 +500,12 @@ test('バーを上にドラッグすると人数が増える', async ({ page }) 
 
   const v = await page.inputValue('.rq-count[data-name="早番"]');
   expect(parseInt(v, 10)).toBeGreaterThan(2);
+  // レビュー Minor M3: onMove は .rq-count の value を直接書き換えるため、
+  // applyReqBarCount（state更新）を呼ばなくても上の inputValue だけを見る
+  // アサーションは緑のまま通ってしまい、「ドラッグしても実は保存されない」
+  // という致命的な回帰を見逃す。state 由来の描画（refreshReqBarRowVisual
+  // が更新するバーラベル）も併せて見て、value と state の両方を守る。
+  await expect(page.locator('.rq-bar[data-name="早番"] .rq-bar-label')).toContainText(`${v}人`);
 });
 
 test('0人未満にはならない', async ({ page }) => {
