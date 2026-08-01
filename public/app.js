@@ -4214,6 +4214,10 @@ function readShiftHourRow(wrap, key) {
 const REQ_BAR_UNIT_PX = 14;
 /** 0人のときも掴めるように残す高さ(px)。0だと画面から消えて操作不能になる。 */
 const REQ_BAR_MIN_PX = 6;
+/** 重なる時間帯を段（レーン）に分けたときの、段と段の隙間(px)。
+ *  最大人数どうしが隣接すると境界がぴったり密着して1本のバーに見えかねない
+ *  ため、数px空ける（レビュー指摘 N2）。 */
+const REQ_BAR_LANE_GAP_PX = 4;
 
 /** 時間帯パターン群から時間軸の範囲を返す。
  *  end <= start は日またぎとみなし、翌日側（+24h）まで軸を伸ばす。
@@ -4386,8 +4390,12 @@ function renderReqBarTrack(body) {
 
   // 時間帯が重なると不透明なバー同士が隠し合って読めなくなる（レビュー I5）。
   // 段（レーン）に分けて縦にずらし、トラックの高さは段数ぶん確保する。
+  // 1段の高さ（px）はここ（JS）だけで計算し、CSS 側は --rq-lane-h を
+  // そのまま使う。以前は JS が「6+14n」・CSS が「24+14n」と別々に高さ式を
+  // 持っていて定数が食い違っていた（Task3で除去したはずの「複製された定数」と
+  // 同じ問題。レビュー指摘 N2）。
   const lanes = reqBarLanes(pats);
-  const laneHeightPx = reqBarHeightPx(maxCount);
+  const laneHeightPx = reqBarHeightPx(maxCount) + REQ_BAR_LANE_GAP_PX;
 
   const bars = pats.map((p) => {
     const eff = reqBarEffective(p, wd);
@@ -4431,7 +4439,7 @@ function renderReqBarTrack(body) {
       <div class="tl-axis-row"><div class="tl-name"></div><div class="tl-axis">${hours.join('')}</div></div>
       <div class="rq-track-row">
         <div class="tl-name"></div>
-        <div class="tl-track rq-track" id="reqBarTrack" style="${trackVars};--rq-max:${maxCount};--rq-lanes:${lanes.laneCount}">${bars}</div>
+        <div class="tl-track rq-track" id="reqBarTrack" style="${trackVars};--rq-lane-h:${laneHeightPx}px;--rq-lanes:${lanes.laneCount}">${bars}</div>
       </div>
     </div>
     <div class="rq-rows">${rows}</div>`);
@@ -4456,10 +4464,17 @@ function bindReqBarRows(body) {
     const bar = host.querySelector(`.rq-bar[data-pid="${CSS.escape(inp.dataset.pid)}"]`);
     if (bar) updateReqBarVisual(bar, n);
   }));
-  // 確定時（フォーカスが外れたとき）に正規化して再描画する。空欄のまま
-  // 離れても input 側では state を更新していないので、直前の正常値に戻る。
+  // 確定時（フォーカスが外れたとき）に自分の表示値だけを正規化する。
+  // 全体を再描画すると、行内ボタン（＋/−/編集/削除）への
+  // mousedown → blur → 再描画（対象ボタンが消える）→ mouseup の順になり、
+  // クリックの1回目が空振りする（レビュー Important N1）。バーの見た目は
+  // 入力中に updateReqBarVisual で更新済みなので、ここでの全体再描画は不要。
+  // 空欄のまま離れても input 側では state を更新していないので、
+  // state の値（直前の正常値）に戻す。
   host.querySelectorAll('.rq-count').forEach((inp) => inp.addEventListener('blur', () => {
-    renderReqBarTrack(body);
+    const p = findReqPattern(inp.dataset.pid);
+    if (!p) return;
+    inp.value = String(reqBarEffective(p, reqBarState.weekday).count);
   }));
   host.querySelectorAll('.rq-step').forEach((b) => b.addEventListener('click', () => {
     const p = findReqPattern(b.dataset.pid);

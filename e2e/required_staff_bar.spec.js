@@ -117,6 +117,60 @@ test('数値欄に複数桁を1文字ずつ入力できる（10人以上）', as
   await inp.fill('');
   await inp.pressSequentially('12', { delay: 30 });
   await expect(inp).toHaveValue('12');
+  // 入力欄の値だけでなく、state とバー側にも反映されていることを見る
+  // （レビュー指摘 Minor N3: 表示だけ直って中身が伴っていない可能性）。
+  await expect(page.locator('.rq-bar[data-name="早番"] .rq-bar-label')).toContainText('12人');
+  // blur しても入力した値のまま（正規化で消えたりしないこと）。
+  await inp.blur();
+  await expect(inp).toHaveValue('12');
+});
+
+// レビュー Minor N3: C1 のうち最も危険な経路。空欄のまま離れると
+// parseInt('')=NaN → 0（＝Task1の契約で「募集しない」）に誤って
+// 保存されかねない。直前の正常値に戻ることを検証する。
+test('数値欄を空にしたまま離れると元の値に戻る（0に落ちない）', async ({ page }) => {
+  const inp = page.locator('.rq-count[data-name="早番"]');
+  await inp.click();
+  await inp.fill('');
+  await inp.blur();
+  await expect(inp).toHaveValue('2');
+  await expect(page.locator('.rq-bar[data-name="早番"]')).not.toHaveClass(/rq-zero/);
+});
+
+// レビュー Important N1（新規回帰）: blur で #reqBarBody 全体を再描画すると、
+// mousedown → blur（再描画で対象ボタンが消える）→ mouseup の順になり、
+// 行内ボタンへの1回目のクリックが空振りする。
+test('数値欄にフォーカスしてから＋ボタンを押すと人数が増える', async ({ page }) => {
+  const row = page.locator('.rq-row').filter({ has: page.locator('.rq-count[data-name="早番"]') });
+  const inp = row.locator('.rq-count');
+  await inp.click();   // フォーカスするだけで値は変えない
+  await row.locator('.rq-step[data-step="1"]').click();
+  // 早番の基本値は2人。空振りしていなければ1回のクリックで3人になる。
+  await expect(page.locator('.rq-bar[data-name="早番"] .rq-bar-label')).toContainText('3人');
+});
+
+// レビュー Important N1: 時間帯Aの欄を打った直後に時間帯Bの欄へ移ってそのまま
+// 打つと、blurの全体再描画でフォーカスがbodyに落ちて入力が飲まれる
+// （利用者からはC1と同じ症状に見える）。
+// 注意: locator.click()/pressSequentially は内部でアクショナビリティの
+// 再試行・再フォーカスを行うため、レース1回分のフォーカス消失を
+// 自己修復してしまい検知できないことがある（実測済み）。ここでは
+// クリック直後に document.activeElement を直接確認し、そのあとは
+// フォーカスを取り直さない page.keyboard.type で打鍵することで、
+// レビューが実測した「フォーカスがbodyに落ちる」症状そのものを検証する。
+test('時間帯Aの欄を打った直後に時間帯Bの欄へ移って打つとBに入る', async ({ page }) => {
+  const inpA = page.locator('.rq-count[data-name="早番"]');
+  const inpB = page.locator('.rq-count[data-name="夜番"]');
+  await inpA.click();
+  await inpA.fill('');
+  await inpA.pressSequentially('5', { delay: 30 });
+  await inpB.click();   // Aからフォーカスが外れ、Bへ移る
+  await expect(inpB).toBeFocused();
+  // fill() 等の Locator 操作は再フォーカスを含むため使わない。
+  // page.keyboard だけで全選択→上書きする。
+  await page.keyboard.press('ControlOrMeta+A');
+  await page.keyboard.type('7', { delay: 30 });
+  await expect(inpB).toHaveValue('7');
 });
 
 // レビュー Important I5: 時間帯が重なると不透明なバーが互いを隠して読めなくなる。

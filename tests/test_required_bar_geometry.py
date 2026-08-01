@@ -219,6 +219,22 @@ class TestReqBarLanes:
         assert r["laneCount"] == 3
         assert len({r["lane"]["1"], r["lane"]["2"], r["lane"]["3"]}) == 3
 
+    def test_identical_time_ranges_get_two_lanes(self):
+        """完全に同一の時間帯が2件（レビュー指摘 N4）。"""
+        pats = [{"id": 1, "start_time": "09:00", "end_time": "17:00"},
+                {"id": 2, "start_time": "09:00", "end_time": "17:00"}]
+        r = self._lanes(pats)
+        assert r["lane"]["1"] != r["lane"]["2"]
+        assert r["laneCount"] == 2
+
+    def test_full_containment_gets_two_lanes(self):
+        """一方が他方を完全に包含する（レビュー指摘 N4）。"""
+        pats = [{"id": 1, "start_time": "09:00", "end_time": "22:00"},
+                {"id": 2, "start_time": "12:00", "end_time": "14:00"}]
+        r = self._lanes(pats)
+        assert r["lane"]["1"] != r["lane"]["2"]
+        assert r["laneCount"] == 2
+
     def test_overnight_does_not_conflict_with_unrelated_daytime(self):
         """日またぎ（22:00-02:00）が翌日側（+24h）に伸びて扱われ、
         時間的に無関係な日中の時間帯と誤って重なり扱いにならないこと。"""

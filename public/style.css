@@ -1535,14 +1535,18 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 .rq-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .rq-track-row { display: flex; align-items: flex-end; min-width: 480px; }
 /* バーは下端揃え。高さが人数を表すので、上に伸びる形にする。
+   --rq-lane-h（1段ぶんの高さ）は JS（renderReqBarTrack）が
+   reqBarHeightPx() から計算して渡す。以前は CSS 側も「24px + 14px*n」を
+   独自に持っていて、REQ_BAR_UNIT_PX を変えても CSS が追従しない「複製された
+   定数」問題があった（Task3で除去したのと同じ問題。レビュー指摘 N2）。
+   ここでは掛け算（段数ぶん）だけを担い、実際の1段の高さはJS側の値を使う。
    --rq-lanes は重なる時間帯を別の段に振り分けた段数（reqBarLanes）。
-   段数ぶん高さを掛けないと、上の段のバーがトラックからはみ出す。
    .tl-track（セクション20）から cursor:pointer と :hover の背景変化を
    継承してしまうため（この Task ではまだクリック編集を実装していない）、
    ここで打ち消す（レビュー指摘 M12）。 */
 .rq-track {
   position: relative; display: flex; align-items: flex-end;
-  height: calc((var(--rq-max, 4) * 14px + 24px) * var(--rq-lanes, 1)); min-height: 60px;
+  height: calc(var(--rq-lane-h, 20px) * var(--rq-lanes, 1) + 24px); min-height: 60px;
   cursor: default;
 }
 .rq-track:hover { background-color: transparent; }
