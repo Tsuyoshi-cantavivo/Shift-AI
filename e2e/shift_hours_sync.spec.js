@@ -45,12 +45,13 @@ test.describe('シフト時間設定 ⇔ パターン同期', () => {
     await page.waitForSelector('#shMsg .text-success, .toast', { timeout: 8000 });
 
     // 3. シフト設定タブに切り替え
+    // Task4 でマトリクス表（#matrixWrap）はバーUI（#reqBarBody）に置き換わった。
     await page.click('.tab[data-tab="shift"]');
-    await page.waitForSelector('#matrixWrap, .empty-state', { timeout: 10000 });
+    await page.waitForSelector('#reqBarBody, .empty-state', { timeout: 10000 });
 
     // 4. パターンが 04:00-02:00 になっているか確認
     // ※ 新規店舗なら「通し」パターンが自動作成されているはず
-    const matrixText = await page.locator('#matrixWrap').textContent().catch(() => '');
+    const matrixText = await page.locator('#reqBarBody').textContent().catch(() => '');
     // 04:00 と 02:00 が含まれることを確認
     expect(matrixText).toContain('04:00');
     expect(matrixText).toContain('02:00');
@@ -68,9 +69,9 @@ test.describe('シフト時間設定 ⇔ パターン同期', () => {
     await page.click('button[data-screen="settings"]');
     await page.waitForSelector('.tab[data-tab="shift"]');
     await page.click('.tab[data-tab="shift"]');
-    await page.waitForSelector('#addPat, .empty-state', { timeout: 10000 });
+    await page.waitForSelector('#reqBarAdd, .empty-state', { timeout: 10000 });
     // 既にパターンがあるはず（前のテストで作成）なので、その時間を記憶
-    const beforeMatrix = await page.locator('#matrixWrap').textContent().catch(() => '');
+    const beforeMatrix = await page.locator('#reqBarBody').textContent().catch(() => '');
 
     // シフト時間設定タブで時間を変えて、同期OFFで保存
     await page.click('.tab[data-tab="shifthours"]');
@@ -86,8 +87,8 @@ test.describe('シフト時間設定 ⇔ パターン同期', () => {
 
     // シフト設定タブに戻って確認
     await page.click('.tab[data-tab="shift"]');
-    await page.waitForSelector('#matrixWrap, .empty-state', { timeout: 10000 });
-    const afterMatrix = await page.locator('#matrixWrap').textContent().catch(() => '');
+    await page.waitForSelector('#reqBarBody, .empty-state', { timeout: 10000 });
+    const afterMatrix = await page.locator('#reqBarBody').textContent().catch(() => '');
     // 04:00-02:00 のまま（同期していないので）
     expect(afterMatrix).toContain('04:00');
     expect(afterMatrix).toContain('02:00');

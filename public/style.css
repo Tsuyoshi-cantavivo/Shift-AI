@@ -1545,3 +1545,66 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 .impersonation-bar .btn {
   flex-shrink: 0;
 }
+
+/* ---------- 35. Required Staff Bar (必要人数バー) ---------- */
+.rq-tabs { display: flex; gap: 2px; flex-wrap: wrap; margin-bottom: 12px; }
+.rq-tab {
+  border: 1px solid var(--rule); background: var(--surface); color: var(--ink-2);
+  border-radius: var(--radius-sm); padding: 6px 14px; min-height: 40px;
+  font-size: .88rem; cursor: pointer;
+}
+.rq-tab.active { background: var(--info); color: var(--paper); border-color: var(--info); font-weight: 700; }
+.rq-tab.rq-sun { color: var(--danger); }
+.rq-tab.rq-sat { color: var(--info); }
+.rq-tab.rq-sun.active, .rq-tab.rq-sat.active { color: var(--paper); }
+
+.rq-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.rq-track-row { display: flex; align-items: flex-end; min-width: 480px; }
+/* バーは下端揃え。高さが人数を表すので、上に伸びる形にする。 */
+.rq-track {
+  position: relative; display: flex; align-items: flex-end;
+  height: calc(var(--rq-max, 4) * 14px + 24px); min-height: 60px;
+}
+.rq-bar {
+  position: absolute; bottom: 0;
+  background: var(--role-part-time); color: var(--role-part-time-ink);
+  border: 1px solid var(--grid-4h); border-radius: var(--radius-xs);
+  display: flex; align-items: center; justify-content: center;
+  font-size: .74rem; font-weight: 700; overflow: hidden; white-space: nowrap;
+}
+.rq-bar.rq-override { background: var(--role-manager); color: var(--role-manager-ink); }
+/* 0人は「募集しない」。塗りを外して斜線で区別する。 */
+.rq-bar.rq-zero {
+  background: repeating-linear-gradient(45deg, var(--zebra), var(--zebra) 4px, transparent 4px, transparent 8px);
+  color: var(--ink-3);
+}
+.rq-bar-label { padding: 0 4px; }
+
+.rq-rows { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+.rq-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 10px; border: 1px solid var(--rule); border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.rq-row-name { font-weight: 700; min-width: 4em; }
+.rq-row-time { font-family: var(--font-num); color: var(--ink-2); font-size: .82rem; min-width: 9em; }
+.rq-step {
+  width: 40px; min-height: 40px; border: 1px solid var(--rule);
+  background: var(--surface); color: var(--ink); border-radius: var(--radius-sm);
+  font-size: 1.1rem; line-height: 1; cursor: pointer;
+}
+.rq-count {
+  width: 64px; min-height: 40px; text-align: center;
+  font-family: var(--font-num); font-size: 1rem;
+  border: 1px solid var(--rule); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--ink);
+}
+.rq-unit { color: var(--ink-2); font-size: .82rem; }
+.rq-reset, .rq-edit, .rq-del {
+  width: 40px; min-height: 40px; border: none; background: transparent;
+  color: var(--ink-2); cursor: pointer; border-radius: var(--radius-sm);
+}
+.rq-del { color: var(--danger); }
+/* 目盛り行は .tl-axis-row / .tl-hour（セクション20・タイムライン）をそのまま流用する。
+   .tl-hour:last-child の絶対配置トリック（目盛りを N+1 個生成し最後の1個だけ
+   フローから抜く）もそのまま効くため、.rq-* 側で目盛り関連の再定義はしない。 */

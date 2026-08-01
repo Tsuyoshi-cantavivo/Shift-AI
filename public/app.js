@@ -4275,78 +4275,176 @@ function reqBarEffective(pattern, weekday) {
   return { count: Math.max(0, Math.round(v)), isOverride: true };
 }
 
-/* --- シフト設定（マトリクス） --- */
+/* --- シフト設定（必要人数バー） --- */
+/** 必要人数バーUIの状態。曜日タブの選択と、編集中のパターン群を持つ。
+ *  weekday: null = 「基本」タブ（shift_patterns.required_staff を編集）
+ *           0..6 = 曜日タブ（shift_pattern_weekday_required を編集） */
+let reqBarState = { patterns: [], weekday: null, dirty: false };
+
+const REQ_BAR_WD_LABELS = ['日', '月', '火', '水', '木', '金', '土'];
+
 function renderShiftMatrixTab(body) {
   body.innerHTML = card(
-    sectionTitle('bi-grid-3x3-gap', 'シフト設定', `<span class="small text-secondary">— 各時間帯の必要人数を曜日ごとに設定</span>`) +
-    `<p class="small text-secondary mb-3">空欄のマスは<strong>基本</strong>の人数が適用されます。<strong>0</strong>を入れるとその曜日は募集しません。</p>
-    <div id="matrixWrap"></div>
-    <button class="btn btn-primary mt-3" id="addPat"><i class="bi bi-plus-lg"></i> 時間帯を追加</button>`);
-  loadMatrix(body);
-  body.querySelector('#addPat')?.addEventListener('click', () => openPatternModal(null, () => loadMatrix(body)));
+    sectionTitle('bi-grid-3x3-gap', 'シフト設定', '<span class="small text-secondary">— 時間帯ごとの必要人数</span>') +
+    `<div id="reqBarTabs" class="rq-tabs"></div>
+     <div id="reqBarBody"></div>
+     <div class="flex gap-2 mt-3">
+       <button class="btn btn-light" id="reqBarAdd"><i class="bi bi-plus-lg"></i> 時間帯を追加</button>
+       <button class="btn btn-primary" id="reqBarSave"><i class="bi bi-check-lg"></i> 保存</button>
+       <span class="small text-secondary flex items-center" id="reqBarMsg"></span>
+     </div>`);
+  loadReqBar(body);
+  body.querySelector('#reqBarAdd')?.addEventListener('click', () => openPatternModal(null, () => loadReqBar(body)));
 }
-async function loadMatrix(body) {
-  const wrap = body.querySelector('#matrixWrap');
+
+async function loadReqBar(body) {
+  const host = body.querySelector('#reqBarBody');
   try {
     const d = await api('/shop/patterns');
-    if (!d.patterns.length) { wrap.innerHTML = emptyState('bi-grid-3x3-gap', '時間帯がありません。「時間帯を追加」で作成してください'); return; }
-    wrap.innerHTML = `<div class="matrix-wrap"><table class="matrix-table">
-      <thead><tr>
-        <th style="text-align:left;padding-left:14px">時間帯</th>
-        <th>基本</th>
-        <th class="sun">日</th><th>月</th><th>火</th><th>水</th><th>木</th><th>金</th><th class="sat">土</th>
-        <th></th>
-      </tr></thead>
-      <tbody>${d.patterns.map((p) => {
-        const wr = p.weekday_required || {};
-        return `<tr data-pid="${p.id}">
-          <td><div class="matrix-pat-name">${esc(p.pattern_name)}</div><div class="matrix-pat-time">${esc(p.start_time)} - ${esc(p.end_time)}</div></td>
-          <td><input type="number" class="matrix-input matrix-default" data-pid="${p.id}" value="${esc(p.required_staff)}" min="0" title="基本必要人数"></td>
-          ${[0,1,2,3,4,5,6].map((w) => {
-            const val = wr[String(w)];
-            const has = val !== undefined && val !== null;
-            return `<td><input type="number" class="matrix-input matrix-wd ${has?'has-override':''}" data-pid="${p.id}" data-wd="${w}" value="${esc(has?val:'')}" placeholder="${esc(p.required_staff)}" min="0"></td>`;
-          }).join('')}
-          <td><div class="matrix-row-actions">
-            <button data-edit="${p.id}" data-n="${esc(p.pattern_name)}" data-st="${esc(p.start_time)}" data-et="${esc(p.end_time)}" data-req="${esc(p.required_staff)}" title="編集"><i class="bi bi-pencil"></i></button>
-            <button data-del="${p.id}" title="削除"><i class="bi bi-trash"></i></button>
-          </div></td>
-        </tr>`;
-      }).join('')}</tbody>
-    </table></div>
-    <div class="flex gap-2 mt-3">
-      <button class="btn btn-primary" id="saveMatrix"><i class="bi bi-check-lg"></i> 保存</button>
-      <span class="small text-secondary flex items-center">※変更後「保存」を押してください。青い数字は曜日別オーバーライドです。</span>
+    reqBarState = { patterns: d.patterns || [], weekday: reqBarState.weekday, dirty: false };
+    renderReqBarTabs(body);
+    renderReqBarTrack(body);
+  } catch (e) {
+    safeSetHTML(host, `<div class="text-danger">${esc(e.message)}</div>`);
+  }
+}
+
+function renderReqBarTabs(body) {
+  const tabs = body.querySelector('#reqBarTabs');
+  if (!tabs) return;
+  const cur = reqBarState.weekday;
+  const items = [{ wd: '', label: '基本' }]
+    .concat(REQ_BAR_WD_LABELS.map((l, i) => ({ wd: String(i), label: l })));
+  tabs.innerHTML = items.map((it) => {
+    const isActive = (it.wd === '' && cur === null) || (it.wd !== '' && String(cur) === it.wd);
+    const wdClass = it.wd === '0' ? ' rq-sun' : (it.wd === '6' ? ' rq-sat' : '');
+    return `<button class="rq-tab${isActive ? ' active' : ''}${wdClass}" data-wd="${it.wd}">${esc(it.label)}</button>`;
+  }).join('');
+  tabs.querySelectorAll('.rq-tab').forEach((b) => b.addEventListener('click', () => {
+    if (reqBarState.dirty && !confirm('保存していない変更があります。タブを切り替えると失われます。よろしいですか？')) return;
+    reqBarState.weekday = b.dataset.wd === '' ? null : parseInt(b.dataset.wd, 10);
+    reqBarState.dirty = false;
+    renderReqBarTabs(body);
+    renderReqBarTrack(body);
+  }));
+}
+
+function renderReqBarTrack(body) {
+  const host = body.querySelector('#reqBarBody');
+  if (!host) return;
+  const pats = reqBarState.patterns;
+  if (!pats.length) {
+    safeSetHTML(host, `<div id="reqBarEmpty">${emptyState('bi-grid-3x3-gap', '時間帯がありません。「時間帯を追加」で作成してください')}</div>`);
+    return;
+  }
+  const wd = reqBarState.weekday;
+  const range = reqBarRange(pats);
+  const hours = [];
+  for (let h = range.minH; h <= range.maxH; h++) {
+    hours.push(`<div class="tl-hour${h >= 24 ? ' tl-hour-next' : ''}">${esc(_extHourLabel(h))}</div>`);
+  }
+  // --tl-hours は CSS が背景グラデーションでグリッドを描くのに使う。
+  // 目盛りは N+1 個生成し、最後の1個だけ CSS 側で絶対配置する（.tl-hour:last-child）。
+  // これを省くと目盛りが1時間分ずれる。
+  const trackVars = `--tl-hours:${range.maxH - range.minH}`;
+  const maxCount = Math.max(1, ...pats.map((p) => reqBarEffective(p, wd).count));
+
+  const bars = pats.map((p) => {
+    const eff = reqBarEffective(p, wd);
+    const pos = reqBarPosition(p.start_time, p.end_time, range);
+    const h = reqBarHeightPx(eff.count);
+    return `<div class="rq-bar${eff.isOverride ? ' rq-override' : ''}${eff.count === 0 ? ' rq-zero' : ''}"
+      data-pid="${esc(p.id)}" data-name="${esc(p.pattern_name)}"
+      style="left:${pos.left.toFixed(2)}%;width:${pos.width.toFixed(2)}%;height:${h}px"
+      title="${esc(p.pattern_name)} ${esc(p.start_time)}〜${esc(p.end_time)} / ${eff.count}人">
+      <span class="rq-bar-label">${esc(p.pattern_name)} ${eff.count}人</span>
     </div>`;
-    // Edit buttons
-    wrap.querySelectorAll('[data-edit]').forEach((b) => b?.addEventListener('click', () => openPatternModal(b.dataset, () => loadMatrix(body))));
-    // Delete buttons
-    wrap.querySelectorAll('[data-del]').forEach((b) => b?.addEventListener('click', async () => {
-      if (!confirm('この時間帯を削除しますか？曜日別設定も削除されます。')) return;
-      await api(`/shop/patterns/${b.dataset.del}`, { method: 'DELETE' });
-      toast('削除しました', 'success'); loadMatrix(body);
-    }));
-    // Save
-    body.querySelector('#saveMatrix')?.addEventListener('click', async () => {
-      try {
-        const rows = wrap.querySelectorAll('tbody tr');
-        for (const tr of rows) {
-          const pid = tr.dataset.pid;
-          const defVal = +tr.querySelector('.matrix-default').value;
-          const name = tr.querySelector('.matrix-pat-name').textContent;
-          const time = tr.querySelector('.matrix-pat-time').textContent;
-          const [st, et] = time.split(' - ');
-          // Update pattern default
-          await api(`/shop/patterns/${pid}`, { method: 'PUT', body: JSON.stringify({ pattern_name: name, start_time: st, end_time: et, required_staff: defVal }) });
-          // Collect weekday overrides
-          const wr = {};
-          tr.querySelectorAll('.matrix-wd').forEach((inp) => { const v = inp.value.trim(); if (v !== '') wr[inp.dataset.wd] = parseInt(v, 10); });
-          await api(`/shop/patterns/${pid}/weekday-required`, { method: 'PUT', body: JSON.stringify({ weekday_required: wr }) });
-        }
-        toast('保存しました', 'success'); loadMatrix(body);
-      } catch (e) { toast(e.message, 'error'); }
-    });
-  } catch (e) { wrap.innerHTML = `<div class="text-danger">${esc(e.message)}</div>`; }
+  }).join('');
+
+  const rows = pats.map((p) => {
+    const eff = reqBarEffective(p, wd);
+    return `<div class="rq-row" data-pid="${esc(p.id)}">
+      <span class="rq-row-name">${esc(p.pattern_name)}</span>
+      <span class="rq-row-time">${esc(p.start_time)} 〜 ${esc(p.end_time)}</span>
+      <button class="rq-step" data-step="-1" data-pid="${esc(p.id)}" title="1人減らす">−</button>
+      <input type="number" class="rq-count" min="0" data-pid="${esc(p.id)}" data-name="${esc(p.pattern_name)}" value="${esc(eff.count)}">
+      <span class="rq-unit">人</span>
+      <button class="rq-step" data-step="1" data-pid="${esc(p.id)}" title="1人増やす">＋</button>
+      ${wd !== null && eff.isOverride ? `<button class="rq-reset" data-pid="${esc(p.id)}" title="基本に戻す"><i class="bi bi-arrow-counterclockwise"></i></button>` : ''}
+      <button class="rq-edit" data-pid="${esc(p.id)}" title="時間帯を編集"><i class="bi bi-pencil"></i></button>
+      <button class="rq-del" data-pid="${esc(p.id)}" title="削除"><i class="bi bi-trash"></i></button>
+    </div>`;
+  }).join('');
+
+  const note = wd === null
+    ? '<div class="small text-secondary mb-2">曜日ごとに人数を変えたいときは、上のタブで曜日を選んでください。</div>'
+    : `<div class="small text-secondary mb-2">${esc(REQ_BAR_WD_LABELS[wd])}曜日の人数を設定しています。<strong>時間帯そのものを変えると全曜日に反映されます。</strong></div>`;
+
+  safeSetHTML(host, `${note}
+    <div class="rq-wrap">
+      <div class="tl-axis-row"><div class="tl-name"></div><div class="tl-axis">${hours.join('')}</div></div>
+      <div class="rq-track-row">
+        <div class="tl-name"></div>
+        <div class="tl-track rq-track" id="reqBarTrack" style="${trackVars};--rq-max:${maxCount}">${bars}</div>
+      </div>
+    </div>
+    <div class="rq-rows">${rows}</div>`);
+
+  bindReqBarRows(body);
+}
+
+/** 数値欄と ± ボタン、編集・削除・基本に戻すのバインド。 */
+function bindReqBarRows(body) {
+  const host = body.querySelector('#reqBarBody');
+  if (!host) return;
+
+  host.querySelectorAll('.rq-count').forEach((inp) => inp.addEventListener('input', () => {
+    setReqBarCount(body, inp.dataset.pid, parseInt(inp.value, 10));
+  }));
+  host.querySelectorAll('.rq-step').forEach((b) => b.addEventListener('click', () => {
+    const cur = reqBarEffective(findReqPattern(b.dataset.pid), reqBarState.weekday).count;
+    setReqBarCount(body, b.dataset.pid, cur + parseInt(b.dataset.step, 10));
+  }));
+  host.querySelectorAll('.rq-reset').forEach((b) => b.addEventListener('click', () => {
+    const p = findReqPattern(b.dataset.pid);
+    if (!p || reqBarState.weekday === null) return;
+    delete (p.weekday_required || {})[String(reqBarState.weekday)];
+    reqBarState.dirty = true;
+    renderReqBarTrack(body);
+  }));
+  host.querySelectorAll('.rq-edit').forEach((b) => b.addEventListener('click', () => {
+    const p = findReqPattern(b.dataset.pid);
+    if (!p) return;
+    openPatternModal({ edit: p.id, n: p.pattern_name, st: p.start_time, et: p.end_time, req: p.required_staff },
+      () => loadReqBar(body));
+  }));
+  host.querySelectorAll('.rq-del').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('この時間帯を削除しますか？曜日別の設定も削除されます。')) return;
+    try {
+      await api(`/shop/patterns/${b.dataset.pid}`, { method: 'DELETE' });
+      toast('削除しました', 'success');
+      loadReqBar(body);
+    } catch (e) { toast(e.message, 'error'); }
+  }));
+}
+
+function findReqPattern(pid) {
+  return reqBarState.patterns.find((p) => String(p.id) === String(pid));
+}
+
+/** 人数を設定して再描画する。バーの高さと数値欄はここを通じて常に同期する。 */
+function setReqBarCount(body, pid, count) {
+  const p = findReqPattern(pid);
+  if (!p) return;
+  const n = Math.max(0, Math.round(isNaN(count) ? 0 : count));
+  if (reqBarState.weekday === null) {
+    p.required_staff = n;
+  } else {
+    p.weekday_required = p.weekday_required || {};
+    p.weekday_required[String(reqBarState.weekday)] = n;
+  }
+  reqBarState.dirty = true;
+  renderReqBarTrack(body);
 }
 function openPatternModal(data, onDone) {
   const isEdit = !!data;
