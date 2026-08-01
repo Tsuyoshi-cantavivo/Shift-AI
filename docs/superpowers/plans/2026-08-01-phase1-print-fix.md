@@ -352,6 +352,10 @@ git commit -m "test: 印刷CSSを検査対象に入れる
 
 **方針**: 印刷内容を `appState.printPayload` に保持し、`afterprint` で DOM を破棄しない。加えて `beforeprint` でも空なら payload から組み立て直す。ブラウザが `beforeprint` を発火せずにプレビューを再描画する場合にも耐えるため、**DOM を残す方を主、`beforeprint` を保険**とする。
 
+**レビュー対応で追加した2点（「印刷DOMをページに残す」設計の安全性がこの2つに依存しているため明記する）**:
+- `clearPrintView()`（`public/app.js`）— `logoutLocal` / `stopImpersonation` / `openPrintView` の catch から呼ぶ。`#printView` を afterprint で消さなくした結果、ログアウト後のログイン画面で Ctrl+P すると前ユーザーのシフトが印刷されてしまう経路ができたため、セッション境界で明示的に破棄する。
+- `beforeprint` の案内ページと `data-print-placeholder` 属性 — 印刷ボタンを一度も押していない状態（`appState.printPayload` が無い）での Ctrl+P が白紙になるのを防ぐ。`openPrintView` が本物の内容で上書きする際にこの属性を消す。
+
 **Files:**
 - Modify: `public/app.js:975-978`（`afterprint` リスナ）
 - Modify: `public/app.js:1144-1148`（`openPrintView` の DOM 反映部）

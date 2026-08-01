@@ -67,7 +67,17 @@ class TestPrintCssStructure:
         assert re.search(r"\.print-view\s*\{[^}]*display:\s*block", _print_css())
 
     def test_app_view_is_hidden_in_print(self):
-        assert "#appView" in _print_css()
+        """#appView を含むCSSルールが、実際に display:none を持つこと。
+
+        以前は "#appView" という文字列が印刷CSSに存在するかしか見ておらず、
+        `display: none !important` を `display: block` に変えても緑のままだった
+        （#appView が言及されてさえいれば通ってしまうため）。
+        """
+        css = _print_css()
+        m = re.search(r"([^{}]*#appView[^{}]*)\{([^}]*)\}", css)
+        assert m, "#appView を含むCSSルールが印刷CSSに無い"
+        assert re.search(r"display:\s*none", m.group(2)), \
+            "#appView を含むルールに display:none が無い（画面アプリを隠せていない）"
 
     def test_page_rule_exists(self):
         assert "@page" in _print_css()
@@ -101,7 +111,15 @@ class TestPrintDomLifecycle:
         assert re.search(r"addEventListener\(\s*['\"]beforeprint['\"]", _read_appjs())
 
     def test_print_payload_is_retained(self):
-        assert re.search(r"printPayload\s*=", _read_appjs()), \
+        """appState.printPayload に印刷内容が保持されていること。
+
+        単に "printPayload\\s*=" だけを見ると、clearPrintView() 内の
+        `appState.printPayload = null;`（public/app.js の破棄処理）にも一致して
+        しまい、openPrintView() 側の実際の保持コード
+        （`appState.printPayload = { start, end, html: pagesHtml };`）を
+        消しても緑のままだった。保持側の形（オブジェクト代入）に絞る。
+        """
+        assert re.search(r"appState\.printPayload\s*=\s*\{", _read_appjs()), \
             "印刷内容を appState.printPayload に保持していない"
 
 
@@ -118,10 +136,17 @@ class TestPrintTimelineNotClipped:
         ), "印刷で .tl-wrap の overflow-x を解除していない"
 
     def test_min_width_is_released_in_print(self):
+        """.tl-row と .tl-axis-row の両方で min-width が解除されていること。
+
+        以前は or 連結だったため、どちらか一方（.tl-axis-row 側）さえ残って
+        いれば .tl-row 側の min-width:0 を消しても緑のままだった。シフト行
+        本体である .tl-row は軸行と別セレクタなので、個別に検証する。
+        """
         css = _print_css()
-        assert re.search(r"\.print-page\s+\.tl-row[^{]*\{[^}]*min-width:\s*0", css) \
-            or re.search(r"\.print-page\s+\.tl-axis-row[^{]*\{[^}]*min-width:\s*0", css), \
-            "印刷で .tl-row / .tl-axis-row の min-width を解除していない"
+        assert re.search(r"\.print-page\s+\.tl-row[^{]*\{[^}]*min-width:\s*0", css), \
+            "印刷で .tl-row の min-width を解除していない"
+        assert re.search(r"\.print-page\s+\.tl-axis-row[^{]*\{[^}]*min-width:\s*0", css), \
+            "印刷で .tl-axis-row の min-width を解除していない"
 
 
 class TestPrintOrientation:

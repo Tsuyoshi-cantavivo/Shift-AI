@@ -19,8 +19,51 @@ const SHOP = {
   managerName: '印刷店長',
 };
 
+const PRINT_DAY = '2026-08-03';
+
+/**
+ * 印刷対象日（PRINT_DAY）にシフトを1件用意する。
+ *
+ * この店舗はシフトが無いと buildStaticTimelineHtml()（public/app.js の
+ * !list.length 分岐、1125行目付近）に入り、印刷ページには .tl-axis-row と
+ * .print-empty しか出ない。.tl-row（シフト行本体）が1つも存在しないと、
+ * 「用紙幅が狭くてもタイムラインが横にはみ出さない」テストが実質的に軸行
+ * しか検証できていなかったため、実データを仕込む。
+ *
+ * beforeEach から毎回呼ばれるが、スタッフ・シフトの作成 API は重複時に
+ * 400 を返すだけで副作用は無い。ensureShop と同じ「既にあれば無視」の
+ * 作法にそろえ、初回作成分をそのまま使い回す。
+ */
+async function ensurePrintableShift(request) {
+  const loginRes = await request.post('/api/login', {
+    data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
+  });
+  const shopHdr = { Authorization: `Bearer ${(await loginRes.json()).token}` };
+
+  let staffId;
+  const staffRes = await request.post('/api/shop/staffs', {
+    data: { staff_code: 'PRTSTF', name: '印刷確認太郎', password: 'PrintStf1', role: 'employee' },
+    headers: shopHdr,
+  });
+  if (staffRes.ok()) {
+    staffId = (await staffRes.json()).id;
+  } else {
+    // 2回目以降はコード重複で 400 になるので、既存の id を取り直す。
+    const list = await (await request.get('/api/shop/staffs', { headers: shopHdr })).json();
+    staffId = (list.staffs || []).find((s) => s.staff_code === 'PRTSTF')?.id;
+  }
+
+  // 2回目以降は同一スタッフ・同一日への重複配置で overlap 400 になるだけ
+  // なので無視してよい（1回目に作った行がそのまま使われる）。
+  await request.post('/api/shop/shifts', {
+    data: { staff_id: staffId, start_datetime: `${PRINT_DAY}T09:00:00`, end_datetime: `${PRINT_DAY}T17:00:00` },
+    headers: shopHdr,
+  });
+}
+
 test.beforeEach(async ({ page, request }) => {
   await ensureShop(request, SHOP);
+  await ensurePrintableShift(request);
   // window.print はダイアログを開いてテストを止めるので無害化する。
   // ただし beforeprint / afterprint は自前で dispatch して挙動を見る。
   await page.addInitScript(() => { window.print = () => {}; });
@@ -35,8 +78,8 @@ test.beforeEach(async ({ page, request }) => {
 
 async function openPrint(page) {
   // 期間を1日に絞る（シフトが無くても print-page は日数分生成される）
-  await page.fill('#sStart', '2026-08-03');
-  await page.fill('#sEnd', '2026-08-03');
+  await page.fill('#sStart', PRINT_DAY);
+  await page.fill('#sEnd', PRINT_DAY);
   await page.click('#printBtn');
   await page.waitForFunction(() => {
     const pv = document.getElementById('printView');
@@ -54,6 +97,11 @@ test('afterprint の後もプレビュー再描画で内容が残る', async ({ 
 
   // ブラウザの印刷プレビューは向き・用紙・倍率を変えるたびにライブDOMから
   // 再レンダリングする。afterprint で消してしまうとその瞬間に白紙になる。
+  // ただし afterprint → beforeprint の順で dispatch するため、このテスト単体
+  // では「afterprint で破棄しない」ことまでは検出できない（beforeprint の
+  // 復元経路が直後に効いてしまい、破棄する実装が再導入されても緑になり得る）。
+  // 破棄そのものの検出は次の「beforeprint が発火しない再描画でも内容が残る」
+  // テストが担う。このテストは beforeprint による復元経路自体を見る。
   await page.evaluate(() => window.dispatchEvent(new Event('afterprint')));
   await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
 
@@ -108,22 +156,41 @@ test('印刷ボタンを押していない状態の Ctrl+P でも白紙になら
 
 test('用紙幅が狭くてもタイムラインが横にはみ出さない', async ({ page }) => {
   await openPrint(page);
-  // 画面用の .tl-row は min-width:480px を持つ。用紙幅がそれを下回ると、
-  // .tl-wrap の overflow-x:auto があふれた分を切り捨てる（印刷では横方向に
-  // ページ分割されないため、そのまま消える）。emulateMedia だけではレイアウト
-  // 幅が実ビューポート(1280px)のままで 480px の制約に届かないので、
-  // ビューポート自体を縮めて狭い用紙を再現する。
+  // 画面用の .tl-row / .tl-axis-row は既定で min-width:480px を持つが、
+  // ビューポート400pxではそれより先に @media (max-width: 575px)（style.css
+  // 919-921行目付近）が効き、min-width は 420px になる。用紙幅がこれを
+  // 下回ると、.tl-wrap の overflow-x:auto があふれた分を切り捨てる（印刷では
+  // 横方向にページ分割されないため、そのまま消える）。emulateMedia だけでは
+  // レイアウト幅が実ビューポート(1280px)のままで min-width の制約に届かない
+  // ので、ビューポート自体を縮めて狭い用紙を再現する。
+  //
+  // beforeEach で1件シフトを作っているため、.print-empty しか出ない
+  // シフト0件の状態と違い、実際のシフト行 .tl-row でも検証できる
+  // （軸行 .tl-axis-row だけでは .tl-row 側の min-width 解除漏れを見逃す）。
   await page.setViewportSize({ width: 400, height: 800 });
   await page.emulateMedia({ media: 'print' });
 
   const overflow = await page.evaluate(() => {
     const wrap = document.querySelector('#printView .tl-wrap');
-    if (!wrap) return null;
-    return { scrollWidth: wrap.scrollWidth, clientWidth: wrap.clientWidth };
+    const row = document.querySelector('#printView .tl-row');
+    if (!wrap || !row) return null;
+    return {
+      wrapScrollWidth: wrap.scrollWidth,
+      wrapClientWidth: wrap.clientWidth,
+      rowScrollWidth: row.scrollWidth,
+    };
   });
   expect(overflow).not.toBeNull();
   // 中身が枠に収まっていること(切り捨てが起きていない)
-  expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+  expect(overflow.wrapScrollWidth).toBeLessThanOrEqual(overflow.wrapClientWidth + 1);
+  // .tl-row 自身も枠(wrap)の可視幅に収まっていること。
+  // .tl-row は自分の内部に overflow を持たないため row.scrollWidth と
+  // row.clientWidth を比べても常に一致してしまい、min-width 解除漏れを
+  // 検出できない（row が可視幅より広く forced されていても、row 自身の
+  // 「中身」はその forced 幅にきっちり収まって見えるため）。row が
+  // wrap の可視幅からはみ出していないかを見るため、row.scrollWidth を
+  // wrap.clientWidth と比較する。
+  expect(overflow.rowScrollWidth).toBeLessThanOrEqual(overflow.wrapClientWidth + 1);
 
   await page.emulateMedia({ media: 'screen' });
   await page.setViewportSize({ width: 1280, height: 800 });

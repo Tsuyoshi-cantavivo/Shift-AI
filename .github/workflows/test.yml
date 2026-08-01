@@ -1,7 +1,8 @@
-# pytest は 1109 件が約 13 秒で終わるため、push のたびに全件回しても十分安い。
-# E2E (Playwright) は約 1.5〜2 分かかりサーバ起動も伴うが、印刷バグの実挙動を
+# pytest は全件が数秒〜十数秒で終わるため、push のたびに全件回しても十分安い。
+# E2E (Playwright) は数分（実測 2.7〜3.2分程度）かかりサーバ起動も伴うが、印刷バグの実挙動を
 # 守っているのは E2E だけであり pytest 側の構造テストは検出できる形が狭いため、
-# 人間の判断で CI に含めることにした（詳細は e2e ジョブ直前のコメント参照）。
+# 人間の判断で CI に含めることにした（詳細は e2e ジョブ内「E2E テスト」ステップ
+# 直前のコメント参照）。
 name: test
 
 on:
@@ -51,6 +52,12 @@ jobs:
         run: npm ci
       - name: Playwright のブラウザをインストール
         run: npx playwright install --with-deps chromium
+      # 印刷が白紙になるバグ（向き変更やCtrl+Pで再現）は、実ブラウザで
+      # beforeprint/afterprint を dispatch する E2E でしか実行時の挙動として
+      # 検出できない。tests/test_print_view.py 側の構造テスト（ソースの
+      # 正規表現検査）は「afterprint 内で innerHTML を空にしていないか」等の
+      # 限られた形しか検出できず、E2E の代わりにはならない。数分かかっても
+      # 人間の判断で毎回 CI を回すことにした。
       - name: E2E テスト
         # run_server.sh は .venv があればそれを使う。CI には無いので
         # pip でインストールした python を明示的に渡す。
