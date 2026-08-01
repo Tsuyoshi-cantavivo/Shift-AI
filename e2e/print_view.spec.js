@@ -144,3 +144,32 @@ test('案内ページの後に印刷ボタンを押すと本物の印刷内容�
   );
   expect(placeholderFlag).toBeUndefined();
 });
+
+test('用紙の向きを切り替えられる', async ({ page }) => {
+  // 既定は横
+  await expect(page.locator('#printOrientLabel')).toHaveText('横');
+
+  await page.click('#printOrientBtn');
+  await expect(page.locator('#printOrientLabel')).toHaveText('縦');
+
+  const rule = await page.evaluate(() => {
+    const st = document.getElementById('printPageRule');
+    return st ? st.textContent : null;
+  });
+  expect(rule).toContain('A4 portrait');
+
+  const orient = await page.getAttribute('#printView', 'data-orientation');
+  expect(orient).toBe('portrait');
+});
+
+test('選んだ向きは再読み込み後も保たれる', async ({ page }) => {
+  await page.click('#printOrientBtn');
+  await expect(page.locator('#printOrientLabel')).toHaveText('縦');
+
+  await page.reload();
+  await page.waitForSelector('#appView:not(.d-none)');
+  await page.click('.side-item[data-screen="shifts"]');
+  await page.waitForSelector('#printOrientBtn');
+
+  await expect(page.locator('#printOrientLabel')).toHaveText('縦');
+});

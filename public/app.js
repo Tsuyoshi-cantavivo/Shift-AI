@@ -1141,6 +1141,48 @@ function buildStaticTimelineHtml(list, anchorDate) {
   </div>`;
 }
 
+const PRINT_ORIENTATION_KEY = 'shift_print_orientation';
+
+/** 保存されている用紙の向きを返す。既定は横（従来の @page と同じ）。 */
+function getPrintOrientation() {
+  try {
+    return localStorage.getItem(PRINT_ORIENTATION_KEY) === 'portrait' ? 'portrait' : 'landscape';
+  } catch (e) {
+    return 'landscape';  // プライベートモード等で localStorage が使えない場合
+  }
+}
+
+/** 用紙の向きを保存して即座に反映する。 */
+function setPrintOrientation(value) {
+  const o = value === 'portrait' ? 'portrait' : 'landscape';
+  try { localStorage.setItem(PRINT_ORIENTATION_KEY, o); } catch (e) { /* 保存できなくても表示は切り替える */ }
+  applyPrintOrientation();
+}
+
+/** @page の size を差し替え、印刷ビューに向きを伝える。
+ *  style.css の @page（A4 landscape）より後に挿入されるため後勝ちで上書きされる。 */
+function applyPrintOrientation() {
+  const o = getPrintOrientation();
+  let st = document.getElementById('printPageRule');
+  if (!st) {
+    st = document.createElement('style');
+    st.id = 'printPageRule';
+    document.head.appendChild(st);
+  }
+  st.textContent = `@media print { @page { size: A4 ${o}; margin: 10mm; } }`;
+  const pv = document.getElementById('printView');
+  if (pv) pv.dataset.orientation = o;
+  const label = document.getElementById('printOrientLabel');
+  if (label) label.textContent = (o === 'portrait' ? '縦' : '横');
+}
+// アプリ起動時（スクリプト読み込み時）にも保存済みの向きを反映しておく。
+// #printView はシフト管理画面を開く前から存在する静的要素（index.html）で、
+// beforeprint の保険や案内ページもログイン画面から Ctrl+P した場合に動く。
+// 呼び出しを SCREENS.shifts のバインドだけに任せると、シフト管理画面を
+// 一度も開かずに Ctrl+P したときの @page が保存値ではなく style.css の
+// 既定（landscape）のまま残ってしまうため、ここでも一度適用する。
+applyPrintOrientation();
+
 async function openPrintView(start, end) {
   if (!start || !end) { toast('期間を指定してください'); return; }
   setLoading(true);
@@ -2192,7 +2234,8 @@ SCREENS.shifts = function (el) {
       <div class="flex gap-2 flex-wrap">
         <button class="btn btn-light flex-grow" id="addShiftBtn"><i class="bi bi-plus-lg"></i> 手動追加</button>
         <button class="btn btn-light flex-grow" id="copyBtn"><i class="bi bi-files"></i> コピー</button>
-        <button class="btn btn-light" id="printBtn"><i class="bi bi-printer"></i></button>
+        <button class="btn btn-light" id="printBtn" title="印刷"><i class="bi bi-printer"></i> 印刷</button>
+        <button class="btn btn-light" id="printOrientBtn" title="用紙の向きを切り替える"><i class="bi bi-arrow-repeat"></i> <span id="printOrientLabel">横</span></button>
         <button class="btn btn-success flex-grow" id="finalizeDraftBtn" title="AIドラフト保存中のシフトを一括確定して通知"><i class="bi bi-megaphone"></i> ドラフトを確定・通知</button>
       </div>
       <div id="genResult" class="mt-2"></div>`) +
@@ -2284,6 +2327,12 @@ SCREENS.shifts = function (el) {
     const { start, end } = cur();
     openPrintView(start, end);
   });
+  document.getElementById('printOrientBtn')?.addEventListener('click', () => {
+    setPrintOrientation(getPrintOrientation() === 'portrait' ? 'landscape' : 'portrait');
+    toast(`用紙を${getPrintOrientation() === 'portrait' ? '縦' : '横'}向きにしました`);
+  });
+  // 画面を開いた時点で保存済みの向きをボタンラベルと @page に反映する
+  applyPrintOrientation();
   document.getElementById('openCreq2')?.addEventListener('click', () => openChangeRequests());
 
   // ドラフト保存中のシフトを一括確定して通知

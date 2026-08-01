@@ -1256,6 +1256,12 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
     width: 72px; flex: 0 0 72px;
     font-size: 11px; font-weight: 700; color: #111;
   }
+  /* 縦向きは印刷可能幅が狭い（A4縦 210mm - 余白20mm = 190mm ≒ 718px）ため、
+     名前欄と時間軸を詰めて帯の描画幅を確保する。 */
+  .print-view[data-orientation="portrait"] .tl-name { width: 56px; flex: 0 0 56px; font-size: 10px; }
+  .print-view[data-orientation="portrait"] .tl-hour { font-size: 8px; padding-left: 1px; }
+  .print-view[data-orientation="portrait"] .print-page-header h2 { font-size: 16px; }
+  .print-view[data-orientation="portrait"] .print-page-header .print-shop { font-size: 12px; }
   .print-page .tl-axis { height: 14px; border-bottom: 1px solid #999; }
   .print-page .tl-hour {
     font-size: 9px; color: #444; font-weight: 700;

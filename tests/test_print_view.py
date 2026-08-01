@@ -122,3 +122,19 @@ class TestPrintTimelineNotClipped:
         assert re.search(r"\.print-page\s+\.tl-row[^{]*\{[^}]*min-width:\s*0", css) \
             or re.search(r"\.print-page\s+\.tl-axis-row[^{]*\{[^}]*min-width:\s*0", css), \
             "印刷で .tl-row / .tl-axis-row の min-width を解除していない"
+
+
+class TestPrintOrientation:
+    """用紙の向き切替が実装されていること。"""
+
+    def test_orientation_helpers_exist(self):
+        js = _read_appjs()
+        for name in ("getPrintOrientation", "setPrintOrientation", "applyPrintOrientation"):
+            assert name in js, f"{name} が実装されていない"
+
+    def test_orientation_toggle_button_exists(self):
+        assert "printOrientBtn" in _read_appjs()
+
+    def test_portrait_layout_rules_exist(self):
+        assert 'data-orientation="portrait"' in _print_css(), \
+            "縦向き用のレイアウト調整が印刷CSSに無い"
