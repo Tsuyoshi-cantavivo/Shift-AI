@@ -4,8 +4,16 @@
 
 public/app.js の関数を Node で直接実行して検証する（helpers.run_js）。
 DOM に触らない純関数として切り出しているので、描画を変えてもここは壊れない。
+
+reqBarRange/reqBarPosition は既存の _parseTimeParts に、
+reqBarHeightPx/reqBarCountFromPx はモジュールスコープの定数
+（REQ_BAR_UNIT_PX/REQ_BAR_MIN_PX）に依存する。helpers.extract_js_function は
+関数本体しか抜き出さないため、これらは _fns() とは別に明示的に読み込む
+（DRY を優先し、実装側に複製を持たせない代わりに、テスト側で依存関係を
+ 自分で組み立てる）。
 """
 import json
+import re
 
 import pytest
 
@@ -14,21 +22,42 @@ from helpers import extract_js_function, run_js
 SRC = None
 
 
-def _fns(*names):
+def _src():
     global SRC
     if SRC is None:
         import os
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(root, "public/app.js"), encoding="utf-8") as f:
             SRC = f.read()
-    return [extract_js_function(SRC, n) for n in names]
+    return SRC
+
+
+def _fns(*names):
+    return [extract_js_function(_src(), n) for n in names]
+
+
+def _parse_time_fn():
+    """reqBarRange/reqBarPosition が使う _parseTimeParts を Node に渡す。"""
+    return extract_js_function(_src(), "_parseTimeParts")
+
+
+def _consts():
+    """定数を実ソースから読み出して Node に渡す。
+    テスト側に 14 / 6 を直書きすると、実装が変わってもテストが気づかない。"""
+    src = _src()
+    out = []
+    for name in ("REQ_BAR_UNIT_PX", "REQ_BAR_MIN_PX"):
+        m = re.search(name + r"\s*=\s*(\d+)", src)
+        assert m, f"{name} が public/app.js に見つからない"
+        out.append(f"const {name} = {m.group(1)};")
+    return "\n".join(out)
 
 
 class TestReqBarRange:
     def test_range_covers_all_patterns(self):
         pats = [{"start_time": "09:00", "end_time": "17:00"},
                 {"start_time": "17:00", "end_time": "22:00"}]
-        out = run_js(_fns("reqBarRange"),
+        out = run_js(_fns("reqBarRange") + [_parse_time_fn()],
                      f"JSON.stringify(reqBarRange({json.dumps(pats)}))")
         r = json.loads(out)
         assert r["minH"] == 9
@@ -38,13 +67,14 @@ class TestReqBarRange:
 
     def test_overnight_extends_past_24(self):
         pats = [{"start_time": "22:00", "end_time": "02:00"}]
-        out = run_js(_fns("reqBarRange"),
+        out = run_js(_fns("reqBarRange") + [_parse_time_fn()],
                      f"JSON.stringify(reqBarRange({json.dumps(pats)}))")
         r = json.loads(out)
         assert r["maxH"] == 26, "日またぎが翌日側に伸びていない"
 
     def test_empty_patterns_fall_back(self):
-        out = run_js(_fns("reqBarRange"), "JSON.stringify(reqBarRange([]))")
+        out = run_js(_fns("reqBarRange") + [_parse_time_fn()],
+                     "JSON.stringify(reqBarRange([]))")
         r = json.loads(out)
         assert r["rangeLen"] > 0, "パターン0件で幅0になると全バーが消える"
 
@@ -52,7 +82,7 @@ class TestReqBarRange:
 class TestReqBarPosition:
     def test_full_range_is_zero_to_hundred(self):
         rng = {"minH": 9, "maxH": 22, "rangeMin": 540, "rangeLen": 780}
-        out = run_js(_fns("reqBarPosition"),
+        out = run_js(_fns("reqBarPosition") + [_parse_time_fn()],
                      f"JSON.stringify(reqBarPosition('09:00','22:00',{json.dumps(rng)}))")
         p = json.loads(out)
         assert abs(p["left"]) < 0.01
@@ -60,7 +90,7 @@ class TestReqBarPosition:
 
     def test_half_range(self):
         rng = {"minH": 0, "maxH": 24, "rangeMin": 0, "rangeLen": 1440}
-        out = run_js(_fns("reqBarPosition"),
+        out = run_js(_fns("reqBarPosition") + [_parse_time_fn()],
                      f"JSON.stringify(reqBarPosition('06:00','18:00',{json.dumps(rng)}))")
         p = json.loads(out)
         assert abs(p["left"] - 25) < 0.01
@@ -68,7 +98,7 @@ class TestReqBarPosition:
 
     def test_overnight_wraps_to_extended_slot(self):
         rng = {"minH": 9, "maxH": 26, "rangeMin": 540, "rangeLen": 1020}
-        out = run_js(_fns("reqBarPosition"),
+        out = run_js(_fns("reqBarPosition") + [_parse_time_fn()],
                      f"JSON.stringify(reqBarPosition('22:00','02:00',{json.dumps(rng)}))")
         p = json.loads(out)
         # 22:00 = 1320分 → (1320-540)/1020 = 76.47%
@@ -77,26 +107,51 @@ class TestReqBarPosition:
         assert abs(p["width"] - 23.53) < 0.1
 
 
+class TestReqBarInvalidTime:
+    """parseTime のロジックを reqBarRange/reqBarPosition が複製していた頃、
+    不正な時刻を渡すケースが1件も無かったため、複製がズレても
+    13件全PASSのままという穴があった（レビュー指摘）。
+    複製をやめて既存の _parseTimeParts を直接使う形に直したうえで、
+    不正入力時の挙動そのものをここで固定する。"""
+
+    def test_range_ignores_invalid_patterns(self):
+        pats = [{"start_time": "invalid", "end_time": "17:00"},
+                {"start_time": "09:00", "end_time": "22:00"}]
+        out = run_js(_fns("reqBarRange") + [_parse_time_fn()],
+                     f"JSON.stringify(reqBarRange({json.dumps(pats)}))")
+        r = json.loads(out)
+        # 不正なパターンは集計から除外され、正常なほうだけで軸が決まる
+        assert r["minH"] == 9
+        assert r["maxH"] == 22
+
+    def test_position_returns_zero_width_for_invalid_time(self):
+        rng = {"minH": 9, "maxH": 22, "rangeMin": 540, "rangeLen": 780}
+        out = run_js(_fns("reqBarPosition") + [_parse_time_fn()],
+                     f"JSON.stringify(reqBarPosition('invalid','22:00',{json.dumps(rng)}))")
+        p = json.loads(out)
+        assert p["width"] == 0, "不正な時刻でバーを描いてしまう"
+
+
 class TestReqBarHeight:
     def test_height_is_proportional_to_count(self):
-        out = run_js(_fns("reqBarHeightPx"),
+        out = run_js([_consts()] + _fns("reqBarHeightPx"),
                      "JSON.stringify([1,2,3].map(reqBarHeightPx))")
         h = json.loads(out)
         assert h[1] - h[0] == h[2] - h[1], "1人あたりの高さが一定でない"
         assert h[0] > 0
 
     def test_zero_still_has_visible_height(self):
-        out = run_js(_fns("reqBarHeightPx"), "String(reqBarHeightPx(0))")
+        out = run_js([_consts()] + _fns("reqBarHeightPx"), "String(reqBarHeightPx(0))")
         assert float(out.strip()) > 0, "0人のバーが高さ0だと画面から消えて操作できない"
 
     def test_round_trip(self):
         """高さ → 人数 → 高さ で元に戻ること。"""
-        out = run_js(_fns("reqBarHeightPx", "reqBarCountFromPx"),
+        out = run_js([_consts()] + _fns("reqBarHeightPx", "reqBarCountFromPx"),
                      "JSON.stringify([0,1,2,5,10].map((n) => reqBarCountFromPx(reqBarHeightPx(n))))")
         assert json.loads(out) == [0, 1, 2, 5, 10]
 
     def test_negative_px_clamps_to_zero(self):
-        out = run_js(_fns("reqBarCountFromPx"), "String(reqBarCountFromPx(-50))")
+        out = run_js([_consts()] + _fns("reqBarCountFromPx"), "String(reqBarCountFromPx(-50))")
         assert int(out.strip()) == 0, "マイナスにドラッグしたときに負の人数になる"
 
 

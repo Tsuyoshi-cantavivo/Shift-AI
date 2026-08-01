@@ -4210,25 +4210,21 @@ function readShiftHourRow(wrap, key) {
    DOM に触らない純関数。tests/test_required_bar_geometry.py が Node で直接検証する。
    ============================================================ */
 
-/** "HH:MM" を [h, m] にパースする。_parseTimeParts（public/app.js:766付近）と
- *  同じ正規表現・同じ失敗時の戻り値（[NaN, NaN]）にしてある。
- *  reqBarRange/reqBarPosition の関数内にそれぞれ複製して持たせている
- *  （tests/test_required_bar_geometry.py は helpers.extract_js_function で
- *  関数本体だけを Node に抜き出して実行するため、_parseTimeParts のような
- *  モジュールスコープの別関数を呼ぶと ReferenceError になる）。 */
+/** バー1人あたりの高さ(px)。人数が視覚的に比較できる最小単位。 */
+const REQ_BAR_UNIT_PX = 14;
+/** 0人のときも掴めるように残す高さ(px)。0だと画面から消えて操作不能になる。 */
+const REQ_BAR_MIN_PX = 6;
 
 /** 時間帯パターン群から時間軸の範囲を返す。
- *  end <= start は日またぎとみなし、翌日側（+24h）まで軸を伸ばす。 */
+ *  end <= start は日またぎとみなし、翌日側（+24h）まで軸を伸ばす。
+ *  時刻パースは既存の _parseTimeParts（public/app.js:766付近）をそのまま使う。
+ *  戻り値は [h, m] の配列、不正な時刻では [NaN, NaN]。 */
 function reqBarRange(patterns) {
-  const parseTime = (t) => {
-    const m = String(t || '').match(/^(\d{1,2}):(\d{2})/);
-    return m ? [+m[1], +m[2]] : [NaN, NaN];
-  };
   const list = patterns || [];
   let minH = 24, maxH = 0;
   list.forEach((p) => {
-    const [sh, sm] = parseTime(p.start_time);
-    const [eh, em] = parseTime(p.end_time);
+    const [sh, sm] = _parseTimeParts(p.start_time);
+    const [eh, em] = _parseTimeParts(p.end_time);
     if (isNaN(sh) || isNaN(eh)) return;
     const sMin = sh * 60 + sm;
     let eMin = eh * 60 + em;
@@ -4244,12 +4240,8 @@ function reqBarRange(patterns) {
 
 /** 時間帯の左端と幅を軸に対する % で返す。 */
 function reqBarPosition(startTime, endTime, range) {
-  const parseTime = (t) => {
-    const m = String(t || '').match(/^(\d{1,2}):(\d{2})/);
-    return m ? [+m[1], +m[2]] : [NaN, NaN];
-  };
-  const [sh, sm] = parseTime(startTime);
-  const [eh, em] = parseTime(endTime);
+  const [sh, sm] = _parseTimeParts(startTime);
+  const [eh, em] = _parseTimeParts(endTime);
   if (isNaN(sh) || isNaN(eh)) return { left: 0, width: 0 };
   const sMin = sh * 60 + sm;
   let eMin = eh * 60 + em;
@@ -4261,23 +4253,14 @@ function reqBarPosition(startTime, endTime, range) {
   return { left, width };
 }
 
-/** 必要人数からバーの高さ(px)。
- *  REQ_BAR_UNIT_PX: 1人あたりの高さ(px)。人数が視覚的に比較できる最小単位。
- *  REQ_BAR_MIN_PX: 0人でも掴めるように残す高さ(px)。0だと画面から消えて操作不能になる。
- *  値は reqBarCountFromPx と関数内に重複して持たせている（tests/test_required_bar_geometry.py
- *  は helpers.extract_js_function で関数本体だけを Node に抜き出して実行するため、
- *  モジュールスコープの定数に依存すると ReferenceError になる）。 */
+/** 必要人数からバーの高さ(px)。 */
 function reqBarHeightPx(count) {
-  const REQ_BAR_UNIT_PX = 14;
-  const REQ_BAR_MIN_PX = 6;
   const n = Math.max(0, Math.round(count || 0));
   return REQ_BAR_MIN_PX + n * REQ_BAR_UNIT_PX;
 }
 
-/** バーの高さ(px)から必要人数。上下ドラッグの逆変換。reqBarHeightPx と定数を揃えること。 */
+/** バーの高さ(px)から必要人数。上下ドラッグの逆変換。 */
 function reqBarCountFromPx(px) {
-  const REQ_BAR_UNIT_PX = 14;
-  const REQ_BAR_MIN_PX = 6;
   return Math.max(0, Math.round(((px || 0) - REQ_BAR_MIN_PX) / REQ_BAR_UNIT_PX));
 }
 
