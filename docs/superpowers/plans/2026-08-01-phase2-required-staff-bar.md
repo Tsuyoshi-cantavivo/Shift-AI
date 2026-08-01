@@ -369,7 +369,8 @@ req_map のキーの有無で圏外を、値0で配置禁止を表すように�
 - Produces: `PUT /api/shop/patterns/bulk`
   - リクエスト: `{"patterns": [{"id": int, "pattern_name": str, "start_time": "HH:MM", "end_time": "HH:MM", "required_staff": int, "weekday_required": {"0": int, ...}}]}`
   - レスポンス: `{"ok": true, "warnings": [{"id": int, "pattern_name": str, "warning": str}]}`
-  - 検証失敗時: 400 と `{"error": "...", "failed": {"id": int, "pattern_name": str, "reason": str}}`
+  - 検証失敗時: 400。エラーメッセージの先頭に原因のパターン名が入る（`"夜番: 1シフトは15時間以内..."`）。
+    UI は `e.message` をそのまま出せばどのパターンが原因か分かるので、専用のフィールドは設けない
 
 - [ ] **Step 1: 失敗するテストを書く**
 
