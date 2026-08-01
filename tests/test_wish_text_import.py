@@ -920,6 +920,71 @@ class TestWishParseApi:
 
         assert r.status_code == 400
 
+    def test_normalized_exact_match_resolves_staff(self, client):
+        """敬称や全角空白が付いていても staff_id が解決されること。"""
+        shop_id = insert_shop()
+        sid = insert_staff(shop_id, "PT1", "田中太郎")
+        tok = make_session("shop", shop_id, shop_id)
+
+        r = client.post("/api/shop/wishes/parse",
+                        json={"text": "田中太郎さん 8/3は休みたいです", "year_month": "2026-08"},
+                        headers=auth(tok))
+        assert r.status_code == 200
+        d = r.get_json()
+        assert d["entries"][0]["staff_id"] == sid, \
+            "敬称付きの名前が解決されていない（完全一致のままになっている）"
+
+    def test_ambiguous_name_is_not_auto_resolved(self, client):
+        """同姓同名が2人いたら自動確定しないこと。"""
+        shop_id = insert_shop()
+        insert_staff(shop_id, "PT1", "田中")
+        insert_staff(shop_id, "PT2", "田中")
+        tok = make_session("shop", shop_id, shop_id)
+
+        r = client.post("/api/shop/wishes/parse",
+                        json={"text": "田中 8/3は休みたいです", "year_month": "2026-08"},
+                        headers=auth(tok))
+        d = r.get_json()
+        assert d["entries"][0]["staff_id"] is None, "同姓同名で自動確定してしまった"
+
+    def test_candidates_are_returned_for_unresolved_entries(self, client):
+        """解決できなかった entry に候補が返ること。
+
+        入力は「田中:」のコロン形式にする。フォールバック解析（src/ai.py の
+        _extract_staff_hint）は行頭コロン記法か名簿の完全一致文字列でしか
+        staff_hint を拾わないため、「田中 8/3は休みたいです」のような
+        コロン無しの部分一致テキストでは staff_hint 自体が None になり、
+        本テストが検証したい app.py 側の候補提示ロジック（best_exact/match_staff）
+        にそもそも到達しない（Step 2 で実測して判明）。
+        """
+        shop_id = insert_shop()
+        sid = insert_staff(shop_id, "PT1", "田中太郎")
+        tok = make_session("shop", shop_id, shop_id)
+
+        r = client.post("/api/shop/wishes/parse",
+                        json={"text": "田中: 8/3は休みたいです", "year_month": "2026-08"},
+                        headers=auth(tok))
+        d = r.get_json()
+        assert d["entries"][0]["staff_id"] is None
+        cands = (d.get("name_candidates") or {}).get("0") or []
+        assert cands, "未解決なのに候補が返っていない"
+        assert cands[0]["staff_id"] == sid
+        assert cands[0]["reason"]
+
+    def test_candidates_only_include_own_shop_staff(self, client):
+        """他店舗のスタッフが候補に混ざらないこと。"""
+        shop_a = insert_shop(code="SHOPA")
+        shop_b = insert_shop(code="SHOPB", name="別店舗")
+        insert_staff(shop_b, "PT9", "田中太郎")
+        tok = make_session("shop", shop_a, shop_a)
+
+        r = client.post("/api/shop/wishes/parse",
+                        json={"text": "田中 8/3は休みたいです", "year_month": "2026-08"},
+                        headers=auth(tok))
+        d = r.get_json()
+        for cands in (d.get("name_candidates") or {}).values():
+            assert not cands, f"他店舗のスタッフが候補に出た: {cands}"
+
 
 class TestWishBulkApi:
     """POST /api/shop/wishes/bulk — プレビューで確定した希望を実際に登録する。

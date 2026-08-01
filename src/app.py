@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # src/ をモジ
 
 from db import query_all, query_one, execute, insert_row, init_schema
 from auth import hash_password, verify_password, gen_token, strip_password, dummy_verify
+from name_match import best_exact, match_staff
 from utils import (
     calc_next_period, jst_now, jst_today, minutes_between, compute_break_minutes,
     night_minutes, validate_password, parse_settings, build_ics, parse_iso, normalize_iso,
@@ -3344,21 +3345,29 @@ def shop_wishes_parse():
         staff_id = row["id"]
     staffs = query_all("SELECT id, name FROM staffs WHERE shop_id=? AND is_resigned=0", (shop_id,))
     result = ai.parse_wish_text(text, year_month, [s["name"] for s in staffs])
-    # staff_hint をスタッフIDに解決する（一致しなければ None のまま＝未割り当て。推測はしない）
-    by_name = {s["name"]: s["id"] for s in staffs}
     entries = [e for e in (result.get("entries") or []) if isinstance(e, dict)]
     result["entries"] = entries
     text_norm = _wish_raw_norm(text)
-    for e in entries:
+    name_candidates = {}
+    for i, e in enumerate(entries):
         # ★ 「元の文」が本当に入力に在るかを毎回検証して返す（UI が警告を出す）
         e["raw_verified"] = _wish_raw_verified(e.get("raw"), text_norm)
         if staff_id is not None:
             e["staff_id"] = staff_id  # 明示指定が最優先。staff_hint は無視する
-        else:
-            hint = e.get("staff_hint")
-            # LLM が list/dict を返しても落ちないこと（dict.get に非ハッシュ可能な
-            # 値を渡すと TypeError で 500 になる）
-            e["staff_id"] = by_name.get(hint) if isinstance(hint, str) and hint else None
+            continue
+        hint = e.get("staff_hint")
+        # LLM が list/dict を返しても落ちないこと（正規化関数に非文字列を渡すと
+        # 例外になりうるため、ここで文字列以外は空文字に丸める）
+        hint = hint if isinstance(hint, str) else ""
+        # 自動確定するのは「正規化して完全一致がちょうど1件」のときだけ。
+        # 姓のみ一致・編集距離での類似は候補として返し、人に選ばせる
+        # （誤配属は希望の取り違えに直結するため）。
+        e["staff_id"] = best_exact(hint, staffs)
+        if e["staff_id"] is None and hint:
+            cands = match_staff(hint, staffs)
+            if cands:
+                name_candidates[str(i)] = cands
+    result["name_candidates"] = name_candidates
     return jsonify(result)
 
 
