@@ -34,6 +34,15 @@ class TestNormalizeName:
     def test_hiragana_and_katakana_match(self):
         assert normalize_name("たなか") == normalize_name("タナカ")
 
+    def test_honorific_followed_by_punctuation_is_removed(self):
+        """敬称の後ろに記号が付いていても剥がせること。
+
+        記号除去の「後」に敬称を剥がす順序でないと、「田中様、」が
+        「田中様」のまま残って一致しなくなる。
+        """
+        assert normalize_name("田中様、") == normalize_name("田中")
+        assert normalize_name("田中（さん）") == normalize_name("田中")
+
     def test_case_is_folded(self):
         assert normalize_name("Tanaka") == normalize_name("TANAKA")
 
@@ -80,6 +89,28 @@ class TestMatchStaff:
 
     def test_typo_within_edit_distance_is_a_candidate(self):
         r = match_staff("田中太朗", _staffs("田中太郎", "佐藤花子"))
+        assert r
+        assert r[0]["staff_id"] == 1
+
+    def test_two_char_surname_with_one_typo_is_a_candidate(self):
+        """2文字の姓の1文字違いが候補に出ること。
+
+        日本語の姓は2文字が多く、OCRの1文字誤読は普通に起きる。
+        比率での類似度だと 1-1/2=0.5 で閾値に届かないため、
+        短い名前は絶対距離で拾う。
+        """
+        r = match_staff("田仲", _staffs("田中", "佐藤"))
+        assert r, "2文字姓の1文字違いが候補に出ない"
+        assert r[0]["staff_id"] == 1
+        assert r[0]["reason"] == "1文字違い"
+
+    def test_two_char_surname_with_two_typos_is_not_a_candidate(self):
+        """2文字違いは別人とみなす（全部候補に出ると選べなくなる）。"""
+        r = match_staff("山口", _staffs("田中", "佐藤"))
+        assert not r, f"2文字とも違うのに候補に出た: {r}"
+
+    def test_one_char_name_with_typo_is_a_candidate(self):
+        r = match_staff("森", _staffs("林", "佐藤"))
         assert r
         assert r[0]["staff_id"] == 1
 

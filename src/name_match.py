@@ -38,17 +38,21 @@ def _kata(s):
 def normalize_name(s):
     """名前を比較用に正規化する。
 
-    NFKC（全角→半角・互換文字の統一）→ 敬称除去 → 記号/空白除去
+    NFKC（全角→半角・互換文字の統一）→ 記号/空白除去 → 敬称除去
     → ひらがな→カタカナ → casefold の順。
-    敬称は記号除去より先に剥がす（「田中 さん」のような分かち書きに対応するため
-    空白除去の後にもう一度剥がす）。
+    敬称は記号/空白除去の**後**に剥がす。「田中様、」「田中（さん）」のように
+    敬称の後ろに読点・括弧が付く場合、記号除去より先に敬称を剥がそうとしても
+    末尾が敬称と一致せず素通りしてしまうため。
+    （旧実装は記号除去の前にも _strip_honorifics を呼んでいたが、
+    _STRIP_CHARS と _HONORIFICS が文字集合として素なので、
+    記号除去前の呼び出しは記号除去後の呼び出しに常に包含され、
+    実質的に到達不能なコードだった。レビューで指摘され削除。）
     """
     if not s or not isinstance(s, str):
         return ""
     t = unicodedata.normalize("NFKC", s)
-    t = _strip_honorifics(t)
     t = "".join(ch for ch in t if ch not in _STRIP_CHARS)
-    t = _strip_honorifics(t)  # 「田中 さん」→空白除去後に再度剥がす
+    t = _strip_honorifics(t)
     t = _kata(t)
     return t.casefold()
 
@@ -141,6 +145,12 @@ def _score(h, n):
         return 0.7, "名前に含まれる"
     dist = _levenshtein(h, n)
     longest = max(len(h), len(n))
+    # 短い名前は比率だと厳しすぎる。2文字の姓（田中・佐藤など）は1文字違いでも
+    # 類似度0.5にしかならず閾値に届かないが、OCRの1文字誤読は普通に起きる。
+    # 候補は人が承認する前提（best_exact でしか自動確定しない）なので、
+    # 短い名前は絶対距離で拾う。
+    if longest <= 3 and dist == 1:
+        return 0.65, "1文字違い"
     sim = 1.0 - (dist / longest) if longest else 0.0
     if sim >= 0.6:
         return sim, "よく似た名前"
