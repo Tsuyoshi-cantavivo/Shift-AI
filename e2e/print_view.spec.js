@@ -80,3 +80,44 @@ test('印刷メディアで印刷ビューが表示され画面アプリが隠�
 
   await page.emulateMedia({ media: 'screen' });
 });
+
+test('ログアウトで印刷用DOMが消える（前ユーザーのシフトを残さない）', async ({ page }) => {
+  // #printView は afterprint で消えなくなったため、ログアウトを跨いで残ると
+  // 共有端末でログイン画面から Ctrl+P したときに前ユーザーのシフトが
+  // 印刷されてしまう。ログアウト時に明示的に破棄されることを確認する。
+  await openPrint(page);
+  await expect(page.locator('#printView .print-page')).toHaveCount(1);
+
+  page.on('dialog', (d) => d.accept());
+  await page.click('#logoutBtn');
+  await page.waitForSelector('#loginView:not(.d-none)', { timeout: 10000 });
+
+  const html = await page.evaluate(() => document.getElementById('printView').innerHTML);
+  expect(html.trim()).toBe('');
+});
+
+test('印刷ボタンを押していない状態の Ctrl+P でも白紙にならない', async ({ page }) => {
+  // openPrint() を呼ばず、印刷ボタンを一度も押していない状態で beforeprint を
+  // 発火させる（Ctrl+P やシステムダイアログからの印刷を模す）。payload が
+  // 無いので、白紙の代わりに案内ページが入ることを確認する。
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+
+  await expect(page.locator('#printView .print-page')).toHaveCount(1);
+  await expect(page.getByText('シフト表を印刷するには')).toHaveCount(1);
+});
+
+test('案内ページの後に印刷ボタンを押すと本物の印刷内容に差し替わる', async ({ page }) => {
+  // 案内ページ（目印 data-print-placeholder 付き）を先に出してから、
+  // 印刷ボタンで本物の内容が上書きされ、案内ページが残らないことを確認する。
+  await page.evaluate(() => window.dispatchEvent(new Event('beforeprint')));
+  await expect(page.getByText('シフト表を印刷するには')).toHaveCount(1);
+
+  await openPrint(page);
+
+  await expect(page.getByText('シフト表を印刷するには')).toHaveCount(0);
+  await expect(page.locator('#printView .print-page')).toHaveCount(1);
+  const placeholderFlag = await page.evaluate(
+    () => document.getElementById('printView').dataset.printPlaceholder
+  );
+  expect(placeholderFlag).toBeUndefined();
+});

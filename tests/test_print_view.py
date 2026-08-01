@@ -101,4 +101,5 @@ class TestPrintDomLifecycle:
         assert re.search(r"addEventListener\(\s*['\"]beforeprint['\"]", _read_appjs())
 
     def test_print_payload_is_retained(self):
-        assert "printPayload" in _read_appjs()
+        assert re.search(r"printPayload\s*=", _read_appjs()), \
+            "印刷内容を appState.printPayload に保持していない"

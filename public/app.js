@@ -10,7 +10,7 @@ let currentUser = null;
 let currentRole = null;
 let currentScreen = null;
 let chartInstances = {};
-const appState = { period: null, businessHours: null, patterns: null }; // 全画面で共有する期間状態・営業時間・パターン
+const appState = { period: null, businessHours: null, patterns: null, printPayload: null }; // 全画面で共有する期間状態・営業時間・パターン・印刷内容
 
 // ============================================================
 // グローバルエラー捕捉：同期エラー・Promise未捕捉rejectの両方を
@@ -78,6 +78,23 @@ function $q(parent, selector) {
   try { return parent.querySelector(selector); } catch { return null; }
 }
 
+/* 印刷用DOMと appState.printPayload を破棄する。
+   afterprint で消さなくなった（白紙バグ修正）ため、ログアウト・代理閲覧解除の
+   ように「前セッションの状態を持ち越してはいけない」タイミングで明示的に呼ぶ。
+   #printView は #appView の外側の兄弟要素で、@media print は #loginView も
+   隠すため、残したままだとログイン画面で Ctrl+P したときに前ユーザーの
+   シフトが印刷されてしまう。 */
+function clearPrintView() {
+  appState.printPayload = null;
+  const pv = document.getElementById('printView');
+  if (pv) {
+    pv.innerHTML = '';
+    // 案内ページの目印（data-print-placeholder）は innerHTML ではなく
+    // 要素自身の属性なので、innerHTML のクリアとは別に消す必要がある。
+    delete pv.dataset.printPlaceholder;
+  }
+}
+
 function logoutLocal() {
   authToken = null; currentUser = null; currentRole = null;
   localStorage.removeItem('shift_token');
@@ -93,6 +110,7 @@ function logoutLocal() {
   wishState = {};
   // 代理閲覧の状態も前セッションのものなので消す（残すと次ログインで誤表示になる）
   window._impersonating = null;
+  clearPrintView();
   renderImpersonationBar();
   document.getElementById('loginView')?.classList.remove('d-none');
   document.getElementById('appView')?.classList.add('d-none');
@@ -468,6 +486,8 @@ async function stopImpersonation() {
   try {
     await api('/admin/impersonate', { method: 'DELETE' });
     window._impersonating = null;
+    // ログアウトと同じ理由：代理閲覧していた店舗の印刷内容を持ち越さない。
+    clearPrintView();
     renderImpersonationBar();
     renderNav();
     navigateTo('adminShops');
@@ -979,9 +999,29 @@ function shiftDetailHtml(s, editable) {
 // beforeprint は「何らかの理由で空になっていた場合」の保険として置く。
 window?.addEventListener('beforeprint', () => {
   const pv = document.getElementById('printView');
-  if (!pv || pv.innerHTML.trim()) return;
+  if (!pv) return;
+  // pv.innerHTML が空、または前回この保険で入れた案内ページ（目印
+  // data-print-placeholder）の場合だけ「空」とみなす。印刷ボタンから
+  // openPrintView() が本物の内容を書き込むときは pv.innerHTML を丸ごと
+  // 上書きするので、この目印属性はそちらで明示的に消している。
+  const isEmpty = !pv.innerHTML.trim() || pv.dataset.printPlaceholder === '1';
+  if (!isEmpty) return;
   const payload = appState.printPayload;
-  if (payload && payload.html) pv.innerHTML = payload.html;
+  if (payload && payload.html) {
+    pv.innerHTML = payload.html;
+    delete pv.dataset.printPlaceholder;
+    return;
+  }
+  // 印刷ボタンを一度も押さずに Ctrl+P / システムダイアログから印刷された場合の
+  // 保険。@media print が画面アプリ（#appView・#loginView）を隠すため、
+  // ここで何も入れないと完全な白紙が出てしまう。
+  pv.innerHTML = `<section class="print-page"><div class="print-empty">`
+    + `シフト表を印刷するには、シフト管理画面の「印刷」ボタンから期間を指定してください。`
+    + `</div></section>`;
+  // 案内ページである目印。印刷ボタンを押さないまま次の beforeprint が来ても
+  // 「空」とみなして本物の印刷内容（appState.printPayload）に差し替えられる
+  // ようにする。
+  pv.dataset.printPlaceholder = '1';
 });
 
 function _tlTimeMin(iso) {
@@ -1155,11 +1195,18 @@ async function openPrintView(start, end) {
     // @media print が #appView を display:none にしているので代替表示も無い。
     appState.printPayload = { start, end, html: pagesHtml };
     pv.innerHTML = pagesHtml;
+    // beforeprint の保険が入れた案内ページの目印が残っていると、次回
+    // beforeprint が「まだ空」と誤認してしまうため、本物の内容を書いた
+    // ここで確実に消す。
+    delete pv.dataset.printPlaceholder;
     setLoading(false);
     // レンダリングを1フレーム待ってから印刷ダイアログを開く
     requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
   } catch (e) {
     setLoading(false);
+    // 取得に失敗したまま古い期間の印刷内容を残すと、その後の Ctrl+P で
+    // 古い期間のシフトが印刷されてしまうため、失敗時は印刷用DOMも無効化する。
+    clearPrintView();
     toast('印刷ビューの生成に失敗: ' + e.message, 'error');
   }
 }
