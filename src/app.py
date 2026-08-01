@@ -1986,6 +1986,74 @@ def shop_pattern_weekday_required(pid):
     return jsonify({"ok": True})
 
 
+@app.put("/api/shop/patterns/bulk")
+def shop_patterns_bulk():
+    """必要人数を一括保存する。
+
+    従来はパターンごとに PUT を2発（本体 + 曜日別）直列で投げていたため、
+    N 件で 2N 回の往復が発生し、途中で失敗すると一部だけ保存された状態が残った。
+    ここでは全件を検証してから書き込み、1件でも失敗したら何も書かない。
+    """
+    shop, shop_id, _ = _shop_ctx()
+    body = request.get_json(silent=True) or {}
+    items = body.get("patterns")
+    if not isinstance(items, list):
+        abort(400, description="patterns は配列で指定してください")
+
+    # 自店舗のパターンIDを先に引いておく（他店舗のIDを混ぜられても書き換えさせない）
+    own = {r["id"] for r in query_all(
+        "SELECT id FROM shift_patterns WHERE shop_id=?", (shop_id,))}
+
+    # --- 検証フェーズ: 1件でも落ちたら何も書かない ---
+    validated = []
+    warnings = []
+    for it in items:
+        if not isinstance(it, dict):
+            abort(400, description="patterns の要素はオブジェクトで指定してください")
+        pid = it.get("id")
+        name = it.get("pattern_name")
+        if pid not in own:
+            abort(400, description=f"この店舗のパターンではありません（id={pid}）")
+        ok, warning = _validate_pattern_hours(it.get("start_time"), it.get("end_time"))
+        if not ok:
+            abort(400, description=f"{name}: {warning}")
+        req = validate_numeric_field(it.get("required_staff"), "必要人数")
+        # 0 は「その時間帯は募集しない」という意味を持つため、1 に丸めてはいけない。
+        # 未指定（None）のときだけ既定値 1 を使う。
+        if req is None:
+            req = 1
+        if req < 0:
+            abort(400, description=f"{name}: 必要人数は0以上で指定してください")
+        wr = it.get("weekday_required") or {}
+        if not isinstance(wr, dict):
+            abort(400, description=f"{name}: weekday_required は {{曜日: 人数}} 形式で指定してください")
+        wr_clean = {}
+        for k, v in wr.items():
+            try:
+                wd, cnt = int(k), int(v)
+            except (ValueError, TypeError):
+                abort(400, description=f"{name}: 曜日別必要人数に数値以外が含まれています")
+            if not (0 <= wd <= 6) or cnt < 0:
+                abort(400, description=f"{name}: 曜日別必要人数の値が不正です")
+            wr_clean[wd] = cnt
+        validated.append((pid, name, it.get("start_time"), it.get("end_time"), req, wr_clean))
+        if warning:
+            warnings.append({"id": pid, "pattern_name": name, "warning": warning})
+
+    # --- 書き込みフェーズ ---
+    for pid, name, st, et, req, wr_clean in validated:
+        execute("UPDATE shift_patterns SET pattern_name=?, start_time=?, end_time=?, required_staff=? WHERE id=? AND shop_id=?",
+                (name, st, et, req, pid, shop_id))
+        # 曜日別は置換方式。送られなかった曜日は「基本に戻す」を意味する。
+        execute("DELETE FROM shift_pattern_weekday_required WHERE pattern_id=? AND shop_id=?",
+                (pid, shop_id))
+        for wd, cnt in wr_clean.items():
+            execute("INSERT INTO shift_pattern_weekday_required (pattern_id, shop_id, weekday, required_staff) VALUES (?,?,?,?)",
+                    (pid, shop_id, wd, cnt))
+
+    return jsonify({"ok": True, "warnings": warnings})
+
+
 # --- 固定シフト ---
 @app.get("/api/shop/fixed-shifts")
 def shop_fixed():
