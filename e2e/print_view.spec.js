@@ -106,8 +106,14 @@ test('印刷ボタンを押していない状態の Ctrl+P でも白紙になら
   await expect(page.getByText('シフト表を印刷するには')).toHaveCount(1);
 });
 
-test('印刷メディアでタイムラインが横にはみ出さない', async ({ page }) => {
+test('用紙幅が狭くてもタイムラインが横にはみ出さない', async ({ page }) => {
   await openPrint(page);
+  // 画面用の .tl-row は min-width:480px を持つ。用紙幅がそれを下回ると、
+  // .tl-wrap の overflow-x:auto があふれた分を切り捨てる（印刷では横方向に
+  // ページ分割されないため、そのまま消える）。emulateMedia だけではレイアウト
+  // 幅が実ビューポート(1280px)のままで 480px の制約に届かないので、
+  // ビューポート自体を縮めて狭い用紙を再現する。
+  await page.setViewportSize({ width: 400, height: 800 });
   await page.emulateMedia({ media: 'print' });
 
   const overflow = await page.evaluate(() => {
@@ -120,6 +126,7 @@ test('印刷メディアでタイムラインが横にはみ出さない', async
   expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
 
   await page.emulateMedia({ media: 'screen' });
+  await page.setViewportSize({ width: 1280, height: 800 });
 });
 
 test('案内ページの後に印刷ボタンを押すと本物の印刷内容に差し替わる', async ({ page }) => {
