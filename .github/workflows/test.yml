@@ -52,14 +52,19 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          python -m pytest tests/ -q --tb=long -rf > /tmp/pytest.log 2>&1
-          code=$?
-          {
-            echo "## pytest exit=$code"
-            echo '```'
-            tail -c 55000 /tmp/pytest.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          python -m pytest tests/ -q --tb=short -rf > /tmp/pytest.log 2>&1
+          echo "pytest exit=$?"
+          grep -E '^(FAILED|ERROR)' /tmp/pytest.log > /tmp/failed.txt
+          tail -5 /tmp/pytest.log > /tmp/tail.txt
+          python3 -c "
+          def emit(title, path, limit):
+              s = open(path, encoding='utf-8', errors='replace').read()[-limit:]
+              s = s.replace('%','%25').replace('\r','').replace('\n','%0A')
+              print('::error title=' + title + '::' + s)
+          emit('failed-tests', '/tmp/failed.txt', 4000)
+          emit('summary-line', '/tmp/tail.txt', 1000)
+          emit('pytest-tail', '/tmp/pytest.log', 4000)
+          "
           exit 0
 
   jscheck:
