@@ -9,6 +9,8 @@ import re
 import secrets
 import traceback
 import unicodedata
+import base64
+import binascii
 from datetime import datetime, timedelta
 from flask import (Flask, request, jsonify, abort, Response, send_file, g)
 from werkzeug.exceptions import HTTPException
@@ -43,6 +45,11 @@ SCHEMA_PATH = os.path.join(BASE_DIR, "schema.sql")
 
 app = Flask(__name__, static_folder=None)
 app.config["JSON_AS_ASCII"] = False  # 日本語をそのまま返す
+
+# 画像取込（/api/shop/wishes/parse-image）が base64 を JSON に載せるため、
+# 未設定だと巨大なボディをそのままメモリに読み込んでしまう。
+# 画像3枚 × 4MB + 余裕。
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
 # Railway 等のエッジプロキシ配下では REMOTE_ADDR がプロキシのIPに潰れ、
 # 全利用者が同一クライアント扱いになる。そのままだとログインのレート制限
@@ -3368,6 +3375,153 @@ def shop_wishes_parse():
             if cands:
                 name_candidates[str(i)] = cands
     result["name_candidates"] = name_candidates
+    return jsonify(result)
+
+
+# 画像取込（/api/shop/wishes/parse-image）用の data URL 検証。
+# ヘッダの mime は攻撃者が任意に詐称できるため（例: image/png と名乗って
+# 実際は画像でないバイト列を送る）、"image/(png|jpeg|webp)" への限定と
+# デコード後のマジックナンバー確認の2層で守る。
+#   層1: この正規表現。data: スキーム以外（http(s) 等）を弾く。
+#        http(s) URL をそのまま LLM プロバイダに渡すと、そのURLを
+#        フェッチさせられる（内部ネットワーク・クラウドのメタデータ
+#        エンドポイント等へのSSRF）ため、data: 以外は一切許可しない。
+#   層2: _WISH_IMAGE_MAGIC_CHECKS。層1のヘッダ表示だけを信用せず、
+#        実バイト列の先頭を見て初めて画像として扱う。
+_WISH_IMAGE_DATA_URL_RE = re.compile(r"^data:image/(png|jpeg|webp);base64,(.+)$", re.DOTALL)
+
+# 画像1枚あたりの上限（decode前のbase64表現の文字数で見る）。
+# base64は元バイト数の約4/3に膨らむため、この閾値は「デコード後4MB」を
+# 安全側（若干厳しめ）に近似したもの。decode前に弾けるため、巨大な
+# 文字列を毎回デコードするコスト（decode bomb的な負荷）も避けられる。
+_WISH_IMAGE_MAX_B64_CHARS = 4 * 1024 * 1024
+_WISH_IMAGE_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _validate_wish_image(data_url):
+    """1枚の画像 data URL を検証する。不正なら 400/413 で abort。
+
+    戻り値は使わない（検証のみ）。ai.parse_wish_image には元の data URL
+    文字列をそのまま渡す（呼び出し側の契約はテキストのdata URLのリスト）。
+    """
+    if not isinstance(data_url, str):
+        abort(400, description="images の各要素は文字列（data URL）で指定してください")
+    m = _WISH_IMAGE_DATA_URL_RE.match(data_url)
+    if not m:
+        # ここで http(s) 等の外部URLも含めて一律に拒否する（層1、SSRF対策）。
+        abort(400, description="images は data:image/png;base64,... 形式（png/jpeg/webp）で指定してください")
+    payload = m.group(2)
+    if len(payload) > _WISH_IMAGE_MAX_B64_CHARS:
+        abort(413, description="画像1枚あたり4MBを超えています")
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        # base64 の中身（利用者が貼り付けた生データ）を例外メッセージに含めない
+        # （例外時にリクエストボディがログへ漏れるのを避けるため、固定文言のみ返す）。
+        abort(400, description="images の base64 デコードに失敗しました")
+    if len(raw) > _WISH_IMAGE_MAX_BYTES:
+        abort(413, description="画像1枚あたり4MBを超えています")
+    # 層2: デコード後の先頭バイトで実体を確認する（ヘッダの自己申告を信用しない）。
+    is_png = raw.startswith(b"\x89PNG\r\n\x1a\n")
+    is_jpeg = raw.startswith(b"\xff\xd8\xff")
+    is_webp = raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
+    if not (is_png or is_jpeg or is_webp):
+        abort(400, description="対応していない画像形式です（png/jpeg/webpのみ）")
+
+
+@app.post("/api/shop/wishes/parse-image")
+def shop_wishes_parse_image():
+    """希望表の画像（複数可）を解析する。保存はしない（何度でも試せる）。
+
+    画像はここでの検証・LLMへの送信に使うだけでディスクには保存しない。
+    例外発生時もリクエストボディ（base64を含みうる）をログに出さない
+    （既存の handle_exc は traceback.print_exc() のみでボディを出力しない。
+    このエンドポイント内でも body / images をログや例外メッセージに
+    含めないこと。base64 のまま流出させないため）。
+    """
+    shop, shop_id, _ = _shop_ctx()
+    body = request.get_json(silent=True) or {}
+
+    images = body.get("images")
+    if not isinstance(images, list) or not (1 <= len(images) <= 3):
+        abort(400, description="images は1〜3件の配列で指定してください")
+    for img in images:
+        _validate_wish_image(img)
+
+    # year_month / staff_id の検証は shop_wishes_parse と同じロジック
+    # （意図的に共通化していない。理由は task-4-report.md 参照）。
+    raw_ym = body.get("year_month")
+    year_month = raw_ym.strip() if isinstance(raw_ym, str) else ""
+    if not year_month:
+        year_month = jst_today().strftime("%Y-%m")
+    if not _YEAR_MONTH_RE.match(year_month):
+        abort(400, description="year_month は YYYY-MM 形式で指定してください（例: 2026-08）")
+    raw_staff_id = body.get("staff_id")
+    staff_id = None
+    if raw_staff_id not in (None, ""):
+        try:
+            sid = int(raw_staff_id)
+        except (TypeError, ValueError):
+            abort(400, description="staff_id が不正です")
+        row = query_one("SELECT id FROM staffs WHERE id=? AND shop_id=? AND is_resigned=0",
+                        (sid, shop_id))
+        if not row:
+            abort(400, description="指定されたスタッフが見つかりません")
+        staff_id = row["id"]
+
+    if not ai.is_llm_available():
+        abort(503, description="AI未接続のため画像を読み取れません。テキストを貼り付けてください")
+
+    staffs = query_all("SELECT id, name FROM staffs WHERE shop_id=? AND is_resigned=0", (shop_id,))
+    result = ai.parse_wish_image(images, year_month, [s["name"] for s in staffs])
+    if result is None:
+        # is_llm_available() を上で確認済みだが、呼び出しの間に設定が変わる
+        # 可能性もゼロではないため、契約どおり None も 503 として扱う
+        # （parse_wish_image のNoneは「AI未接続」専用の意味に固定されている）。
+        abort(503, description="AI未接続のため画像を読み取れません。テキストを貼り付けてください")
+
+    entries = [e for e in (result.get("entries") or []) if isinstance(e, dict)]
+    result["entries"] = entries
+
+    # ★ raw_verified は _sanitize_llm_wish_result（src/ai.py）では計算されない。
+    # あちらの text 引数は「entries も unparsed も空だった場合の沈黙防止」にしか
+    # 使われない（src/ai.py:1474-1475）。ここで OCR全文を照合元にして明示的に
+    # 呼ばないと、「AIが創作した文」を検出する安全弁（設計書 §6）が画像経路には
+    # 存在しないことになる。
+    ocr_text = result.get("ocr_text")
+    ocr_text = ocr_text if isinstance(ocr_text, str) else ""
+    text_norm = _wish_raw_norm(ocr_text)
+
+    name_candidates = {}
+    for i, e in enumerate(entries):
+        e["raw_verified"] = _wish_raw_verified(e.get("raw"), text_norm)
+        if staff_id is not None:
+            e["staff_id"] = staff_id  # 明示指定が最優先。staff_hint は無視する
+            continue
+        hint = e.get("staff_hint")
+        hint = hint if isinstance(hint, str) else ""
+        e["staff_id"] = best_exact(hint, staffs)
+        if e["staff_id"] is None and hint:
+            cands = match_staff(hint, staffs)
+            if cands:
+                name_candidates[str(i)] = cands
+    result["name_candidates"] = name_candidates
+
+    # ★ Task3レビュー申し送り: 読み取りが失敗した（entries が空の）場合、
+    # ai.parse_wish_image の内部（src/ai.py:1615-1617）は「API呼び出し失敗」と
+    # 「JSON以外の応答」を同じ定型文に潰してしまい、get_last_llm_error() の
+    # 実情報（例: LLM_VISION_MODEL未設定でvision非対応モデルにHTTP 400を
+    # 送っている、等）が失われる。本番で起きやすい failure mode を店長が
+    # 誤診断しないよう、ここで補って返す。
+    # 注意: get_last_llm_error() はプロセスグローバルな「直近のエラー」であり、
+    # 今回の呼び出しで発生したものである保証はない（ai.chat/chat_staff も同じ
+    # 前提で使っている: src/ai.py:523,573）。entries が空のときのベストエフォート
+    # な診断情報として付与するに留める。
+    if not entries:
+        err = ai.get_last_llm_error()
+        if err:
+            result["llm_error_detail"] = err
+
     return jsonify(result)
 
 

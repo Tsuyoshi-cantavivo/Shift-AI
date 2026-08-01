@@ -18,4 +18,6 @@ cmds = [
 cmds = ["echo 'Build step: skip (no compilation needed)'"]
 
 [start]
-cmd = "/opt/venv/bin/gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 2 --threads 4 --timeout 60 --access-logfile - src.app:app"
+# 画像取込（/api/shop/wishes/parse-image）は vision の推論に最大90秒待つため、
+# gunicorn 側がそれより短いと途中で切られる。90秒 + 余裕で120秒にする。
+cmd = "/opt/venv/bin/gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 2 --threads 4 --timeout 120 --access-logfile - src.app:app"
