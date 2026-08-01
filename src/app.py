@@ -415,14 +415,20 @@ def _check_slot_cap(shop_id, start_iso, end_iso, exclude_id=None, force=False):
         applied.append(p)
     req_map = shift_engine._day_requirements(applied, shift_engine.GRAN, wd, weekday_overrides)
     slots = shift_engine._shift_slots(start_iso, end_iso, shift_engine.GRAN)
-    # シフトが触れるスロットのうち最も厳しい要件
-    max_req = 0
+    # シフトが触れるスロットのうち最も厳しい要件。
+    # キーの有無で「パターン圏外＝上限なし」を判定する（cap_ok と同じ契約）。
+    # 以前は req_map.get(sl, 0) で圏外(キー無し)と明示的な0人を同じ0として
+    # 扱っており、0人設定の時間帯だけを触れるシフトが「上限なし」に
+    # 誤判定されて手動追加を通してしまっていた。
+    max_req = None
     for sl in slots:
-        r = req_map.get(sl, 0)
-        if r > max_req:
+        r = req_map.get(sl)
+        if r is None:
+            continue
+        if max_req is None or r > max_req:
             max_req = r
-    if max_req == 0:
-        return (False, None, 0)
+    if max_req is None:
+        return (False, None, 0)  # 触れるスロットが全てパターン圏外＝上限なし
     rows = query_all("SELECT id, start_datetime, end_datetime FROM shifts WHERE shop_id=? AND status='confirmed' AND start_datetime>=? AND start_datetime<=?",
                      (shop_id, day + "T00:00:00", day + "T23:59:59"))
     coverage = {}
@@ -432,8 +438,10 @@ def _check_slot_cap(shop_id, start_iso, end_iso, exclude_id=None, force=False):
         for sl in shift_engine._shift_slots(r["start_datetime"], r["end_datetime"], shift_engine.GRAN):
             coverage[sl] = coverage.get(sl, 0) + 1
     for sl in slots:
-        r = req_map.get(sl, 0)
-        if r > 0 and coverage.get(sl, 0) + 1 > r:
+        r = req_map.get(sl)
+        if r is None:
+            continue  # パターン圏外のスロットは上限なし
+        if coverage.get(sl, 0) + 1 > r:
             return (True, r, coverage.get(sl, 0))
     return (False, max_req, max((coverage.get(sl, 0) for sl in slots), default=0))
 
@@ -539,7 +547,10 @@ def _shorten_to_cap(shop_id, staff_id, start_dt, end_dt, exclude_id=None):
     best_start = None; best_len = 0; cur_start = None; cur_len = 0
     for sl in all_slots:
         req_s = req_map.get(sl, 0)
-        can_place = (req_s == 0) or (coverage.get(sl, 0) + 1 <= req_s)
+        # 値0は「募集しない」。キーがある＝パターン圏内なので、0 は必ず不可。
+        # 旧実装では0人枠にキーが無く all_slots に入らなかったため、
+        # `req_s == 0` は到達不能な枝だった。キーを書くようにした今は生きてしまう。
+        can_place = coverage.get(sl, 0) + 1 <= req_s
         if can_place:
             if cur_start is None:
                 cur_start = sl
@@ -585,8 +596,9 @@ def _count_over_cap_slots(shop_id, start_iso, end_iso, exclude_id=None):
             coverage[sl] = coverage.get(sl, 0) + 1
     over_count = 0
     for sl in slots:
-        req = req_map.get(sl, 0)
-        if req > 0 and coverage.get(sl, 0) + 1 > req:
+        # キーの有無で圏外を判定する（cap_ok / _check_slot_cap と同じ契約）。
+        req = req_map.get(sl)
+        if req is not None and coverage.get(sl, 0) + 1 > req:
             over_count += 1
     return over_count
 
@@ -634,8 +646,9 @@ def _flag_over_cap_shifts(shop_id, start_iso, end_iso):
 
     over = set()                # (day, slot_min) が超過
     for (day, sl), cnt in coverage.items():
-        req = _req_for(day).get(sl, 0)
-        if req and req > 0 and cnt > req:
+        # キーの有無で圏外を判定する（cap_ok / _check_slot_cap と同じ契約）。
+        req = _req_for(day).get(sl)
+        if req is not None and cnt > req:
             over.add((day, sl))
     # 注意: reason はスタッフ側 API も返すため書き換えない（超過情報は over_cap_flag のみで表現）。
     # 店長 UI は over_cap_flag から警告表示を導出する。
@@ -1907,8 +1920,16 @@ def shop_patterns_post():
     # required_staff は必要人数マトリクスで無エスケープの value 属性として描画される。
     # 数値以外を保存させない（保存型XSS の入口封じ）。
     req = validate_numeric_field(body.get("required_staff"), "必要人数")
+    # 0 は「その時間帯は募集しない」という意味を持つため、1 に丸めてはいけない。
+    # 未指定（None）のときだけ既定値 1 を使う。
+    if req is None:
+        req = 1
+    # 負値は shift_engine 側で 0（配置禁止）に丸められて意味は破綻しないが、
+    # 「必要人数」として負を保存させること自体が誤り。入口で明示的に弾く。
+    if req < 0:
+        abort(400, description="必要人数は0以上で指定してください")
     meta = execute("INSERT INTO shift_patterns (shop_id, pattern_name, start_time, end_time, required_staff) VALUES (?,?,?,?,?)",
-                   (shop_id, body["pattern_name"], body["start_time"], body["end_time"], req or 1))
+                   (shop_id, body["pattern_name"], body["start_time"], body["end_time"], req))
     return jsonify({"ok": True, "id": meta["last_row_id"], "warning": warning})
 
 
@@ -1920,8 +1941,14 @@ def shop_patterns_put(pid):
     if not ok:
         abort(400, description=warning)
     req = validate_numeric_field(body.get("required_staff"), "必要人数")
+    # 0 は「その時間帯は募集しない」という意味を持つため、1 に丸めてはいけない。
+    # 未指定（None）のときだけ既定値 1 を使う。
+    if req is None:
+        req = 1
+    if req < 0:
+        abort(400, description="必要人数は0以上で指定してください")
     execute("UPDATE shift_patterns SET pattern_name=?, start_time=?, end_time=?, required_staff=? WHERE id=? AND shop_id=?",
-            (body["pattern_name"], body["start_time"], body["end_time"], req or 1, pid, shop_id))
+            (body["pattern_name"], body["start_time"], body["end_time"], req, pid, shop_id))
     return jsonify({"ok": True, "warning": warning})
 
 
@@ -1957,6 +1984,80 @@ def shop_pattern_weekday_required(pid):
         execute("INSERT INTO shift_pattern_weekday_required (pattern_id, shop_id, weekday, required_staff) VALUES (?,?,?,?)",
                 (pid, shop_id, wd, cnt))
     return jsonify({"ok": True})
+
+
+@app.put("/api/shop/patterns/bulk")
+def shop_patterns_bulk():
+    """必要人数を一括保存する。
+
+    従来はパターンごとに PUT を2発（本体 + 曜日別）直列で投げていたため、
+    N 件で 2N 回の往復が発生し、途中で失敗すると一部だけ保存された状態が残った。
+    ここでは全件を検証してから書き込み、1件でも失敗したら何も書かない。
+    """
+    shop, shop_id, _ = _shop_ctx()
+    body = request.get_json(silent=True) or {}
+    items = body.get("patterns")
+    if not isinstance(items, list):
+        abort(400, description="patterns は配列で指定してください")
+
+    # 自店舗のパターンIDを先に引いておく（他店舗のIDを混ぜられても書き換えさせない）
+    own = {r["id"] for r in query_all(
+        "SELECT id FROM shift_patterns WHERE shop_id=?", (shop_id,))}
+
+    # --- 検証フェーズ: 1件でも落ちたら何も書かない ---
+    validated = []
+    warnings = []
+    for it in items:
+        if not isinstance(it, dict):
+            abort(400, description="patterns の要素はオブジェクトで指定してください")
+        pid = it.get("id")
+        name = it.get("pattern_name")
+        # レビュー Minor M1: name を検証せず UPDATE に渡すと、shift_patterns.pattern_name
+        # の NOT NULL 制約違反で書き込みフェーズの途中で 500 になり、docstring の
+        # 「1件でも失敗したら何も書かない」に反して、先に処理された正常なパターンだけが
+        # 書き込まれた状態が残る（実測確認済み）。ここで検証フェーズのうちに弾く。
+        if not isinstance(name, str) or not name.strip():
+            abort(400, description="時間帯名を入力してください")
+        if pid not in own:
+            abort(400, description=f"この店舗のパターンではありません（id={pid}）")
+        ok, warning = _validate_pattern_hours(it.get("start_time"), it.get("end_time"))
+        if not ok:
+            abort(400, description=f"{name}: {warning}")
+        req = validate_numeric_field(it.get("required_staff"), "必要人数")
+        # 0 は「その時間帯は募集しない」という意味を持つため、1 に丸めてはいけない。
+        # 未指定（None）のときだけ既定値 1 を使う。
+        if req is None:
+            req = 1
+        if req < 0:
+            abort(400, description=f"{name}: 必要人数は0以上で指定してください")
+        wr = it.get("weekday_required") or {}
+        if not isinstance(wr, dict):
+            abort(400, description=f"{name}: weekday_required は {{曜日: 人数}} 形式で指定してください")
+        wr_clean = {}
+        for k, v in wr.items():
+            try:
+                wd, cnt = int(k), int(v)
+            except (ValueError, TypeError):
+                abort(400, description=f"{name}: 曜日別必要人数に数値以外が含まれています")
+            if not (0 <= wd <= 6) or cnt < 0:
+                abort(400, description=f"{name}: 曜日別必要人数の値が不正です")
+            wr_clean[wd] = cnt
+        validated.append((pid, name, it.get("start_time"), it.get("end_time"), req, wr_clean))
+        if warning:
+            warnings.append({"id": pid, "pattern_name": name, "warning": warning})
+
+    # --- 書き込みフェーズ ---
+    for pid, name, st, et, req, wr_clean in validated:
+        execute("UPDATE shift_patterns SET pattern_name=?, start_time=?, end_time=?, required_staff=? WHERE id=? AND shop_id=?",
+                (name, st, et, req, pid, shop_id))
+        # 曜日別は置換方式。送られなかった曜日は「基本に戻す」を意味する。
+        execute("DELETE FROM shift_pattern_weekday_required WHERE pattern_id=? AND shop_id=?",
+                (pid, shop_id))
+        for wd, cnt in wr_clean.items():
+            execute("INSERT INTO shift_pattern_weekday_required (pattern_id, shop_id, weekday, required_staff) VALUES (?,?,?,?)",
+                    (pid, shop_id, wd, cnt))
+
+    return jsonify({"ok": True, "warnings": warnings})
 
 
 # --- 固定シフト ---

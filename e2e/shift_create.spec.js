@@ -43,11 +43,12 @@ test.describe('シフト作成', () => {
     ]);
 
     // パターンを作成
+    // Task4 でマトリクス表（#addPat）はバーUI（#reqBarAdd）に置き換わった。
     await page.click('button[data-screen="settings"]');
     await page.waitForSelector('.tab[data-tab="shift"]');
     await page.click('.tab[data-tab="shift"]');
-    await page.waitForSelector('#addPat');
-    await page.click('#addPat');
+    await page.waitForSelector('#reqBarAdd');
+    await page.click('#reqBarAdd');
     await page.waitForSelector('#pName');
     await page.fill('#pName', '通し');
     await page.fill('#pSt', '09:00');

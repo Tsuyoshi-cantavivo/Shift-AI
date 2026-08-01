@@ -1033,32 +1033,6 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .nt-body { font-size: .8rem; color: var(--ink-3); margin-top: 2px; }
 .nt-time { font-size: .68rem; color: var(--ink-3); margin-top: 4px; }
 
-/* ---------- 23. Shift Matrix (シフト設定) ---------- */
-.matrix-wrap { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--rule); }
-.matrix-table { width: 100%; border-collapse: collapse; min-width: 560px; }
-.matrix-table th, .matrix-table td { padding: 0; text-align: center; border-bottom: 1px solid var(--rule); border-right: 1px solid var(--rule); }
-.matrix-table th { padding: 10px 6px; font-size: .72rem; font-weight: 700; color: var(--ink-3); background: var(--paper); white-space: nowrap; }
-.matrix-table th.sun { color: var(--danger); }
-.matrix-table th.sat { color: var(--info); }
-.matrix-table td:first-child { text-align: left; padding: 10px 14px; background: var(--paper); }
-.matrix-pat-name { font-weight: 700; font-size: .88rem; }
-.matrix-pat-time { font-size: .7rem; color: var(--ink-3); }
-.matrix-input {
-  width: 100%; min-height: 48px; border: none; background: transparent;
-  color: var(--ink); text-align: center; font-family: var(--font-num);
-  font-size: 1rem; font-weight: 700; padding: 6px; transition: var(--dur) var(--ease);
-}
-.matrix-input:focus { background: color-mix(in srgb, var(--info) 10%, transparent); outline: none; }
-.matrix-input:focus-visible { outline: 2px solid var(--info); outline-offset: -2px; }
-.matrix-input.has-override { color: var(--info); }
-.matrix-row-actions { display: flex; gap: 4px; }
-.matrix-row-actions button {
-  width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--rule);
-  background: var(--surface); color: var(--ink-3); cursor: pointer; font-size: .8rem;
-  display: flex; align-items: center; justify-content: center;
-}
-.matrix-row-actions button:hover { background: var(--ink); color: var(--paper); }
-
 /* ---------- 24. Chat ---------- */
 .chat-card { display: flex; flex-direction: column; min-height: 520px; }
 @media (min-width: 992px) { .chat-card { min-height: 600px; } }
@@ -1545,3 +1519,144 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 .impersonation-bar .btn {
   flex-shrink: 0;
 }
+
+/* ---------- 35. Required Staff Bar (必要人数バー) ---------- */
+.rq-tabs { display: flex; gap: 2px; flex-wrap: wrap; margin-bottom: 12px; }
+.rq-tab {
+  border: 1px solid var(--rule); background: var(--surface); color: var(--ink-2);
+  border-radius: var(--radius-sm); padding: 6px 14px; min-height: 40px;
+  font-size: .88rem; cursor: pointer;
+}
+.rq-tab.active { background: var(--info); color: var(--paper); border-color: var(--info); font-weight: 700; }
+.rq-tab.rq-sun { color: var(--danger); }
+.rq-tab.rq-sat { color: var(--info); }
+.rq-tab.rq-sun.active, .rq-tab.rq-sat.active { color: var(--paper); }
+
+.rq-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.rq-track-row { display: flex; align-items: flex-end; min-width: 480px; }
+/* バーは下端揃え。高さが人数を表すので、上に伸びる形にする。
+   --rq-lane-h（1段ぶんの高さ）は JS（renderReqBarTrack）が
+   reqBarHeightPx() から計算して渡す。以前は CSS 側も「24px + 14px*n」を
+   独自に持っていて、REQ_BAR_UNIT_PX を変えても CSS が追従しない「複製された
+   定数」問題があった（Task3で除去したのと同じ問題。レビュー指摘 N2）。
+   ここでは掛け算（段数ぶん）だけを担い、実際の1段の高さはJS側の値を使う。
+   --rq-lanes は重なる時間帯を別の段に振り分けた段数（reqBarLanes）。
+   .tl-track（セクション20）から cursor:pointer と :hover の背景変化を
+   継承してしまうため（この Task ではまだクリック編集を実装していない）、
+   ここで打ち消す（レビュー指摘 M12）。 */
+.rq-track {
+  position: relative; display: flex; align-items: flex-end;
+  height: calc(var(--rq-lane-h, 20px) * var(--rq-lanes, 1) + 24px); min-height: 60px;
+  cursor: default;
+}
+.rq-track:hover { background-color: transparent; }
+.rq-bar {
+  position: absolute;
+  background: var(--role-part-time); color: var(--role-part-time-ink);
+  border: 1px solid var(--grid-4h); border-radius: var(--radius-xs);
+  display: flex; align-items: center; justify-content: center;
+  font-size: .74rem; font-weight: 700; overflow: hidden; white-space: nowrap;
+}
+.rq-bar.rq-override { background: var(--role-manager); color: var(--role-manager-ink); }
+/* 0人は「募集しない」。塗りを外して斜線で区別する。 */
+.rq-bar.rq-zero {
+  background: repeating-linear-gradient(45deg, var(--zebra), var(--zebra) 4px, transparent 4px, transparent 8px);
+  color: var(--ink-3);
+}
+.rq-bar-label { padding: 0 4px; }
+
+/* 上端の掴みしろ。バーが低いときも掴めるよう、バーの外側にもはみ出させる。
+   touch-action:none でブラウザ既定のスクロール等ジェスチャーと競合しないようにする
+   （installDraftTimelineDrag のタイムラインバーと同じ理由）。 */
+.rq-drag-top {
+  position: absolute; left: 0; right: 0; top: -6px; height: 14px;
+  cursor: ns-resize; touch-action: none;
+}
+.rq-drag-top::after {
+  content: ''; position: absolute; left: 50%; top: 6px;
+  width: 24px; height: 3px; margin-left: -12px; border-radius: 2px;
+  background: var(--ink-3); opacity: .5;
+}
+/* ドラッグ中は段(bottom)を凍結する（installReqBarDrag参照）ため、他バーと
+   縦に重なった瞬間に後続DOMのバーの下へ潜り outline ごと隠れる
+   （レビュー指摘 Minor）。操作自体は setPointerCapture とwindowリスナーの
+   おかげで破綻しないが、見た目のために掴んでいるバーを最前面に出す。 */
+.rq-bar.rq-dragging { outline: 2px solid var(--info); outline-offset: 1px; z-index: 3; }
+
+/* 左右のハンドルは色を変える。時間帯の変更は全曜日に影響するため、
+   人数の変更（上端）と取り違えないようにする。
+   brief記載の元案（left:-6px/right:-6px でバーの外側にもはみ出させる）は
+   採用していない。.rq-bar は overflow:hidden（ラベルの文字あふれ防止。
+   このTaskより前から存在する）を持ち、これは同じ要素が containing block
+   になっている絶対配置の子（ここではハンドル）もクリップする。外側に
+   はみ出した分は見た目だけでなくヒットテストからも消え、実測（Playwright
+   の生マウスイベント）でハンドル中央をクリックしても隣接する .rq-bar に
+   吸われてドラッグが始まらなかった。さらに、隣接する時間帯（例:
+   早番17:00終了 / 夜番17:00開始）は境界の座標が完全に一致するため、
+   はみ出し方式のままだと片方のバーの終了ハンドルと、もう片方のバーの
+   開始ハンドルが同じ画面座標を取り合い、後からDOMに現れる側（夜番側）が
+   常に勝ってしまう（早番の終了を掴んだつもりが夜番の開始を掴む）。
+   ハンドルをバーの内側に収める（はみ出させない）ことで、この2つの問題を
+   同時に解消する: overflow:hidden の影響を受けず、隣接バーの境界でも
+   互いの当たり判定が重ならない。
+   【レビュー指摘 I2】ただし内側化の副作用として、.rq-drag-top/.rq-drag-start/
+   .rq-drag-end は3つともDOM順（top→start→end）でヒット優先度が決まり
+   （z-indexが無いため）、左右ハンドルが top:0;bottom:0 で全高を覆っていた
+   ため、幅24px未満の細いバー（軸換算で数十分幅）では .rq-drag-top の
+   実効領域（overflow:hiddenでバー内側の上8pxに切り取られている）が
+   丸ごと end に食われ、上下ドラッグ（人数変更）が一切できなくなっていた。
+   15分幅のパターンはこのTaskで新たに作れるようになったばかりで、狭い画面
+   ではこれが容易に起こる。左右ハンドルの開始位置を top:8px にして
+   .rq-drag-top の実効領域（上8px）と縦方向で競合しないようにする。
+   幅も min(12px, 25%) にして、幅24px未満のバーで start/end 同士が
+   重なって片方が完全に潰れる副次的な問題（軽微）もあわせて緩和する。
+   【レビュー指摘 N1】固定の top:8px は、0人のバー（reqBarHeightPx(0)＝
+   REQ_BAR_MIN_PX＝6px）では高さが負になり0にクランプされ、左右ハンドルの
+   ヒット領域が消えてしまう回帰を生んだ（実測: 12×0px）。0人は「その時間帯は
+   募集しない」を明示的にサポートしている状態（rq-zeroクラス。REQ_BAR_MIN_PX
+   のコメントにもある「0人のときも掴めるように残す高さ」）であり、曜日別で
+   0にした曜日タブではその時間帯をまったく変更できなくなる後退だった。
+   top:min(8px, 50%) にして、6pxバー（3px以下しか使えない）でも上端ハンドル
+   に完全には明け渡さず、下半分（3px≒実測12×2px程度）を確保する。
+   1人/2人/15分幅など8px以上の高さを持つバーは min(8px,50%) が常にちょうど
+   8px になるため計測値は変わらない。 */
+.rq-drag-start, .rq-drag-end {
+  position: absolute; top: min(8px, 50%); bottom: 0; width: min(12px, 25%);
+  cursor: ew-resize; touch-action: none;
+}
+.rq-drag-start { left: 0; }
+.rq-drag-end { right: 0; }
+.rq-drag-start::after, .rq-drag-end::after {
+  content: ''; position: absolute; top: 50%; left: 50%;
+  width: 3px; height: 18px; margin: -9px 0 0 -1.5px; border-radius: 2px;
+  background: var(--warning); opacity: .8;
+}
+
+.rq-rows { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+.rq-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 10px; border: 1px solid var(--rule); border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.rq-row-name { font-weight: 700; min-width: 4em; }
+.rq-row-time { font-family: var(--font-num); color: var(--ink-2); font-size: .82rem; min-width: 9em; }
+.rq-step {
+  width: 40px; min-height: 40px; border: 1px solid var(--rule);
+  background: var(--surface); color: var(--ink); border-radius: var(--radius-sm);
+  font-size: 1.1rem; line-height: 1; cursor: pointer;
+}
+.rq-count {
+  width: 64px; min-height: 40px; text-align: center;
+  font-family: var(--font-num); font-size: 1rem;
+  border: 1px solid var(--rule); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--ink);
+}
+.rq-unit { color: var(--ink-2); font-size: .82rem; }
+.rq-reset, .rq-edit, .rq-del {
+  width: 40px; min-height: 40px; border: none; background: transparent;
+  color: var(--ink-2); cursor: pointer; border-radius: var(--radius-sm);
+}
+.rq-del { color: var(--danger); }
+/* 目盛り行は .tl-axis-row / .tl-hour（セクション20・タイムライン）をそのまま流用する。
+   .tl-hour:last-child の絶対配置トリック（目盛りを N+1 個生成し最後の1個だけ
+   フローから抜く）もそのまま効くため、.rq-* 側で目盛り関連の再定義はしない。 */

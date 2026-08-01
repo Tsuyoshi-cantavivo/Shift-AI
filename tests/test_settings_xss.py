@@ -570,16 +570,24 @@ class TestStaffNumericRenderEscaping:
 
 
 class TestPatternRequiredStaffRenderEscaping:
-    def test_matrix_default_input_is_escaped(self):
-        tpl = _grab(APP_JS, r'<input type="number" class="matrix-input matrix-default"[^>]*>',
-                    "app.js 必要人数マトリクスの基本人数")
-        html = _render(tpl, {"p": {"id": 1, "required_staff": ATTR_ESCAPE_PAYLOAD}})
+    """Phase2 Task4 で必要人数マトリクス（matrix-input matrix-default）は
+    バーUIの人数入力（.rq-count、renderReqBarTrack）に置き換わった。
+    テンプレートの場所が変わっただけで、守るべき脅威（required_staff/実効人数を
+    無エスケープで value 属性に描画してしまう保存型XSS）は同じなので、
+    新テンプレートに対して同じ回帰テストを当てる。"""
+
+    def test_rq_count_input_is_escaped(self):
+        tpl = _grab(APP_JS, r'<input type="number" class="rq-count"[^>]*>',
+                    "app.js 必要人数バーの人数入力")
+        html = _render(tpl, {"p": {"id": 1, "pattern_name": "早番"},
+                             "eff": {"count": ATTR_ESCAPE_PAYLOAD}})
         _assert_attribute_is_not_escapable(html)
 
-    def test_matrix_default_normal_value_unchanged(self):
-        tpl = _grab(APP_JS, r'<input type="number" class="matrix-input matrix-default"[^>]*>',
-                    "app.js 必要人数マトリクスの基本人数")
-        assert 'value="3"' in _render(tpl, {"p": {"id": 1, "required_staff": 3}})
+    def test_rq_count_normal_value_unchanged(self):
+        tpl = _grab(APP_JS, r'<input type="number" class="rq-count"[^>]*>',
+                    "app.js 必要人数バーの人数入力")
+        html = _render(tpl, {"p": {"id": 1, "pattern_name": "早番"}, "eff": {"count": 3}})
+        assert 'value="3"' in html
 
     def test_pattern_edit_modal_inputs_are_escaped(self):
         """dataset 経由で pattern_name / start_time が生のまま戻ってくる経路。"""

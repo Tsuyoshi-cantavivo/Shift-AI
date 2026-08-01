@@ -254,6 +254,16 @@ function kpiCard(icon, label, value, sub, variant) {
   </div>`;
 }
 
+/* ダッシュボードKPI「今日の出勤」の補足テキストと色を決める。
+   時間帯（shift_patterns）が0件だと不足計算の元になるパターンが無いため、
+   サーバ側の today_shortage は常に0を返す。それをそのまま「充足」と表示すると、
+   時間帯を1つも設定していない新規店舗でも緑で「充足」と嘘をつくことになる。
+   hasPatterns で区別し、未設定時は専用の文言・色を返す。 */
+function attendanceShortageKpi(hasPatterns, todayShortage) {
+  if (!hasPatterns) return { text: '時間帯未設定', variant: 'amber' };
+  return todayShortage ? { text: `${todayShortage}枠不足`, variant: 'amber' } : { text: '充足', variant: 'green' };
+}
+
 function pageHead(title, icon, sub) {
   return `<div class="page-head"><h4><i class="bi ${icon}"></i> ${esc(title)}</h4>${sub ? `<div class="sub">${esc(sub)}</div>` : ''}</div>`;
 }
@@ -1852,6 +1862,20 @@ async function loadShortage(box, start, end) {
   try {
     // 時間帯単位の不足を計算（「夜(17:00)」のような区分単位ではなく）
     await ensureBusinessHours();
+    if (!isAlive(tok) || !box.isConnected) return;
+    // 時間帯（shift_patterns）が1件も無いと _computeHourlyGaps は常に空配列を
+    // 返すため、以降の判定を素通りすると常に「不足なし」の表示になってしまう。
+    // 新規店舗は時間帯もシフトもゼロ件で始まるため、店長が最初に見る画面が
+    // 緑のチェックで嘘をつくことになる。ここで先に案内を出して抜ける。
+    if (!(appState.patterns || []).length) {
+      box.innerHTML = `<div class="info-box">
+        <i class="bi bi-exclamation-triangle"></i> 時間帯が未設定です。
+        設定 → シフト設定で時間帯を登録すると、ここに不足が表示されます。
+        <button class="btn btn-sm btn-light mt-2" id="shortageGoSettings">設定を開く</button>
+      </div>`;
+      box.querySelector('#shortageGoSettings')?.addEventListener('click', () => navigateTo('settings'));
+      return;
+    }
     const sd = await api(`/shop/shifts?start=${start}&end=${end}`);
     if (!isAlive(tok) || !box.isConnected) return;
     const allShifts = sd.shifts || [];
@@ -1945,14 +1969,19 @@ SCREENS.dashboard = async function (el) {
   })();
 
   try {
-    const d = await api('/shop/dashboard');
+    // ensureBusinessHours も並行して呼び、appState.patterns を今日の出勤KPIの
+    // 判定に使えるようにする（上のタイムライン用IIFEと呼び出しが競合しても、
+    // ここで自前で待つので順序に依存しない）。
+    const [d] = await Promise.all([api('/shop/dashboard'), ensureBusinessHours()]);
     // 画面遷移済み or DOM破棄済みなら更新中止（"Cannot set properties of null" 回避）
     if (!isAlive(tok) || !el.isConnected) return;
     // KPIs
+    const hasPatterns = !!(appState.patterns || []).length;
+    const attKpi = attendanceShortageKpi(hasPatterns, d.today_shortage);
     const kpiGrid = document.getElementById('kpiGrid');
     if (kpiGrid) kpiGrid.innerHTML =
       kpiCard('bi-people-fill', '稼働スタッフ', d.staff_count, `社員${d.employee_count} / バイト${d.part_time_count}`, 'indigo') +
-      kpiCard('bi-calendar-check', '今日の出勤', d.today_attendance + '名', d.today_shortage ? `${d.today_shortage}枠不足` : '充足', d.today_shortage ? 'amber' : 'green') +
+      kpiCard('bi-calendar-check', '今日の出勤', d.today_attendance + '名', attKpi.text, attKpi.variant) +
       kpiCard('bi-cash-stack', '今月の人件費', '¥' + (d.month_cost / 1000).toFixed(0) + 'K', `${d.month_hours}h`, 'indigo') +
       kpiCard('bi-inbox', '承認待ち', d.pending_approvals + d.pending_requests, '申請・希望', (d.pending_approvals + d.pending_requests) > 0 ? 'red' : 'green');
 
@@ -3948,7 +3977,7 @@ SCREENS.settings = function (el) {
   renderSettingsTab(el.querySelector('#settingsBody'));
 };
 function renderSettingsTab(body) {
-  ({ shift: renderShiftMatrixTab, shifthours: renderShiftHoursTab, shop: renderShopTab, periods: renderPeriodsTab, password: renderPasswordTab }[settingsTab])(body);
+  ({ shift: renderReqBarTab, shifthours: renderShiftHoursTab, shop: renderShopTab, periods: renderPeriodsTab, password: renderPasswordTab }[settingsTab])(body);
 }
 
 /* --- シフト時間設定（シフト作成可能時間・曜日別/一括） --- */
@@ -4205,78 +4234,691 @@ function readShiftHourRow(wrap, key) {
   };
 }
 
-/* --- シフト設定（マトリクス） --- */
-function renderShiftMatrixTab(body) {
-  body.innerHTML = card(
-    sectionTitle('bi-grid-3x3-gap', 'シフト設定', `<span class="small text-secondary">— 各時間帯の必要人数を曜日ごとに設定</span>`) +
-    `<p class="small text-secondary mb-3">空欄のマスは<strong>基本</strong>の人数が適用されます。<strong>0</strong>を入れるとその曜日は募集しません。</p>
-    <div id="matrixWrap"></div>
-    <button class="btn btn-primary mt-3" id="addPat"><i class="bi bi-plus-lg"></i> 時間帯を追加</button>`);
-  loadMatrix(body);
-  body.querySelector('#addPat')?.addEventListener('click', () => openPatternModal(null, () => loadMatrix(body)));
+/* ============================================================
+   必要人数バー（設定→シフト設定）の座標計算
+   DOM に触らない純関数。tests/test_required_bar_geometry.py が Node で直接検証する。
+   ============================================================ */
+
+/** バー1人あたりの高さ(px)。人数が視覚的に比較できる最小単位。 */
+const REQ_BAR_UNIT_PX = 14;
+/** 0人のときも掴めるように残す高さ(px)。0だと画面から消えて操作不能になる。 */
+const REQ_BAR_MIN_PX = 6;
+/** 重なる時間帯を段（レーン）に分けたときの、段と段の隙間(px)。
+ *  最大人数どうしが隣接すると境界がぴったり密着して1本のバーに見えかねない
+ *  ため、数px空ける（レビュー指摘 N2）。 */
+const REQ_BAR_LANE_GAP_PX = 4;
+
+/** 開始・終了（同日の生の分, 0-1439）から、日またぎを考慮した終了の絶対分を返す。
+ *  end <= start なら翌日側とみなし +1440 する。この考え方は reqBarRange /
+ *  reqBarPosition / reqBarLanes / 横ドラッグの endAbsMin 初期化の4箇所で
+ *  同じ if 文として複製されていた（レビュー指摘 Minor）。今後また複製が増えない
+ *  よう、ここ1箇所に寄せる。 */
+function reqBarOvernightEnd(startMin, endMin) {
+  return endMin <= startMin ? endMin + 1440 : endMin;
 }
-async function loadMatrix(body) {
-  const wrap = body.querySelector('#matrixWrap');
+
+/** 時間帯パターン群から時間軸の範囲を返す。
+ *  end <= start は日またぎとみなし、翌日側（+24h）まで軸を伸ばす。
+ *  時刻パースは既存の _parseTimeParts（public/app.js:766付近）をそのまま使う。
+ *  戻り値は [h, m] の配列、不正な時刻では [NaN, NaN]。 */
+function reqBarRange(patterns) {
+  const list = patterns || [];
+  let minH = 24, maxH = 0;
+  list.forEach((p) => {
+    const [sh, sm] = _parseTimeParts(p.start_time);
+    const [eh, em] = _parseTimeParts(p.end_time);
+    if (isNaN(sh) || isNaN(eh)) return;
+    const sMin = sh * 60 + sm;
+    const eMin = reqBarOvernightEnd(sMin, eh * 60 + em);
+    minH = Math.min(minH, Math.floor(sMin / 60));
+    maxH = Math.max(maxH, Math.ceil(eMin / 60));
+  });
+  if (maxH <= minH) { minH = 9; maxH = 22; }   // パターン0件など。幅0だと全バーが消える
+  minH = Math.max(0, minH);
+  maxH = Math.min(48, maxH);
+  return { minH, maxH, rangeMin: minH * 60, rangeLen: (maxH - minH) * 60 };
+}
+
+/** 時間帯の左端と幅を軸に対する % で返す。 */
+function reqBarPosition(startTime, endTime, range) {
+  const [sh, sm] = _parseTimeParts(startTime);
+  const [eh, em] = _parseTimeParts(endTime);
+  if (isNaN(sh) || isNaN(eh)) return { left: 0, width: 0 };
+  const sMin = sh * 60 + sm;
+  const eMin = reqBarOvernightEnd(sMin, eh * 60 + em);
+  const rawLeft = ((sMin - range.rangeMin) / range.rangeLen) * 100;
+  const rawRight = ((eMin - range.rangeMin) / range.rangeLen) * 100;
+  const left = Math.max(0, rawLeft);
+  const width = Math.max(1, Math.min(100, rawRight) - left);
+  return { left, width };
+}
+
+/** 必要人数からバーの高さ(px)。 */
+function reqBarHeightPx(count) {
+  const n = Math.max(0, Math.round(count || 0));
+  return REQ_BAR_MIN_PX + n * REQ_BAR_UNIT_PX;
+}
+
+/** バーの高さ(px)から必要人数。上下ドラッグの逆変換。 */
+function reqBarCountFromPx(px) {
+  return Math.max(0, Math.round(((px || 0) - REQ_BAR_MIN_PX) / REQ_BAR_UNIT_PX));
+}
+
+/** 段（レーン）1つぶんの高さ(px)。renderReqBarTrack（初期描画・全体再描画）と
+ *  syncReqBarTrackHeight（入力中の軽量再同期）の両方がこれを呼ぶ。
+ *  式を2箇所に複製すると Task3・レビュー N2 で塞いだのと同じ「定数の食い違い」
+ *  が再発するため、必ずここ1箇所だけで計算する。 */
+function reqBarLaneHeightPx(maxCount) {
+  return reqBarHeightPx(maxCount) + REQ_BAR_LANE_GAP_PX;
+}
+
+/** 段番号からバーの bottom(px)。renderReqBarTrack（初期描画）と
+ *  syncReqBarTrackHeight（入力中の軽量再同期）の両方がこれを呼ぶ。
+ *  bottom はバーごとにインラインの静的値として焼き込まれるため、
+ *  片方でしか式を計算しないと、編集中でない側のバーが古いオフセットの
+ *  まま取り残される（重なりの再発／トラックからのはみ出し。レビュー指摘）。 */
+function reqBarLaneBottomPx(laneIdx, maxCount) {
+  return laneIdx * reqBarLaneHeightPx(maxCount);
+}
+
+/** 曜日を考慮した実効必要人数。weekday が null なら基本値。 */
+function reqBarEffective(pattern, weekday) {
+  const base = Math.max(0, Math.round(pattern.required_staff || 0));
+  if (weekday === null || weekday === undefined) return { count: base, isOverride: false };
+  const wr = pattern.weekday_required || {};
+  const v = wr[String(weekday)];
+  // 0 は falsy なので `v || base` としてはいけない（0人設定が基本値に化ける）
+  if (v === undefined || v === null) return { count: base, isOverride: false };
+  return { count: Math.max(0, Math.round(v)), isOverride: true };
+}
+
+/** 時間帯が重なるバーを別々の段に振り分ける。
+ *  同一トラックに絶対配置で重ねると、不透明なバーが互いを隠して読めなくなり、
+ *  ドラッグでも掴めなくなる（レビュー指摘 I5）。重ならないものは同じ段を
+ *  共有して縦を節約する（区間スケジューリングの貪欲法）。
+ *  戻り値: パターンID -> 段番号(0始まり) のマップと、必要な段数。
+ *  不正な時刻のパターンは lane に含めない（バーが描かれないので段も不要）。 */
+function reqBarLanes(patterns) {
+  const items = (patterns || []).map((p) => {
+    const [sh, sm] = _parseTimeParts(p.start_time);
+    const [eh, em] = _parseTimeParts(p.end_time);
+    const s = sh * 60 + sm;
+    const eRaw = eh * 60 + em;
+    if (isNaN(s) || isNaN(eRaw)) return null;
+    const e = reqBarOvernightEnd(s, eRaw);
+    return { id: p.id, s, e };
+  }).filter(Boolean);
+  items.sort((a, b) => a.s - b.s || a.e - b.e);
+  const laneEnds = [];   // 各段の現在の終端
+  const lane = {};
+  items.forEach((it) => {
+    let i = laneEnds.findIndex((end) => end <= it.s);
+    if (i < 0) { laneEnds.push(it.e); i = laneEnds.length - 1; }
+    else { laneEnds[i] = it.e; }
+    lane[String(it.id)] = i;
+  });
+  return { lane, laneCount: Math.max(1, laneEnds.length) };
+}
+
+/** 軸上の X 位置（0..1 の比率）を「軸の原点（0時）からの絶対分」に変換する。
+ *  15分単位に丸める。24時を超えても折り返さない（例: 26:00 なら 1560）。
+ *  丸めの式はここ1箇所だけに置き、reqBarTimeFromRatio はこれを "HH:MM" に
+ *  整形するだけの薄いラッパーにする。
+ *  【レビュー指摘 I1】横ドラッグの妥当性判定（最小幅15分・start<end）は、
+ *  一度 "HH:MM"（24時で必ず折り返す）に整形した値を使って判定してはいけない。
+ *  折り返した値だけを見ると、「24時以降への正当な延長」（22:00→26:00）と
+ *  「開始を跨いで逆転した」（17:00→09:00 のような誤操作）を区別できず、
+ *  既存の「end <= start なら+1440」というイディオムを折り返し後の値に適用すると
+ *  後者を前者と誤認して素通りしてしまう（15分クランプが実質死んだガードになる）。
+ *  絶対分のまま比較すれば、この2つは自然に区別できる。 */
+function reqBarAbsMinFromRatio(ratio, range) {
+  const r = Math.max(0, Math.min(1, ratio));
+  return Math.round((range.rangeMin + r * range.rangeLen) / 15) * 15;
+}
+
+/** 軸上の X 位置（0..1 の比率）を "HH:MM" に変換する。15分単位に丸める。
+ *  拡張時間（24時以降）は翌日の時刻として返す（保存形式は日をまたがない
+ *  "HH:MM" のため、ここで初めて24時で折り返す）。 */
+function reqBarTimeFromRatio(ratio, range) {
+  const min = reqBarAbsMinFromRatio(ratio, range);
+  const h = Math.floor(min / 60) % 24;
+  const m = min % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+/* --- シフト設定（必要人数バー） --- */
+/** 必要人数バーUIの状態。曜日タブの選択と、編集中のパターン群を持つ。
+ *  weekday: null = 「基本」タブ（shift_patterns.required_staff を編集）
+ *           0..6 = 曜日タブ（shift_pattern_weekday_required を編集） */
+let reqBarState = { patterns: [], weekday: null, dirty: false };
+
+const REQ_BAR_WD_LABELS = ['日', '月', '火', '水', '木', '金', '土'];
+
+/** 必要人数の表示ラベル。0人は「募集しない」（Task1の契約: 0=配置禁止）と
+ *  分かる表記にする。6px の斜線バーだけでは判別できないというレビュー指摘
+ *  （I4）に対応するため、人数表示そのものを文言で切り替える。 */
+function reqBarCountLabel(count) {
+  return count === 0 ? '募集しない' : `${count}人`;
+}
+
+function renderReqBarTab(body) {
+  body.innerHTML = card(
+    sectionTitle('bi-bar-chart-steps', 'シフト設定', '<span class="small text-secondary">— 時間帯ごとの必要人数</span>') +
+    `<div id="reqBarTabs" class="rq-tabs"></div>
+     <div id="reqBarBody"></div>
+     <div class="flex gap-2 mt-3">
+       <button class="btn btn-light" id="reqBarAdd"><i class="bi bi-plus-lg"></i> 時間帯を追加</button>
+       <button class="btn btn-primary" id="reqBarSave"><i class="bi bi-check-lg"></i> 保存</button>
+       <span class="small text-secondary flex items-center" id="reqBarMsg"></span>
+     </div>`);
+  loadReqBar(body);
+  body.querySelector('#reqBarAdd')?.addEventListener('click', () => {
+    // タブ切替の確認（下の renderReqBarTabs 参照）と同じ理由。追加モーダルは
+    // 保存とは独立した経路のため、未保存の編集(dirty)が残ったまま開いて
+    // そのまま閉じても編集は消えず、後で保存すると黙って一緒に一括APIへ
+    // 送られてしまう（レビュー Important I2。タブ切替だけ直っていた）。
+    if (reqBarState.dirty && !confirm('保存していない変更があります。タブを切り替えると失われます。よろしいですか？')) return;
+    openPatternModal(null, () => loadReqBar(body));
+  });
+  body.querySelector('#reqBarSave')?.addEventListener('click', () => saveReqBar(body));
+}
+
+async function loadReqBar(body) {
+  const host = body.querySelector('#reqBarBody');
   try {
     const d = await api('/shop/patterns');
-    if (!d.patterns.length) { wrap.innerHTML = emptyState('bi-grid-3x3-gap', '時間帯がありません。「時間帯を追加」で作成してください'); return; }
-    wrap.innerHTML = `<div class="matrix-wrap"><table class="matrix-table">
-      <thead><tr>
-        <th style="text-align:left;padding-left:14px">時間帯</th>
-        <th>基本</th>
-        <th class="sun">日</th><th>月</th><th>火</th><th>水</th><th>木</th><th>金</th><th class="sat">土</th>
-        <th></th>
-      </tr></thead>
-      <tbody>${d.patterns.map((p) => {
-        const wr = p.weekday_required || {};
-        return `<tr data-pid="${p.id}">
-          <td><div class="matrix-pat-name">${esc(p.pattern_name)}</div><div class="matrix-pat-time">${esc(p.start_time)} - ${esc(p.end_time)}</div></td>
-          <td><input type="number" class="matrix-input matrix-default" data-pid="${p.id}" value="${esc(p.required_staff)}" min="0" title="基本必要人数"></td>
-          ${[0,1,2,3,4,5,6].map((w) => {
-            const val = wr[String(w)];
-            const has = val !== undefined && val !== null;
-            return `<td><input type="number" class="matrix-input matrix-wd ${has?'has-override':''}" data-pid="${p.id}" data-wd="${w}" value="${esc(has?val:'')}" placeholder="${esc(p.required_staff)}" min="0"></td>`;
-          }).join('')}
-          <td><div class="matrix-row-actions">
-            <button data-edit="${p.id}" data-n="${esc(p.pattern_name)}" data-st="${esc(p.start_time)}" data-et="${esc(p.end_time)}" data-req="${esc(p.required_staff)}" title="編集"><i class="bi bi-pencil"></i></button>
-            <button data-del="${p.id}" title="削除"><i class="bi bi-trash"></i></button>
-          </div></td>
-        </tr>`;
-      }).join('')}</tbody>
-    </table></div>
-    <div class="flex gap-2 mt-3">
-      <button class="btn btn-primary" id="saveMatrix"><i class="bi bi-check-lg"></i> 保存</button>
-      <span class="small text-secondary flex items-center">※変更後「保存」を押してください。青い数字は曜日別オーバーライドです。</span>
+    reqBarState = { patterns: d.patterns || [], weekday: reqBarState.weekday, dirty: false };
+    renderReqBarTabs(body);
+    renderReqBarTrack(body);
+  } catch (e) {
+    safeSetHTML(host, `<div class="text-danger">${esc(e.message)}</div>`);
+  }
+}
+
+function renderReqBarTabs(body) {
+  const tabs = body.querySelector('#reqBarTabs');
+  if (!tabs) return;
+  const cur = reqBarState.weekday;
+  const items = [{ wd: '', label: '基本' }]
+    .concat(REQ_BAR_WD_LABELS.map((l, i) => ({ wd: String(i), label: l })));
+  safeSetHTML(tabs, items.map((it) => {
+    const isActive = (it.wd === '' && cur === null) || (it.wd !== '' && String(cur) === it.wd);
+    const wdClass = it.wd === '0' ? ' rq-sun' : (it.wd === '6' ? ' rq-sat' : '');
+    return `<button class="rq-tab${isActive ? ' active' : ''}${wdClass}" data-wd="${it.wd}">${esc(it.label)}</button>`;
+  }).join(''));
+  tabs.querySelectorAll('.rq-tab').forEach((b) => b.addEventListener('click', () => {
+    const nextWd = b.dataset.wd === '' ? null : parseInt(b.dataset.wd, 10);
+    if (reqBarState.dirty) {
+      if (!confirm('保存していない変更があります。タブを切り替えると失われます。よろしいですか？')) return;
+      // 「失われます」と了承させておきながら dirty=false にして手元の
+      // reqBarState.patterns（編集済みの値）を再描画するだけだと、編集内容は
+      // メモリに残り続ける。後で別の曜日を編集して保存すると、破棄したはずの
+      // この編集も一緒に一括APIへ送られてしまう（レビュー Important I1）。
+      // メッセージどおり実際に破棄するため、サーバから読み直す。
+      reqBarState.weekday = nextWd;
+      loadReqBar(body);
+      return;
+    }
+    reqBarState.weekday = nextWd;
+    renderReqBarTabs(body);
+    renderReqBarTrack(body);
+  }));
+}
+
+function renderReqBarTrack(body) {
+  const host = body.querySelector('#reqBarBody');
+  if (!host) return;
+  const pats = reqBarState.patterns;
+  if (!pats.length) {
+    safeSetHTML(host, `<div id="reqBarEmpty">${emptyState('bi-bar-chart-steps', '時間帯がありません。「時間帯を追加」で作成してください')}</div>`);
+    return;
+  }
+  const wd = reqBarState.weekday;
+  const range = reqBarRange(pats);
+  const hours = [];
+  for (let h = range.minH; h <= range.maxH; h++) {
+    hours.push(`<div class="tl-hour${h >= 24 ? ' tl-hour-next' : ''}">${esc(_extHourLabel(h))}</div>`);
+  }
+  // --tl-hours は CSS が背景グラデーションでグリッドを描くのに使う。
+  // 目盛りは N+1 個生成し、最後の1個だけ CSS 側で絶対配置する（.tl-hour:last-child）。
+  // これを省くと目盛りが1時間分ずれる。
+  const trackVars = `--tl-hours:${range.maxH - range.minH}`;
+  const maxCount = Math.max(1, ...pats.map((p) => reqBarEffective(p, wd).count));
+
+  // 時間帯が重なると不透明なバー同士が隠し合って読めなくなる（レビュー I5）。
+  // 段（レーン）に分けて縦にずらし、トラックの高さは段数ぶん確保する。
+  // 1段の高さ（px）はここ（JS）だけで計算し、CSS 側は --rq-lane-h を
+  // そのまま使う。以前は JS が「6+14n」・CSS が「24+14n」と別々に高さ式を
+  // 持っていて定数が食い違っていた（Task3で除去したはずの「複製された定数」と
+  // 同じ問題。レビュー指摘 N2）。
+  const lanes = reqBarLanes(pats);
+  const laneHeightPx = reqBarLaneHeightPx(maxCount);
+
+  const bars = pats.map((p) => {
+    const eff = reqBarEffective(p, wd);
+    const pos = reqBarPosition(p.start_time, p.end_time, range);
+    const h = reqBarHeightPx(eff.count);
+    const laneIdx = lanes.lane[String(p.id)] || 0;
+    const bottom = reqBarLaneBottomPx(laneIdx, maxCount);
+    const titleBase = `${esc(p.pattern_name)} ${esc(p.start_time)}〜${esc(p.end_time)}`;
+    const countLabel = esc(reqBarCountLabel(eff.count));
+    return `<div class="rq-bar${eff.isOverride ? ' rq-override' : ''}${eff.count === 0 ? ' rq-zero' : ''}"
+      data-pid="${esc(p.id)}" data-name="${esc(p.pattern_name)}" data-title-base="${titleBase}" data-lane="${laneIdx}"
+      style="left:${pos.left.toFixed(2)}%;width:${pos.width.toFixed(2)}%;height:${h}px;bottom:${bottom}px"
+      title="${titleBase} / ${countLabel}">
+      <span class="rq-drag-top" title="上下にドラッグして人数を変える"></span>
+      <span class="rq-drag-start" title="時間帯の開始を変える（全曜日に反映されます）"></span>
+      <span class="rq-drag-end" title="時間帯の終了を変える（全曜日に反映されます）"></span>
+      <span class="rq-bar-label">${esc(p.pattern_name)} ${countLabel}</span>
     </div>`;
-    // Edit buttons
-    wrap.querySelectorAll('[data-edit]').forEach((b) => b?.addEventListener('click', () => openPatternModal(b.dataset, () => loadMatrix(body))));
-    // Delete buttons
-    wrap.querySelectorAll('[data-del]').forEach((b) => b?.addEventListener('click', async () => {
-      if (!confirm('この時間帯を削除しますか？曜日別設定も削除されます。')) return;
-      await api(`/shop/patterns/${b.dataset.del}`, { method: 'DELETE' });
-      toast('削除しました', 'success'); loadMatrix(body);
-    }));
-    // Save
-    body.querySelector('#saveMatrix')?.addEventListener('click', async () => {
-      try {
-        const rows = wrap.querySelectorAll('tbody tr');
-        for (const tr of rows) {
-          const pid = tr.dataset.pid;
-          const defVal = +tr.querySelector('.matrix-default').value;
-          const name = tr.querySelector('.matrix-pat-name').textContent;
-          const time = tr.querySelector('.matrix-pat-time').textContent;
-          const [st, et] = time.split(' - ');
-          // Update pattern default
-          await api(`/shop/patterns/${pid}`, { method: 'PUT', body: JSON.stringify({ pattern_name: name, start_time: st, end_time: et, required_staff: defVal }) });
-          // Collect weekday overrides
-          const wr = {};
-          tr.querySelectorAll('.matrix-wd').forEach((inp) => { const v = inp.value.trim(); if (v !== '') wr[inp.dataset.wd] = parseInt(v, 10); });
-          await api(`/shop/patterns/${pid}/weekday-required`, { method: 'PUT', body: JSON.stringify({ weekday_required: wr }) });
-        }
-        toast('保存しました', 'success'); loadMatrix(body);
-      } catch (e) { toast(e.message, 'error'); }
+  }).join('');
+
+  const rows = pats.map((p) => {
+    const eff = reqBarEffective(p, wd);
+    return `<div class="rq-row" data-pid="${esc(p.id)}">
+      <span class="rq-row-name">${esc(p.pattern_name)}</span>
+      <span class="rq-row-time">${esc(p.start_time)} 〜 ${esc(p.end_time)}</span>
+      <button class="rq-step" data-step="-1" data-pid="${esc(p.id)}" title="1人減らす">−</button>
+      <input type="number" class="rq-count" min="0" data-pid="${esc(p.id)}" data-name="${esc(p.pattern_name)}" value="${esc(eff.count)}">
+      <span class="rq-unit">人</span>
+      <button class="rq-step" data-step="1" data-pid="${esc(p.id)}" title="1人増やす">＋</button>
+      <button class="rq-reset" data-pid="${esc(p.id)}" title="基本に戻す"${wd !== null && eff.isOverride ? '' : ' hidden'}><i class="bi bi-arrow-counterclockwise"></i></button>
+      <button class="rq-edit" data-pid="${esc(p.id)}" title="時間帯を編集"><i class="bi bi-pencil"></i></button>
+      <button class="rq-del" data-pid="${esc(p.id)}" title="削除"><i class="bi bi-trash"></i></button>
+    </div>`;
+  }).join('');
+
+  // 「0人=募集しない」（Task1の契約）を注記に明示する。旧マトリクス表にあった
+  // 説明文がバーUIへの置き換えで消えていたレビュー指摘（I4）への対応。
+  const note = wd === null
+    ? '<div class="small text-secondary mb-2">曜日ごとに人数を変えたいときは、上のタブで曜日を選んでください。<strong>0</strong>にするとその時間帯は募集しません。</div>'
+    : `<div class="small text-secondary mb-2">${esc(REQ_BAR_WD_LABELS[wd])}曜日の人数を設定しています。<strong>時間帯そのものを変えると全曜日に反映されます。</strong> <strong>0</strong>にするとその曜日は募集しません。</div>`;
+
+  safeSetHTML(host, `${note}
+    <div class="rq-wrap">
+      <div class="tl-axis-row"><div class="tl-name"></div><div class="tl-axis">${hours.join('')}</div></div>
+      <div class="rq-track-row">
+        <div class="tl-name"></div>
+        <div class="tl-track rq-track" id="reqBarTrack" style="${trackVars};--rq-lane-h:${laneHeightPx}px;--rq-lanes:${lanes.laneCount}">${bars}</div>
+      </div>
+    </div>
+    <div class="rq-rows">${rows}</div>`);
+
+  bindReqBarRows(body);
+}
+
+/** 数値欄と ± ボタン、編集・削除・基本に戻すのバインド。 */
+function bindReqBarRows(body) {
+  const host = body.querySelector('#reqBarBody');
+  if (!host) return;
+
+  host.querySelectorAll('.rq-count').forEach((inp) => inp.addEventListener('input', () => {
+    // 行DOMを作り直すとこの input 要素自体が破棄され、フォーカスが飛んで
+    // 2文字目以降が入らなくなる（10人以上を打てない。レビュー Critical C1）。
+    // 入力中は state とバーの見た目だけを直接更新し、行の再描画はしない。
+    const raw = inp.value.trim();
+    if (raw === '') return;   // 打ち直しの途中。0 に丸めない（誤って「募集しない」にしない）
+    const n = Math.max(0, Math.round(parseInt(raw, 10)));
+    if (isNaN(n)) return;
+    applyReqBarCount(inp.dataset.pid, n);
+    // バーの見た目（rq-override / rq-zero / 高さ）と「基本に戻す」ボタンの
+    // 出し分けを refreshReqBarRowVisual に一元化する。曜日タブでまだ上書きが
+    // 無い欄に入力すると applyReqBarCount が即座に weekday_required へ書くため
+    // isOverride が true になるが、以前はここでバーの高さしか更新しておらず、
+    // 上書き色（rq-override）とリセットボタンが入力に追従していなかった
+    // （Task4持ち越し課題）。
+    refreshReqBarRowVisual(body, inp.dataset.pid);
+    // 入力中はバー自身の高さしか更新しないため、これを呼ばないと
+    // 現在の最大人数を超えたときにバーがトラックからはみ出したまま
+    // 固定される（レビュー指摘: N1修正の副作用）。
+    syncReqBarTrackHeight(body);
+  }));
+  // 確定時（フォーカスが外れたとき）に自分の表示値だけを正規化する。
+  // 全体を再描画すると、行内ボタン（＋/−/編集/削除）への
+  // mousedown → blur → 再描画（対象ボタンが消える）→ mouseup の順になり、
+  // クリックの1回目が空振りする（レビュー Important N1）。バーの見た目は
+  // 入力中に updateReqBarVisual で更新済みなので、ここでの全体再描画は不要。
+  // 空欄のまま離れても input 側では state を更新していないので、
+  // state の値（直前の正常値）に戻す。
+  host.querySelectorAll('.rq-count').forEach((inp) => inp.addEventListener('blur', () => {
+    const p = findReqPattern(inp.dataset.pid);
+    if (!p) return;
+    inp.value = String(reqBarEffective(p, reqBarState.weekday).count);
+  }));
+  host.querySelectorAll('.rq-step').forEach((b) => b.addEventListener('click', () => {
+    const p = findReqPattern(b.dataset.pid);
+    if (!p) return;
+    const cur = reqBarEffective(p, reqBarState.weekday).count;
+    setReqBarCount(body, b.dataset.pid, cur + parseInt(b.dataset.step, 10));
+  }));
+  host.querySelectorAll('.rq-reset').forEach((b) => b.addEventListener('click', () => {
+    const p = findReqPattern(b.dataset.pid);
+    if (!p || reqBarState.weekday === null) return;
+    // weekday_required が無ければ削除対象も無い。存在するときだけ、
+    // 実在するキーを消す（意図が読めない「捨てオブジェクトから delete」を避ける）。
+    if (p.weekday_required) delete p.weekday_required[String(reqBarState.weekday)];
+    reqBarState.dirty = true;
+    renderReqBarTrack(body);
+  }));
+  host.querySelectorAll('.rq-edit').forEach((b) => b.addEventListener('click', () => {
+    const p = findReqPattern(b.dataset.pid);
+    if (!p) return;
+    // レビュー Important I2: 編集モーダルも保存とは独立した経路。追加ボタンと同じガード。
+    if (reqBarState.dirty && !confirm('保存していない変更があります。タブを切り替えると失われます。よろしいですか？')) return;
+    openPatternModal({ edit: p.id, n: p.pattern_name, st: p.start_time, et: p.end_time, req: p.required_staff },
+      () => loadReqBar(body));
+  }));
+  host.querySelectorAll('.rq-del').forEach((b) => b.addEventListener('click', async () => {
+    // レビュー Important I2: 削除も保存とは独立した経路。追加・編集と同じガード。
+    if (reqBarState.dirty && !confirm('保存していない変更があります。タブを切り替えると失われます。よろしいですか？')) return;
+    if (!confirm('この時間帯を削除しますか？曜日別の設定も削除されます。')) return;
+    try {
+      await api(`/shop/patterns/${b.dataset.pid}`, { method: 'DELETE' });
+      toast('削除しました', 'success');
+      loadReqBar(body);
+    } catch (e) { toast(e.message, 'error'); }
+  }));
+  installReqBarDrag(host, body);
+}
+
+function findReqPattern(pid) {
+  return reqBarState.patterns.find((p) => String(p.id) === String(pid));
+}
+
+/** state のみを更新する（再描画しない）。入力中の `.rq-count` から呼ぶ専用。
+ *  再描画すると input 要素が壊れてフォーカスが飛ぶため（C1）、
+ *  DOM更新は呼び出し側で updateReqBarVisual に任せる。 */
+function applyReqBarCount(pid, count) {
+  const p = findReqPattern(pid);
+  if (!p) return;
+  const n = Math.max(0, Math.round(isNaN(count) ? 0 : count));
+  if (reqBarState.weekday === null) {
+    p.required_staff = n;
+  } else {
+    p.weekday_required = p.weekday_required || {};
+    p.weekday_required[String(reqBarState.weekday)] = n;
+  }
+  reqBarState.dirty = true;
+}
+
+/** バー要素の見た目（高さ・0人ラベル・rq-zero/rq-overrideクラス・title）だけを
+ *  直接書き換える。入力中の再描画を避けるための専用関数（C1）。イベントハンドラの
+ *  再バインドは行わない（要素自体を作り直していないので不要）。
+ *  第2引数は reqBarEffective() が返す { count, isOverride }。 */
+function updateReqBarVisual(bar, eff) {
+  const h = reqBarHeightPx(eff.count);
+  bar.style.height = `${h}px`;
+  bar.classList.toggle('rq-zero', eff.count === 0);
+  bar.classList.toggle('rq-override', !!eff.isOverride);
+  const label = bar.querySelector('.rq-bar-label');
+  const countLabel = reqBarCountLabel(eff.count);
+  if (label) label.textContent = `${bar.dataset.name || ''} ${countLabel}`;
+  const titleBase = bar.dataset.titleBase || '';
+  bar.title = `${titleBase} / ${countLabel}`;
+}
+
+/** 数値欄の入力・バーのドラッグ、どちらの経路でも「バーの見た目」と
+ *  「基本に戻すボタン」の出し分けを同じ手順で揃えるための共通処理（再描画はしない）。
+ *  Task4持ち越し課題: 曜日タブでまだ曜日別上書きが無い（基本値を表示中の）欄に
+ *  入力すると applyReqBarCount が weekday_required に即座に書き込むため、
+ *  state 上はその瞬間から isOverride:true になる。しかしバーの rq-override
+ *  クラスと .rq-reset ボタンは行HTML生成時にしか出し分けていなかったため、
+ *  実際は上書き済みなのに見た目が追従しなかった（色が変わらず、リセットボタンも
+ *  出てこない）。ここで両方を state から直接同期する。 */
+function refreshReqBarRowVisual(body, pid) {
+  const host = body.querySelector('#reqBarBody');
+  const p = findReqPattern(pid);
+  if (!host || !p) return;
+  const eff = reqBarEffective(p, reqBarState.weekday);
+  const bar = host.querySelector(`.rq-bar[data-pid="${CSS.escape(pid)}"]`);
+  if (bar) updateReqBarVisual(bar, eff);
+  const reset = host.querySelector(`.rq-reset[data-pid="${CSS.escape(pid)}"]`);
+  if (reset) reset.hidden = !(reqBarState.weekday !== null && eff.isOverride);
+  return eff;
+}
+
+/** トラックの高さと、各バーの縦位置(bottom)を現在の state から再計算する。
+ *  updateReqBarVisual は入力中にバー自身の高さしか更新しないため、これを
+ *  呼ばないと2つの回帰が起きる（レビュー指摘。N1修正の副作用）。
+ *    - トラックの高さ（--rq-lane-h）が古いままだと、今の最大人数を超えて
+ *      入力したときにバーがトラックからはみ出したまま固定される。
+ *    - bottom はバーごとにインラインの静的値として焼き込まれているため、
+ *      これも更新しないと、編集中でない側のバーが古いオフセットのまま
+ *      取り残される。最大人数が増えれば「I5で直したはずの重なり」が、
+ *      最大人数が減れば「はみ出し」が別方向で再発する。
+ *  DOM ツリーは作り直さない（作り直すと入力中のフォーカスが飛び、C1が再発する）。
+ *  --rq-lanes（段数）は更新しない: reqBarLanes は start_time/end_time だけで
+ *  決まり、必要人数（required_staff/weekday_required）を参照しないため、
+ *  人数の変更だけでは段数は変わらない（reqBarLanes の実装で確認済み）。 */
+function syncReqBarTrackHeight(body) {
+  const track = body.querySelector('#reqBarTrack');
+  if (!track) return;
+  const wd = reqBarState.weekday;
+  const maxCount = Math.max(1, ...reqBarState.patterns.map((p) => reqBarEffective(p, wd).count));
+  // renderReqBarTrack と同じ reqBarLaneHeightPx()/reqBarLaneBottomPx() を呼ぶ。
+  // 式を複製すると Task3・レビューN2で塞いだのと同じ「定数の食い違い」が再発する。
+  track.style.setProperty('--rq-lane-h', `${reqBarLaneHeightPx(maxCount)}px`);
+  track.querySelectorAll('.rq-bar').forEach((bar) => {
+    const laneIdx = parseInt(bar.dataset.lane, 10) || 0;
+    bar.style.bottom = `${reqBarLaneBottomPx(laneIdx, maxCount)}px`;
+  });
+}
+
+/** 人数を設定して再描画する。± ボタンなど「再描画してよい」経路から使う。
+ *  バーの高さと数値欄はここを通じて常に同期する。 */
+function setReqBarCount(body, pid, count) {
+  applyReqBarCount(pid, count);
+  renderReqBarTrack(body);
+}
+
+/** バー上端の上下ドラッグで人数を変える。左右端のドラッグで時間帯そのものを変える。
+ *  シフト表の installDraftTimelineDrag と同じ作法（Pointer Events + setPointerCapture、
+ *  ドラッグ中は preventDefault でスクロール等の既定動作を止める）を踏襲する。
+ *
+ *  ただし setReqBarCount（renderReqBarTrack を呼んで #reqBarBody 全体を作り直す）は
+ *  使わない。ドラッグ中に毎回 DOM を作り直すと、setPointerCapture の対象である
+ *  ハンドル自身が消えてしまい、次の pointermove を取りこぼしてドラッグが
+ *  1px 動くたびに途切れる（brief記載の既知の落とし穴）。
+ *  代わりに `.rq-count` の input ハンドラと全く同じ3段構え
+ *  （applyReqBarCount → refreshReqBarRowVisual(=updateReqBarVisual等) → syncReqBarTrackHeight）
+ *  を使い、移動のたびに直接 DOM の値だけを書き換える。DOM ツリー自体は
+ *  一度も作り直さないため、ドラッグ中もハンドル要素の参照が保たれ、
+ *  pointerup を待たずに人数欄・バーとも見た目が追従する。
+ *
+ *  【設計判断】左右端（時間帯そのもの）のドラッグは事情が異なる。reqBarLanes は
+ *  start_time/end_time だけで段（レーン）を決めるため、時間帯を変えると段の
+ *  割り当てそのものが変わりうる（人数の変更では段数・段割り当てとも変わらない
+ *  ことは syncReqBarTrackHeight のコメントで確認済み）。ドラッグの途中で段を
+ *  組み替えて他バーの bottom まで動かすと、いま掴んでいるバー自身の位置が
+ *  ポインタの下からずれて掴み続けられなくなる（「バーが飛び回る」brief記載の
+ *  懸念）。そこで横方向ドラッグは次の方式にする:
+ *    - ドラッグ中は段（data-lane / bottom）を一切変更しない。動かすのは
+ *      掴んでいるバー自身の left/width と、対応する行の時刻表示だけ。
+ *    - pointerup で初めて renderReqBarTrack を1回呼び、reqBarLanes を
+ *      再計算して段を正しく組み直す。ドラッグ中に再描画しないので
+ *      setPointerCapture の対象は最後まで残り、pointermove の取りこぼしは
+ *      起きない（縦ドラッグと同じ理由）。縦ドラッグと違い pointerup 後に
+ *      あえて全体再描画するのは、段の食い違いを残さないため。 */
+function installReqBarDrag(host, body) {
+  let drag = null;
+
+  const onMoveCount = (ev) => {
+    // 上に動かすほど人数が増える。1人あたり REQ_BAR_UNIT_PX。
+    const dy = drag.startY - ev.clientY;
+    const next = reqBarCountFromPx(reqBarHeightPx(drag.startCount) + dy);
+    if (next !== drag.lastCount) {
+      drag.lastCount = next;
+      applyReqBarCount(drag.pid, next);
+      refreshReqBarRowVisual(body, drag.pid);
+      syncReqBarTrackHeight(body);
+      // ドラッグは数値欄を経由しないため、欄の表示もここで直接合わせる
+      // （保存ボタンは reqBarState を送るので必須ではないが、見た目が
+      // 食い違ったままだと利用者が不安になる）。
+      const inp = host.querySelector(`.rq-count[data-pid="${CSS.escape(drag.pid)}"]`);
+      if (inp) inp.value = String(next);
+    }
+  };
+
+  const onMoveTime = (ev) => {
+    const ratio = (ev.clientX - drag.trackRect.left) / drag.trackRect.width;
+    // 【レビュー指摘 I1】妥当性判定は "HH:MM" に整形する前の絶対分で行う。
+    // reqBarAbsMinFromRatio は24時で折り返さないため、開始/終了どちらを
+    // 引きずっても「正当な延長」と「逆転」を取り違えない。
+    const absMin = reqBarAbsMinFromRatio(ratio, drag.range);
+    if (absMin === drag.lastAbsMin) return;
+
+    if (drag.mode === 'end') {
+      // 開始（固定・drag.startMin はドラッグ開始時の p.start_time をそのまま
+      // 分に直したもの。絶対分の frame は常に「開始は日0」で揃っているので
+      // ここでの折り返し判定は不要）を基準に、最小幅15分を満たすか見る。
+      if (absMin - drag.startMin < 15) return;   // 最小幅は15分。この操作は無視する
+      drag.p.end_time = reqBarTimeFromRatio(ratio, drag.range);
+    } else {
+      // 終了（固定・endAbsMin としてドラッグ開始時に日またぎ込みで確定済み）
+      // を基準に、新しい開始が近づきすぎないか絶対分のまま確認する。
+      if (drag.endAbsMin - absMin < 15) return;
+      drag.p.start_time = reqBarTimeFromRatio(ratio, drag.range);
+    }
+    drag.lastAbsMin = absMin;
+    drag.changed = true;
+    reqBarState.dirty = true;
+
+    // バー自身の位置(left/width)と行の時刻表示だけを直接書き換える。
+    // 段(data-lane/bottom)はドラッグ中は触らない（上記コメント参照）。
+    const pos = reqBarPosition(drag.p.start_time, drag.p.end_time, drag.range);
+    drag.bar.style.left = `${pos.left.toFixed(2)}%`;
+    drag.bar.style.width = `${pos.width.toFixed(2)}%`;
+    // dataset/title への代入は DOM プロパティ経由（HTML文字列を組み立てて
+    // いない）ため、esc() は不要。updateReqBarVisual と同じ扱い。
+    const titleBase = `${drag.p.pattern_name} ${drag.p.start_time}〜${drag.p.end_time}`;
+    drag.bar.dataset.titleBase = titleBase;
+    const countLabel = reqBarCountLabel(reqBarEffective(drag.p, reqBarState.weekday).count);
+    drag.bar.title = `${titleBase} / ${countLabel}`;
+    const row = host.querySelector(`.rq-row[data-pid="${CSS.escape(drag.pid)}"] .rq-row-time`);
+    if (row) row.textContent = `${drag.p.start_time} 〜 ${drag.p.end_time}`;
+  };
+
+  const onMove = (ev) => {
+    if (!drag) return;
+    if (drag.mode === 'count') onMoveCount(ev);
+    else onMoveTime(ev);
+    ev.preventDefault();
+  };
+
+  const onUp = () => {
+    if (!drag) return;
+    drag.bar.classList.remove('rq-dragging');
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onUp);
+    const isTimeDrag = drag.mode !== 'count';
+    const changed = drag.changed;
+    drag = null;
+    if (isTimeDrag && changed) {
+      // 時間帯は全曜日共通のパターン属性なので、操作後にも明示する
+      // （操作前のtitleに続いて2度目の明示。brief参照）。
+      toast('時間帯を変更しました（全曜日に反映されます）');
+      // ここで初めて再描画し、reqBarLanes による段の組み直しを反映する。
+      renderReqBarTrack(body);
+    }
+  };
+
+  host.querySelectorAll('.rq-drag-top').forEach((handle) => {
+    handle.addEventListener('pointerdown', (ev) => {
+      const bar = ev.target.closest('.rq-bar');
+      if (!bar) return;
+      const pid = bar.dataset.pid;
+      const p = findReqPattern(pid);
+      if (!p) return;
+      drag = {
+        mode: 'count',
+        pid, bar,
+        startY: ev.clientY,
+        startCount: reqBarEffective(p, reqBarState.weekday).count,
+        lastCount: null,
+      };
+      bar.classList.add('rq-dragging');
+      try { ev.target.setPointerCapture(ev.pointerId); } catch (e) { /* 未対応でも動く */ }
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+      ev.preventDefault();
     });
-  } catch (e) { wrap.innerHTML = `<div class="text-danger">${esc(e.message)}</div>`; }
+  });
+
+  const bindTimeHandle = (selector, mode) => {
+    host.querySelectorAll(selector).forEach((handle) => {
+      handle.addEventListener('pointerdown', (ev) => {
+        const bar = ev.target.closest('.rq-bar');
+        if (!bar) return;
+        const pid = bar.dataset.pid;
+        const p = findReqPattern(pid);
+        const track = host.querySelector('#reqBarTrack');
+        if (!p || !track) return;
+        const [sh, sm] = _parseTimeParts(p.start_time);
+        const [eh, em] = _parseTimeParts(p.end_time);
+        const startMin = sh * 60 + sm;
+        const endRawMin = eh * 60 + em;
+        drag = {
+          mode, pid, bar, p,
+          // ドラッグ開始時の軸を保持する。ドラッグ中に軸（reqBarRange）が
+          // 動くと座標がずれるため、確定（pointerup）まで固定する（brief参照）。
+          range: reqBarRange(reqBarState.patterns),
+          trackRect: track.getBoundingClientRect(),
+          startMin,
+          endAbsMin: reqBarOvernightEnd(startMin, endRawMin),
+          lastAbsMin: null,
+          changed: false,
+        };
+        bar.classList.add('rq-dragging');
+        try { ev.target.setPointerCapture(ev.pointerId); } catch (e) { /* 未対応でも動く */ }
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+        ev.preventDefault();
+      });
+    });
+  };
+  bindTimeHandle('.rq-drag-start', 'start');
+  bindTimeHandle('.rq-drag-end', 'end');
+}
+
+/** 編集中の state を一括APIで保存する。
+ *  従来は画面の文字列 "09:00 - 22:00" を再パースして行ごとに2リクエスト送っていた。
+ *  表示を変えると壊れるうえ N 件で 2N 回の往復が発生していたため、state から一括で送る。 */
+async function saveReqBar(body) {
+  const msg = body.querySelector('#reqBarMsg');
+  const saveBtn = body.querySelector('#reqBarSave');
+  const payload = {
+    patterns: reqBarState.patterns.map((p) => ({
+      id: p.id,
+      pattern_name: p.pattern_name,
+      start_time: p.start_time,
+      end_time: p.end_time,
+      required_staff: Math.max(0, Math.round(p.required_staff || 0)),
+      weekday_required: p.weekday_required || {},
+    })),
+  };
+  // 台帳 deferred #4: bulk PUT 自体はペイロードが同一なら冪等だが、D1 は
+  // execute() ごとに別ラウンドトリップで自動コミットするため、二重クリックで
+  // 2発が交錯すると DELETE→DELETE→INSERT→INSERT の順になり得て
+  // UNIQUE(pattern_id, weekday) に当たり片方が500で落ちる。結果、曜日別の
+  // 行が欠けた状態が残り得る。ボタンを無効化して二重送信自体を防ぐ。
+  if (saveBtn) saveBtn.disabled = true;
+  try {
+    const r = await api('/shop/patterns/bulk', { method: 'PUT', body: JSON.stringify(payload) });
+    reqBarState.dirty = false;
+    toast('保存しました', 'success');
+    // サーバが返す労働時間の警告（9h/13h 超）は従来フロントで捨てていた。必ず見せる。
+    (r.warnings || []).forEach((w) => toast(`${w.pattern_name}: ${w.warning}`, 'warning'));
+    if (msg) msg.textContent = '';
+    loadReqBar(body);
+  } catch (e) {
+    if (msg) safeSetHTML(msg, `<span class="text-danger">${esc(e.message)}</span>`);
+    toast(e.message, 'error');
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
+  }
 }
 function openPatternModal(data, onDone) {
   const isEdit = !!data;
@@ -4284,14 +4926,26 @@ function openPatternModal(data, onDone) {
     `<label class="form-label" for="pName">時間帯名</label><input id="pName" class="form-control mb-2" value="${esc(data?.n || '')}" placeholder="例: 夜">
      <div class="row"><div class="col-6"><label class="form-label" for="pSt">開始</label><input id="pSt" class="form-control" value="${esc(data?.st || '17:00')}"></div>
      <div class="col-6"><label class="form-label" for="pEt">終了</label><input id="pEt" class="form-control" value="${esc(data?.et || '22:00')}"></div></div>
-     <label class="form-label mt-2">基本必要人数</label><input id="pReq" type="number" class="form-control" value="${esc(data?.req || 2)}">
-     <div class="small text-secondary mt-2">作成後、マトリクスで曜日別の人数を設定できます。</div>`,
+     <label class="form-label mt-2">基本必要人数</label><input id="pReq" type="number" class="form-control" value="${esc(data?.req ?? 2)}">
+     <div class="small text-secondary mt-2">作成後、タブで曜日を選ぶと曜日別の人数を設定できます。</div>`,
     async (w, close) => {
       try {
+        const payload = {
+          pattern_name: w.querySelector('#pName').value,
+          start_time: w.querySelector('#pSt').value,
+          end_time: w.querySelector('#pEt').value,
+        };
+        // レビュー Minor M4: 空欄は「未指定」としてサーバの既定値(1)に任せる。
+        // `+''` は 0 になるため、ここで送ってしまうと「基本必要人数欄を
+        // 空にしただけ」で 0（Task1の契約により「配置禁止」）に化けてしまう。
+        // 0 は「上限なし」ではなく実害のある明示的な値になったため、この
+        // 取りこぼしの代償が大きい。
+        const reqRaw = w.querySelector('#pReq').value.trim();
+        if (reqRaw !== '') payload.required_staff = +reqRaw;
         if (isEdit) {
-          await api(`/shop/patterns/${data.edit}`, { method: 'PUT', body: JSON.stringify({ pattern_name: w.querySelector('#pName').value, start_time: w.querySelector('#pSt').value, end_time: w.querySelector('#pEt').value, required_staff: +w.querySelector('#pReq').value }) });
+          await api(`/shop/patterns/${data.edit}`, { method: 'PUT', body: JSON.stringify(payload) });
         } else {
-          await api('/shop/patterns', { method: 'POST', body: JSON.stringify({ pattern_name: w.querySelector('#pName').value, start_time: w.querySelector('#pSt').value, end_time: w.querySelector('#pEt').value, required_staff: +w.querySelector('#pReq').value }) });
+          await api('/shop/patterns', { method: 'POST', body: JSON.stringify(payload) });
         }
         close(); toast('保存しました', 'success'); onDone?.();
       } catch (e) { toast(e.message, 'error'); }
