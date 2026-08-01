@@ -98,7 +98,11 @@ const s = {json.dumps({"default_hourly_wage": payload_value})};
 const html = `{template}`;
 process.stdout.write(html);
 """
-    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+    # encoding を明示する。省くとロケール依存の既定エンコーディングになり、
+    # LANG が C 系の環境（CI の Ubuntu など）では ASCII と解釈されて、
+    # 日本語を含む描画結果を読み戻した瞬間に UnicodeDecodeError になる。
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                            encoding="utf-8", timeout=10)
     assert result.returncode == 0, f"Node実行に失敗: {result.stderr}"
     return result.stdout
 
@@ -146,7 +150,11 @@ const s = {json.dumps({"night_premium_rate": payload_value})};
 const html = `{template}`;
 process.stdout.write(html);
 """
-    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+    # encoding を明示する。省くとロケール依存の既定エンコーディングになり、
+    # LANG が C 系の環境（CI の Ubuntu など）では ASCII と解釈されて、
+    # 日本語を含む描画結果を読み戻した瞬間に UnicodeDecodeError になる。
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                            encoding="utf-8", timeout=10)
     assert result.returncode == 0, f"Node実行に失敗: {result.stderr}"
     return result.stdout
 
@@ -176,7 +184,11 @@ const s = {json.dumps({"night_premium_rate": payload_value})};
 const html = `{template}`;
 process.stdout.write(html);
 """
-    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+    # encoding を明示する。省くとロケール依存の既定エンコーディングになり、
+    # LANG が C 系の環境（CI の Ubuntu など）では ASCII と解釈されて、
+    # 日本語を含む描画結果を読み戻した瞬間に UnicodeDecodeError になる。
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                            encoding="utf-8", timeout=10)
     assert result.returncode == 0, f"Node実行に失敗: {result.stderr}"
     return result.stdout
 
@@ -472,7 +484,11 @@ def _render(template, context, extra_src=""):
 const html = `{template}`;
 process.stdout.write(html);
 """
-    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+    # encoding を明示する。省くとロケール依存の既定エンコーディングになり、
+    # LANG が C 系の環境（CI の Ubuntu など）では ASCII と解釈されて、
+    # 日本語を含む描画結果を読み戻した瞬間に UnicodeDecodeError になる。
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                            encoding="utf-8", timeout=10)
     assert result.returncode == 0, f"Node実行に失敗: {result.stderr}"
     return result.stdout
 

@@ -9,6 +9,14 @@ on:
   push:
   pull_request:
 
+# テストコードもテスト出力も日本語を含む。ランナーのロケールが C 系だと
+# stdout が ASCII と解釈され、日本語を print した時点で UnicodeEncodeError で
+# 落ちる（macOS は既定が UTF-8 なので手元では再現しない）。
+# Python を UTF-8 モードで動かして、ロケールに依存しないようにする。
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: 'utf-8'
+
 jobs:
   pytest:
     runs-on: ubuntu-latest

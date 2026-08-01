@@ -176,6 +176,11 @@ def run_js(fragments, expr):
     """JS 断片群を読み込んだうえで expr を評価し、その文字列を返す。"""
     import subprocess
     script = "\n".join(fragments) + f"\nprocess.stdout.write(String({expr}));\n"
-    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+    # encoding を明示する。省くと text=True はロケール依存の既定エンコーディングを使い、
+    # LANG が C 系の環境（CI の Ubuntu など）では ASCII と解釈される。
+    # public/app.js の断片には日本語が含まれるため、その場で UnicodeDecodeError になる。
+    # macOS は既定が UTF-8 なので手元では気づけない。
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True,
+                            encoding="utf-8", timeout=10)
     assert result.returncode == 0, f"Node実行に失敗: {result.stderr}\n--- script ---\n{script}"
     return result.stdout
