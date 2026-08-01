@@ -136,3 +136,48 @@ class TestBulkValidation:
         d = client.get("/api/shop/patterns", headers=auth(tok_b)).get_json()
         assert d["patterns"][0]["pattern_name"] == "他店", "他店舗のパターンを書き換えられた"
         assert d["patterns"][0]["required_staff"] == 9
+
+
+class TestBulkPatternNameValidation:
+    """レビュー Minor M1: pattern_name が検証を素通りして 500 + 部分書き込みになる。
+
+    name = it.get("pattern_name") を取るだけで検証していなかったため、
+    UPDATE の NOT NULL 制約違反で書き込みフェーズの途中で 500 になり、
+    「1件でも失敗したら何も書かない」(docstring) に反して、先に処理された
+    正常なパターンだけが書き込まれた状態が残っていた（実測確認済み）。
+    """
+
+    def test_empty_name_does_not_leave_partial_write(self, client):
+        """正常なパターンと不正なパターン（空の名前）を混ぜても、
+        正常な方だけが先に書き込まれてしまわないこと。"""
+        shop_id = insert_shop()
+        p1 = insert_pattern(shop_id, "朝", "09:00", "13:00", 2)
+        p2 = insert_pattern(shop_id, "夜", "17:00", "22:00", 2)
+        tok = _token(shop_id)
+
+        r = client.put("/api/shop/patterns/bulk", json={"patterns": [
+            {"id": p1, "pattern_name": "朝番", "start_time": "09:00", "end_time": "14:00",
+             "required_staff": 3, "weekday_required": {}},
+            # pattern_name が空文字列。以前は検証を素通りし、NOT NULL制約違反で
+            # 書き込みフェーズの途中に 500 になっていた（p1 は先に書き込まれた後）。
+            {"id": p2, "pattern_name": "", "start_time": "17:00", "end_time": "22:00",
+             "required_staff": 2, "weekday_required": {}},
+        ]}, headers=auth(tok))
+        assert r.status_code == 400
+
+        d = client.get("/api/shop/patterns", headers=auth(tok)).get_json()
+        pats = {p["id"]: p for p in d["patterns"]}
+        assert pats[p1]["pattern_name"] == "朝", "検証失敗時に他パターンが書き込まれてしまった（部分書き込み）"
+        assert pats[p1]["end_time"] == "13:00"
+        assert pats[p1]["required_staff"] == 2
+
+    def test_non_string_name_is_rejected(self, client):
+        shop_id = insert_shop()
+        pid = insert_pattern(shop_id, "夜", "17:00", "22:00", 2)
+        tok = _token(shop_id)
+
+        r = client.put("/api/shop/patterns/bulk", json={"patterns": [{
+            "id": pid, "pattern_name": None, "start_time": "17:00", "end_time": "22:00",
+            "required_staff": 2, "weekday_required": {},
+        }]}, headers=auth(tok))
+        assert r.status_code == 400

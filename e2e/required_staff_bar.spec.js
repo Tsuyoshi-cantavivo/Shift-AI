@@ -599,6 +599,112 @@ test('右端を開始より左へ大きくドラッグしても、時間帯が�
   expect(`${m[1]}:${m[2]}`).toBe('17:00');
 });
 
+// レビュー指摘 I1: 開始ハンドル（.rq-drag-start）のドラッグを検証するE2Eが
+// これまで一件も無かった（本ファイルの全ドラッグ系テストは .rq-drag-end のみ）。
+// Task6の目玉「左右ドラッグで時間帯を伸縮」の左半分が完全に無検証だった。
+// 終了ハンドル側（右端をドラッグして伸ばす／最小幅15分クランプ）と対称の
+// 2件を追加する。
+test('バーの開始ハンドルを左へドラッグすると時間帯が伸びる', async ({ page }) => {
+  const row = page.locator('.rq-row').filter({ has: page.locator('.rq-count[data-name="夜番"]') });
+  const before = await row.locator('.rq-row-time').textContent();
+
+  const box = await page.locator('.rq-bar[data-name="夜番"] .rq-drag-start').boundingBox();
+  expect(box).not.toBeNull();
+  const trackBox = await page.locator('#reqBarTrack').boundingBox();
+  const handleCenterX = box.x + box.width / 2;
+  const pxPerMin = trackBox.width / (13 * 60);   // この仕込みは9-22時の13時間軸
+
+  await page.mouse.move(handleCenterX, box.y + box.height / 2);
+  await page.mouse.down();
+  // 17:00 → 16:00（1時間左へ、開始を伸ばす）
+  await page.mouse.move(handleCenterX - pxPerMin * 60, box.y + box.height / 2, { steps: 8 });
+  await page.mouse.up();
+
+  const after = await row.locator('.rq-row-time').textContent();
+  expect(after).not.toBe(before);
+  const m = after.match(/(\d{2}):(\d{2})\s*〜\s*(\d{2}):(\d{2})/);
+  expect(m).not.toBeNull();
+  expect(`${m[1]}:${m[2]}`).toBe('16:00');
+  // 終了(22:00)自体は動いていない（このハンドルは開始だけを動かす）。
+  expect(`${m[3]}:${m[4]}`).toBe('22:00');
+});
+
+// 終了ハンドル側の「右端を開始より左へ大きくドラッグしても反転・膨張しない」
+// （L575）と対称: 15分クランプの対称側（drag.endAbsMin - absMin < 15）が
+// 開始ハンドルでも効いていることを見る。
+test('開始ハンドルを終了より右へ大きくドラッグしても、時間帯が反転・膨張しない', async ({ page }) => {
+  const row = page.locator('.rq-row').filter({ has: page.locator('.rq-count[data-name="早番"]') });
+
+  const box = await page.locator('.rq-bar[data-name="早番"] .rq-drag-start').boundingBox();
+  const trackBox = await page.locator('#reqBarTrack').boundingBox();
+  expect(box).not.toBeNull();
+
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  // 軸の右端付近（早番の終了17:00よりずっと右）まで大きく動かす。
+  await page.mouse.move(trackBox.x + trackBox.width - 2, box.y + box.height / 2, { steps: 10 });
+  await page.mouse.up();
+
+  const after = await row.locator('.rq-row-time').textContent();
+  const m = after.match(/(\d{2}):(\d{2})\s*〜\s*(\d{2}):(\d{2})/);
+  expect(m).not.toBeNull();
+  const startMin = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  let endMin = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
+  if (endMin <= startMin) endMin += 1440;
+  // 最小幅15分は下回らない。
+  expect(endMin - startMin).toBeGreaterThanOrEqual(15);
+  // 開始を終了に対して反転・膨張させる壊れたガードなら大きな差になる。
+  expect(endMin - startMin).toBeLessThan(15 * 60);
+  // 終了時刻(17:00)自体は動いていない（このハンドルは開始だけを動かす）。
+  expect(`${m[3]}:${m[4]}`).toBe('17:00');
+});
+
+// endAbsMin: reqBarOvernightEnd(startMin, endRawMin) は、日をまたがない
+// パターン（上の2件が使う早番・夜番）では素の endRawMin と値が一致するため、
+// 上の2件だけでは「reqBarOvernightEnd を呼ばずに endRawMin をそのまま使う」
+// 改変を検出できない（実測確認済み）。日またぎパターンで初めて両者が
+// 分岐する（endAbsMin が翌日側に+1440されないと、15分クランプの基準が
+// 実際の終了より約22時間も手前になり、ドラッグがほぼ常に無視される）。
+test('日またぎ時間帯の開始ハンドルもドラッグできる（endAbsMinの日またぎ拡張）', async ({ page, request }) => {
+  const res = await request.post('/api/login', {
+    data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
+  });
+  const token = (await res.json()).token;
+  await request.post('/api/shop/patterns', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { pattern_name: '深夜', start_time: '22:00', end_time: '02:00', required_staff: 2 },
+  });
+  await page.reload();
+  await page.waitForSelector('#appView:not(.d-none)');
+  await page.click('.side-item[data-screen="settings"]');
+  await page.waitForSelector('#reqBarTrack');
+
+  const row = page.locator('.rq-row').filter({ has: page.locator('.rq-count[data-name="深夜"]') });
+  const before = await row.locator('.rq-row-time').textContent();
+
+  const box = await page.locator('.rq-bar[data-name="深夜"] .rq-drag-start').boundingBox();
+  expect(box).not.toBeNull();
+  const trackBox = await page.locator('#reqBarTrack').boundingBox();
+  const handleCenterX = box.x + box.width / 2;
+  // 深夜パターン(22:00-02:00)を仕込むと軸は9時〜26時(=翌2時)の17時間に広がる。
+  const pxPerMin = trackBox.width / (17 * 60);
+
+  await page.mouse.move(handleCenterX, box.y + box.height / 2);
+  await page.mouse.down();
+  // 22:00 → 21時台（1時間左へ）。ピクセル→15分丸めの誤差を許容し、
+  // 時間の桁（"21"）と実際に変化したことだけを見る。
+  await page.mouse.move(handleCenterX - pxPerMin * 60, box.y + box.height / 2, { steps: 8 });
+  await page.mouse.up();
+
+  const after = await row.locator('.rq-row-time').textContent();
+  expect(after).not.toBe(before);
+  const m = after.match(/(\d{2}):(\d{2})\s*〜\s*(\d{2}):(\d{2})/);
+  expect(m).not.toBeNull();
+  expect(m[1]).toBe('21');
+  // 終了(02:00)自体は動いていない（このハンドルは開始だけを動かす）。
+  expect(`${m[3]}:${m[4]}`).toBe('02:00');
+});
+
 // レビュー指摘 I2: ハンドルをバー内側に収めた副作用で、.rq-drag-top/
 // .rq-drag-start/.rq-drag-end の3つがDOM順（top→start→end）でヒット優先度が
 // 決まり、左右ハンドルが上端ハンドルの実効領域（overflow:hiddenでバー内側の
@@ -733,6 +839,91 @@ test('0人のバーでも左右ハンドルが掴めて時間帯を変えられ�
 
   const after = await row.locator('.rq-row-time').textContent();
   expect(after).not.toBe(before);
+});
+
+// レビュー指摘 Important I3: public/style.css の `.rq-drag-start, .rq-drag-end`
+// の `top: min(8px, 50%)` を検証するE2Eが無かった。上の「細いバーでも上端
+// ドラッグで人数を変えられる」(L608) はクリック点がバーの水平中央であり、
+// 左右ハンドル（width: min(12px, 25%)）は構造的にそこへ届かない。つまり
+// あのテストが固定しているのは width 側だけで、top を `0` に戻しても
+// green のまま（左右ハンドルが上端ハンドルの領域を全高で覆ってしまう）。
+// ここでは上端ハンドルの専有領域（y: 0〜min(8px,50%)）を、バーの左右端
+// 付近で直接 elementFromPoint により検証する。
+test('バーの左右端付近でも上端ハンドルが取れる（top:min(8px,50%)が守られている）', async ({ page }) => {
+  const rect = await page.evaluate(() =>
+    document.querySelector('.rq-bar[data-name="夜番"]').getBoundingClientRect());
+  // 前提確認: このテストが本当に「上端ハンドルの専有領域」を検証できているかを見る。
+  // ここが崩れるとテストが何も守らなくなる。
+  expect(rect.height).toBeGreaterThan(16);
+
+  const classNameAt = ([x, y]) => document.elementFromPoint(x, y)?.className ?? null;
+
+  const leftHit = await page.evaluate(classNameAt, [rect.left + 3, rect.top + 3]);
+  expect(leftHit).toContain('rq-drag-top');
+
+  const rightHit = await page.evaluate(classNameAt, [rect.right - 3, rect.top + 3]);
+  expect(rightHit).toContain('rq-drag-top');
+});
+
+// レビュー指摘 Important I2: タブ切替以外に、「時間帯を追加/編集/削除」も
+// reqBarState.patterns をサーバ応答で丸ごと置き換える（loadReqBar）ため、
+// 未保存編集がある状態でこれらを行うと警告なく編集が消えていた。
+// タブ切替と同じ確認ダイアログを3経路の先頭に足した（Task4由来の兄弟経路）。
+// ここでは「追加」経路を、拒否したケースで検証する。
+test('未保存の変更がある状態で時間帯を追加しようとし、破棄を拒否するとモーダルが開かず変更も残る', async ({ page }) => {
+  page.on('dialog', (d) => d.dismiss());
+
+  await page.fill('.rq-count[data-name="早番"]', '9');
+  await page.click('#reqBarAdd');
+
+  // 破棄を拒否したので追加モーダルは開かない。
+  await expect(page.locator('.modal-overlay')).toHaveCount(0);
+  // 変更(9人)も残っている（loadReqBar が呼ばれてサーバ応答で上書きされていない）。
+  await expect(page.locator('.rq-count[data-name="早番"]')).toHaveValue('9');
+});
+
+// 台帳 deferred #4: bulk PUT は同一ペイロードなら冪等だが、D1 は execute()
+// ごとに別ラウンドトリップで自動コミットするため、二重クリックで2発が
+// 交錯すると DELETE→DELETE→INSERT→INSERT の順になり得て
+// UNIQUE(pattern_id, weekday) に当たり片方が500で落ち、曜日別の行が
+// 欠けた状態が残り得る。saveReqBar の先頭でボタンを disabled にして防ぐ。
+test('保存中は保存ボタンが無効化され、二重クリックしても1回しか送信されない', async ({ page }) => {
+  let calls = 0;
+  await page.route('**/api/shop/patterns/bulk', async (route) => {
+    calls++;
+    await new Promise((r) => setTimeout(r, 300));
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, warnings: [] }) });
+  });
+
+  await page.click('#reqBarSave');
+  await expect(page.locator('#reqBarSave')).toBeDisabled();
+  await page.click('#reqBarSave', { force: true });   // 無効化されているため効かないはず
+  await page.waitForTimeout(500);
+  await expect(page.locator('#reqBarSave')).toBeEnabled();
+  expect(calls).toBe(1);
+});
+
+// レビュー指摘 Minor M4: 時間帯モーダルの `+w.querySelector('#pReq').value` は
+// 空欄で 0 になる。validate_numeric_field は `0 == ""` が偽なので「未指定」
+// 扱いにせず 0 をそのまま通し、0=配置禁止（Task1の契約）で保存されてしまう。
+// 空欄のときは required_staff を送らず、サーバの既定値(1)に任せる。
+test('新規時間帯モーダルで基本必要人数を空にすると required_staff を送らない', async ({ page }) => {
+  let sent = null;
+  await page.route('**/api/shop/patterns', async (route) => {
+    if (route.request().method() !== 'POST') { await route.continue(); return; }
+    sent = JSON.parse(route.request().postData());
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, id: 999, warning: null }) });
+  });
+
+  await page.click('#reqBarAdd');
+  await page.fill('#pName', '新規');
+  await page.fill('#pSt', '06:00');
+  await page.fill('#pEt', '08:00');
+  await page.fill('#pReq', '');   // 基本必要人数を空にする
+  await page.click('[data-save]');
+  await expect.poll(() => sent).not.toBeNull();
+
+  expect(sent).not.toHaveProperty('required_staff');
 });
 
 // ============================================================

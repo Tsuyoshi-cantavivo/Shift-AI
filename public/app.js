@@ -4412,7 +4412,14 @@ function renderReqBarTab(body) {
        <span class="small text-secondary flex items-center" id="reqBarMsg"></span>
      </div>`);
   loadReqBar(body);
-  body.querySelector('#reqBarAdd')?.addEventListener('click', () => openPatternModal(null, () => loadReqBar(body)));
+  body.querySelector('#reqBarAdd')?.addEventListener('click', () => {
+    // タブ切替の確認（下の renderReqBarTabs 参照）と同じ理由。追加モーダルは
+    // 保存とは独立した経路のため、未保存の編集(dirty)が残ったまま開いて
+    // そのまま閉じても編集は消えず、後で保存すると黙って一緒に一括APIへ
+    // 送られてしまう（レビュー Important I2。タブ切替だけ直っていた）。
+    if (reqBarState.dirty && !confirm('保存していない変更があります。タブを切り替えると失われます。よろしいですか？')) return;
+    openPatternModal(null, () => loadReqBar(body));
+  });
   body.querySelector('#reqBarSave')?.addEventListener('click', () => saveReqBar(body));
 }
 
@@ -4596,10 +4603,14 @@ function bindReqBarRows(body) {
   host.querySelectorAll('.rq-edit').forEach((b) => b.addEventListener('click', () => {
     const p = findReqPattern(b.dataset.pid);
     if (!p) return;
+    // レビュー Important I2: 編集モーダルも保存とは独立した経路。追加ボタンと同じガード。
+    if (reqBarState.dirty && !confirm('保存していない変更があります。タブを切り替えると失われます。よろしいですか？')) return;
     openPatternModal({ edit: p.id, n: p.pattern_name, st: p.start_time, et: p.end_time, req: p.required_staff },
       () => loadReqBar(body));
   }));
   host.querySelectorAll('.rq-del').forEach((b) => b.addEventListener('click', async () => {
+    // レビュー Important I2: 削除も保存とは独立した経路。追加・編集と同じガード。
+    if (reqBarState.dirty && !confirm('保存していない変更があります。タブを切り替えると失われます。よろしいですか？')) return;
     if (!confirm('この時間帯を削除しますか？曜日別の設定も削除されます。')) return;
     try {
       await api(`/shop/patterns/${b.dataset.pid}`, { method: 'DELETE' });
@@ -4877,6 +4888,7 @@ function installReqBarDrag(host, body) {
  *  表示を変えると壊れるうえ N 件で 2N 回の往復が発生していたため、state から一括で送る。 */
 async function saveReqBar(body) {
   const msg = body.querySelector('#reqBarMsg');
+  const saveBtn = body.querySelector('#reqBarSave');
   const payload = {
     patterns: reqBarState.patterns.map((p) => ({
       id: p.id,
@@ -4887,6 +4899,12 @@ async function saveReqBar(body) {
       weekday_required: p.weekday_required || {},
     })),
   };
+  // 台帳 deferred #4: bulk PUT 自体はペイロードが同一なら冪等だが、D1 は
+  // execute() ごとに別ラウンドトリップで自動コミットするため、二重クリックで
+  // 2発が交錯すると DELETE→DELETE→INSERT→INSERT の順になり得て
+  // UNIQUE(pattern_id, weekday) に当たり片方が500で落ちる。結果、曜日別の
+  // 行が欠けた状態が残り得る。ボタンを無効化して二重送信自体を防ぐ。
+  if (saveBtn) saveBtn.disabled = true;
   try {
     const r = await api('/shop/patterns/bulk', { method: 'PUT', body: JSON.stringify(payload) });
     reqBarState.dirty = false;
@@ -4898,6 +4916,8 @@ async function saveReqBar(body) {
   } catch (e) {
     if (msg) safeSetHTML(msg, `<span class="text-danger">${esc(e.message)}</span>`);
     toast(e.message, 'error');
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
   }
 }
 function openPatternModal(data, onDone) {
@@ -4910,10 +4930,22 @@ function openPatternModal(data, onDone) {
      <div class="small text-secondary mt-2">作成後、タブで曜日を選ぶと曜日別の人数を設定できます。</div>`,
     async (w, close) => {
       try {
+        const payload = {
+          pattern_name: w.querySelector('#pName').value,
+          start_time: w.querySelector('#pSt').value,
+          end_time: w.querySelector('#pEt').value,
+        };
+        // レビュー Minor M4: 空欄は「未指定」としてサーバの既定値(1)に任せる。
+        // `+''` は 0 になるため、ここで送ってしまうと「基本必要人数欄を
+        // 空にしただけ」で 0（Task1の契約により「配置禁止」）に化けてしまう。
+        // 0 は「上限なし」ではなく実害のある明示的な値になったため、この
+        // 取りこぼしの代償が大きい。
+        const reqRaw = w.querySelector('#pReq').value.trim();
+        if (reqRaw !== '') payload.required_staff = +reqRaw;
         if (isEdit) {
-          await api(`/shop/patterns/${data.edit}`, { method: 'PUT', body: JSON.stringify({ pattern_name: w.querySelector('#pName').value, start_time: w.querySelector('#pSt').value, end_time: w.querySelector('#pEt').value, required_staff: +w.querySelector('#pReq').value }) });
+          await api(`/shop/patterns/${data.edit}`, { method: 'PUT', body: JSON.stringify(payload) });
         } else {
-          await api('/shop/patterns', { method: 'POST', body: JSON.stringify({ pattern_name: w.querySelector('#pName').value, start_time: w.querySelector('#pSt').value, end_time: w.querySelector('#pEt').value, required_staff: +w.querySelector('#pReq').value }) });
+          await api('/shop/patterns', { method: 'POST', body: JSON.stringify(payload) });
         }
         close(); toast('保存しました', 'success'); onDone?.();
       } catch (e) { toast(e.message, 'error'); }

@@ -2012,6 +2012,12 @@ def shop_patterns_bulk():
             abort(400, description="patterns の要素はオブジェクトで指定してください")
         pid = it.get("id")
         name = it.get("pattern_name")
+        # レビュー Minor M1: name を検証せず UPDATE に渡すと、shift_patterns.pattern_name
+        # の NOT NULL 制約違反で書き込みフェーズの途中で 500 になり、docstring の
+        # 「1件でも失敗したら何も書かない」に反して、先に処理された正常なパターンだけが
+        # 書き込まれた状態が残る（実測確認済み）。ここで検証フェーズのうちに弾く。
+        if not isinstance(name, str) or not name.strip():
+            abort(400, description="時間帯名を入力してください")
         if pid not in own:
             abort(400, description=f"この店舗のパターンではありません（id={pid}）")
         ok, warning = _validate_pattern_hours(it.get("start_time"), it.get("end_time"))
