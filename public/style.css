@@ -1577,7 +1577,11 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
   width: 24px; height: 3px; margin-left: -12px; border-radius: 2px;
   background: var(--ink-3); opacity: .5;
 }
-.rq-bar.rq-dragging { outline: 2px solid var(--info); outline-offset: 1px; }
+/* ドラッグ中は段(bottom)を凍結する（installReqBarDrag参照）ため、他バーと
+   縦に重なった瞬間に後続DOMのバーの下へ潜り outline ごと隠れる
+   （レビュー指摘 Minor）。操作自体は setPointerCapture とwindowリスナーの
+   おかげで破綻しないが、見た目のために掴んでいるバーを最前面に出す。 */
+.rq-bar.rq-dragging { outline: 2px solid var(--info); outline-offset: 1px; z-index: 3; }
 
 /* 左右のハンドルは色を変える。時間帯の変更は全曜日に影響するため、
    人数の変更（上端）と取り違えないようにする。
@@ -1594,9 +1598,20 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
    常に勝ってしまう（早番の終了を掴んだつもりが夜番の開始を掴む）。
    ハンドルをバーの内側に収める（はみ出させない）ことで、この2つの問題を
    同時に解消する: overflow:hidden の影響を受けず、隣接バーの境界でも
-   互いの当たり判定が重ならない。 */
+   互いの当たり判定が重ならない。
+   【レビュー指摘 I2】ただし内側化の副作用として、.rq-drag-top/.rq-drag-start/
+   .rq-drag-end は3つともDOM順（top→start→end）でヒット優先度が決まり
+   （z-indexが無いため）、左右ハンドルが top:0;bottom:0 で全高を覆っていた
+   ため、幅24px未満の細いバー（軸換算で数十分幅）では .rq-drag-top の
+   実効領域（overflow:hiddenでバー内側の上8pxに切り取られている）が
+   丸ごと end に食われ、上下ドラッグ（人数変更）が一切できなくなっていた。
+   15分幅のパターンはこのTaskで新たに作れるようになったばかりで、狭い画面
+   ではこれが容易に起こる。左右ハンドルの開始位置を top:8px にして
+   .rq-drag-top の実効領域（上8px）と縦方向で競合しないようにする。
+   幅も min(12px, 25%) にして、幅24px未満のバーで start/end 同士が
+   重なって片方が完全に潰れる副次的な問題（軽微）もあわせて緩和する。 */
 .rq-drag-start, .rq-drag-end {
-  position: absolute; top: 0; bottom: 0; width: 12px;
+  position: absolute; top: 8px; bottom: 0; width: min(12px, 25%);
   cursor: ew-resize; touch-action: none;
 }
 .rq-drag-start { left: 0; }

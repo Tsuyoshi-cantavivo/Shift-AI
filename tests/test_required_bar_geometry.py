@@ -57,7 +57,7 @@ class TestReqBarRange:
     def test_range_covers_all_patterns(self):
         pats = [{"start_time": "09:00", "end_time": "17:00"},
                 {"start_time": "17:00", "end_time": "22:00"}]
-        out = run_js(_fns("reqBarRange") + [_parse_time_fn()],
+        out = run_js(_fns("reqBarRange", "reqBarOvernightEnd") + [_parse_time_fn()],
                      f"JSON.stringify(reqBarRange({json.dumps(pats)}))")
         r = json.loads(out)
         assert r["minH"] == 9
@@ -67,13 +67,13 @@ class TestReqBarRange:
 
     def test_overnight_extends_past_24(self):
         pats = [{"start_time": "22:00", "end_time": "02:00"}]
-        out = run_js(_fns("reqBarRange") + [_parse_time_fn()],
+        out = run_js(_fns("reqBarRange", "reqBarOvernightEnd") + [_parse_time_fn()],
                      f"JSON.stringify(reqBarRange({json.dumps(pats)}))")
         r = json.loads(out)
         assert r["maxH"] == 26, "日またぎが翌日側に伸びていない"
 
     def test_empty_patterns_fall_back(self):
-        out = run_js(_fns("reqBarRange") + [_parse_time_fn()],
+        out = run_js(_fns("reqBarRange", "reqBarOvernightEnd") + [_parse_time_fn()],
                      "JSON.stringify(reqBarRange([]))")
         r = json.loads(out)
         assert r["rangeLen"] > 0, "パターン0件で幅0になると全バーが消える"
@@ -82,7 +82,7 @@ class TestReqBarRange:
 class TestReqBarPosition:
     def test_full_range_is_zero_to_hundred(self):
         rng = {"minH": 9, "maxH": 22, "rangeMin": 540, "rangeLen": 780}
-        out = run_js(_fns("reqBarPosition") + [_parse_time_fn()],
+        out = run_js(_fns("reqBarPosition", "reqBarOvernightEnd") + [_parse_time_fn()],
                      f"JSON.stringify(reqBarPosition('09:00','22:00',{json.dumps(rng)}))")
         p = json.loads(out)
         assert abs(p["left"]) < 0.01
@@ -90,7 +90,7 @@ class TestReqBarPosition:
 
     def test_half_range(self):
         rng = {"minH": 0, "maxH": 24, "rangeMin": 0, "rangeLen": 1440}
-        out = run_js(_fns("reqBarPosition") + [_parse_time_fn()],
+        out = run_js(_fns("reqBarPosition", "reqBarOvernightEnd") + [_parse_time_fn()],
                      f"JSON.stringify(reqBarPosition('06:00','18:00',{json.dumps(rng)}))")
         p = json.loads(out)
         assert abs(p["left"] - 25) < 0.01
@@ -98,7 +98,7 @@ class TestReqBarPosition:
 
     def test_overnight_wraps_to_extended_slot(self):
         rng = {"minH": 9, "maxH": 26, "rangeMin": 540, "rangeLen": 1020}
-        out = run_js(_fns("reqBarPosition") + [_parse_time_fn()],
+        out = run_js(_fns("reqBarPosition", "reqBarOvernightEnd") + [_parse_time_fn()],
                      f"JSON.stringify(reqBarPosition('22:00','02:00',{json.dumps(rng)}))")
         p = json.loads(out)
         # 22:00 = 1320分 → (1320-540)/1020 = 76.47%
@@ -117,7 +117,7 @@ class TestReqBarInvalidTime:
     def test_range_ignores_invalid_patterns(self):
         pats = [{"start_time": "invalid", "end_time": "17:00"},
                 {"start_time": "09:00", "end_time": "22:00"}]
-        out = run_js(_fns("reqBarRange") + [_parse_time_fn()],
+        out = run_js(_fns("reqBarRange", "reqBarOvernightEnd") + [_parse_time_fn()],
                      f"JSON.stringify(reqBarRange({json.dumps(pats)}))")
         r = json.loads(out)
         # 不正なパターンは集計から除外され、正常なほうだけで軸が決まる
@@ -126,7 +126,7 @@ class TestReqBarInvalidTime:
 
     def test_position_returns_zero_width_for_invalid_time(self):
         rng = {"minH": 9, "maxH": 22, "rangeMin": 540, "rangeLen": 780}
-        out = run_js(_fns("reqBarPosition") + [_parse_time_fn()],
+        out = run_js(_fns("reqBarPosition", "reqBarOvernightEnd") + [_parse_time_fn()],
                      f"JSON.stringify(reqBarPosition('invalid','22:00',{json.dumps(rng)}))")
         p = json.loads(out)
         assert p["width"] == 0, "不正な時刻でバーを描いてしまう"
@@ -191,7 +191,7 @@ class TestReqBarLanes:
     """
 
     def _lanes(self, pats):
-        out = run_js(_fns("reqBarLanes") + [_parse_time_fn()],
+        out = run_js(_fns("reqBarLanes", "reqBarOvernightEnd") + [_parse_time_fn()],
                      f"JSON.stringify(reqBarLanes({json.dumps(pats)}))")
         return json.loads(out)
 
@@ -254,10 +254,75 @@ class TestReqBarLanes:
         assert r["laneCount"] == 1
 
 
+class TestReqBarAbsMinFromRatio:
+    """レビュー指摘 I1: 横ドラッグの妥当性判定（最小幅15分・start<end）は、
+    "HH:MM" に整形して24時で折り返した値ではなく、折り返す前の絶対分で行う
+    必要がある。折り返した値だけを見ると、「24時以降への正当な延長」と
+    「開始を跨いだ逆転」を区別できず、既存の『end<=start なら+1440』という
+    イディオムを折り返し後の値に適用すると後者を前者と誤認して素通りして
+    しまう（15分クランプが実質死んだガードになっていた）。
+    reqBarAbsMinFromRatio はこの2つを区別できるよう、24時を超えても
+    折り返さない値を返す。"""
+
+    def test_does_not_wrap_past_24h(self):
+        """reqBarTimeFromRatio(1, ...) は "02:00" に折り返すが、
+        reqBarAbsMinFromRatio(1, ...) は 1560（26時ぶん）のまま返す必要がある。
+        ここが折り返してしまうと、呼び出し側は「24時以降への正当な延長」と
+        「開始を跨いだ逆転」を区別する手段を失う。"""
+        rng = {"minH": 9, "maxH": 26, "rangeMin": 540, "rangeLen": 1020}
+        out = run_js(_fns("reqBarAbsMinFromRatio"),
+                     f"String(reqBarAbsMinFromRatio(1, {json.dumps(rng)}))")
+        assert int(out.strip()) == 1560, "24時を超えた絶対分が24時基準で折り返されている"
+
+    def test_matches_range_bounds(self):
+        rng = {"minH": 9, "maxH": 22, "rangeMin": 540, "rangeLen": 780}
+        out = run_js(_fns("reqBarAbsMinFromRatio"),
+                     f"JSON.stringify([reqBarAbsMinFromRatio(0, {json.dumps(rng)}), "
+                     f"reqBarAbsMinFromRatio(1, {json.dumps(rng)})])")
+        assert json.loads(out) == [540, 1320]
+
+    def test_snaps_to_15min(self):
+        rng = {"minH": 9, "maxH": 22, "rangeMin": 540, "rangeLen": 780}
+        out = run_js(_fns("reqBarAbsMinFromRatio"),
+                     f"JSON.stringify([0, 0.01, 0.37, 1].map((r) => reqBarAbsMinFromRatio(r, {json.dumps(rng)})))")
+        vals = json.loads(out)
+        for v in vals:
+            assert v % 15 == 0, f"{v} が15分単位でない"
+
+    def test_clamps_ratio_outside_zero_one(self):
+        """ratio が範囲外でも 0..rangeLen にクランプする（reqBarTimeFromRatio と同じ
+        クランプをここでも保つ）。"""
+        rng = {"minH": 9, "maxH": 22, "rangeMin": 540, "rangeLen": 780}
+        out = run_js(_fns("reqBarAbsMinFromRatio"),
+                     f"JSON.stringify([reqBarAbsMinFromRatio(-1, {json.dumps(rng)}), "
+                     f"reqBarAbsMinFromRatio(2, {json.dumps(rng)})])")
+        assert json.loads(out) == [540, 1320]
+
+
+class TestReqBarOvernightEnd:
+    """reqBarRange/reqBarPosition/reqBarLanes/横ドラッグの endAbsMin 初期化、
+    4箇所に複製されていた『end<=start なら+1440』イディオムを1関数に寄せた
+    （レビュー指摘 Minor）。"""
+
+    def test_same_day_end_is_unchanged(self):
+        out = run_js(_fns("reqBarOvernightEnd"), "String(reqBarOvernightEnd(540, 1020))")
+        assert int(out.strip()) == 1020
+
+    def test_end_before_start_wraps_to_next_day(self):
+        out = run_js(_fns("reqBarOvernightEnd"), "String(reqBarOvernightEnd(1020, 120))")
+        assert int(out.strip()) == 120 + 1440
+
+    def test_end_equal_start_wraps_to_next_day(self):
+        """end == start は「0分の勤務」ではなく丸一日（日またぎ最大幅）とみなす。
+        既存の reqBarRange/reqBarPosition/reqBarLanes と同じ挙動を保つ。"""
+        out = run_js(_fns("reqBarOvernightEnd"), "String(reqBarOvernightEnd(540, 540))")
+        assert int(out.strip()) == 540 + 1440
+
+
 class TestReqBarTimeFromRatio:
     def test_snaps_to_15min(self):
         rng = {"minH": 9, "maxH": 22, "rangeMin": 540, "rangeLen": 780}
-        out = run_js(_fns("reqBarTimeFromRatio"),
+        out = run_js(_fns("reqBarTimeFromRatio", "reqBarAbsMinFromRatio"),
                      f"JSON.stringify([0, 0.01, 0.5, 1].map((r) => reqBarTimeFromRatio(r, {json.dumps(rng)})))")
         vals = json.loads(out)
         for v in vals:
@@ -265,12 +330,12 @@ class TestReqBarTimeFromRatio:
 
     def test_start_and_end_of_range(self):
         rng = {"minH": 9, "maxH": 22, "rangeMin": 540, "rangeLen": 780}
-        out = run_js(_fns("reqBarTimeFromRatio"),
+        out = run_js(_fns("reqBarTimeFromRatio", "reqBarAbsMinFromRatio"),
                      f"JSON.stringify([reqBarTimeFromRatio(0, {json.dumps(rng)}), reqBarTimeFromRatio(1, {json.dumps(rng)})])")
         assert json.loads(out) == ["09:00", "22:00"]
 
     def test_past_midnight_wraps(self):
         rng = {"minH": 9, "maxH": 26, "rangeMin": 540, "rangeLen": 1020}
-        out = run_js(_fns("reqBarTimeFromRatio"),
+        out = run_js(_fns("reqBarTimeFromRatio", "reqBarAbsMinFromRatio"),
                      f"String(reqBarTimeFromRatio(1, {json.dumps(rng)}))")
         assert out.strip() == "02:00", "翌日の時刻が 26:00 のまま返っている"

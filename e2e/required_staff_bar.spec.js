@@ -539,16 +539,151 @@ test('時間帯を変えると全曜日に影響する旨が出る', async ({ pa
   expect(title).toContain('全曜日');
 });
 
+// レビュー指摘 I4: 早番の終了は元々17:00（分=00）で、00は15の倍数のため、
+// 「実は何も更新されていない」壊れ方を `% 15 === 0` だけでは検出できなかった
+// （実測確認済み: drag.p.end_time への書き込みを消しても本テストは green のままだった）。
+// 実際に値が変わったことも見る。ドラッグ量も、元の `trackBox.width/40` から
+// ハンドル半幅を引いた実効移動量がビューポート幅に依存して0になりかねない
+// 問題があったため、ハンドル中心からの相対移動量として明示的に30分ぶん動かす。
 test('時間帯は15分単位にスナップする', async ({ page }) => {
+  const row = page.locator('.rq-row').filter({ has: page.locator('.rq-count[data-name="早番"]') });
+  const before = await row.locator('.rq-row-time').textContent();
+
   const box = await page.locator('.rq-bar[data-name="早番"] .rq-drag-end').boundingBox();
   const trackBox = await page.locator('#reqBarTrack').boundingBox();
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  const handleCenterX = box.x + box.width / 2;
+  const pxPerMin = trackBox.width / (13 * 60);   // この仕込みは9-22時の13時間軸
+
+  await page.mouse.move(handleCenterX, box.y + box.height / 2);
   await page.mouse.down();
-  await page.mouse.move(box.x + trackBox.width / 40, box.y + box.height / 2, { steps: 5 });
+  await page.mouse.move(handleCenterX + pxPerMin * 30, box.y + box.height / 2, { steps: 5 });
   await page.mouse.up();
 
-  const t = await page.textContent('.rq-row[data-pid] .rq-row-time');
-  const m = t.match(/(\d{2}):(\d{2})\s*〜\s*(\d{2}):(\d{2})/);
+  const after = await row.locator('.rq-row-time').textContent();
+  expect(after).not.toBe(before);
+  const m = after.match(/(\d{2}):(\d{2})\s*〜\s*(\d{2}):(\d{2})/);
   expect(m).not.toBeNull();
   expect(parseInt(m[4], 10) % 15).toBe(0);
+});
+
+// レビュー指摘 I1（Spec ❌）: 15分クランプが構造的に死んでおり、開始を跨いで
+// 大きくドラッグすると「日またぎ」と誤認して時間帯が反転・膨張してしまう
+// バグがあった。夜番(17:00-22:00)の終了ハンドルを自分の開始(17:00)より
+// さらに左（軸の左端寄り）まで大きく動かす。ドラッグ中は各ステップで
+// 最小幅ガードが働くため、縮む方向には動くが「開始+15分」を下回ることは
+// なく、逆転・日またぎ扱いにもならないはず。
+test('右端を開始より左へ大きくドラッグしても、時間帯が反転・膨張しない', async ({ page }) => {
+  const row = page.locator('.rq-row').filter({ has: page.locator('.rq-count[data-name="夜番"]') });
+
+  const box = await page.locator('.rq-bar[data-name="夜番"] .rq-drag-end').boundingBox();
+  const trackBox = await page.locator('#reqBarTrack').boundingBox();
+  expect(box).not.toBeNull();
+
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  // 軸の左端付近（夜番の開始17:00よりずっと左）まで大きく動かす。
+  await page.mouse.move(trackBox.x + 2, box.y + box.height / 2, { steps: 10 });
+  await page.mouse.up();
+
+  const after = await row.locator('.rq-row-time').textContent();
+  const m = after.match(/(\d{2}):(\d{2})\s*〜\s*(\d{2}):(\d{2})/);
+  expect(m).not.toBeNull();
+  const startMin = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  let endMin = parseInt(m[3], 10) * 60 + parseInt(m[4], 10);
+  if (endMin <= startMin) endMin += 1440;
+  // 最小幅15分は下回らない。
+  expect(endMin - startMin).toBeGreaterThanOrEqual(15);
+  // 開始を跨いだ「日またぎ」誤認（壊れたガードでの実測は16h）は起きない。
+  expect(endMin - startMin).toBeLessThan(15 * 60);
+  // 開始時刻(17:00)自体は動いていない（このハンドルは終了だけを動かす）。
+  expect(`${m[1]}:${m[2]}`).toBe('17:00');
+});
+
+// レビュー指摘 I2: ハンドルをバー内側に収めた副作用で、.rq-drag-top/
+// .rq-drag-start/.rq-drag-end の3つがDOM順（top→start→end）でヒット優先度が
+// 決まり、左右ハンドルが上端ハンドルの実効領域（overflow:hiddenでバー内側の
+// 上8pxに切り取られている）を覆ってしまうと、幅24px未満の細いバーで上下
+// ドラッグ（人数変更）が一切できなくなる。15分幅のパターンはこのTaskで新たに
+// 作れるようになったばかりで、狭い画面ではこれが容易に起こる。
+test('細いバー（15分幅など）でも上端ドラッグで人数を変えられる', async ({ page, request }) => {
+  const res = await request.post('/api/login', {
+    data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
+  });
+  const token = (await res.json()).token;
+  await request.post('/api/shop/patterns', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { pattern_name: '深夜', start_time: '22:00', end_time: '22:15', required_staff: 2 },
+  });
+  await page.reload();
+  await page.waitForSelector('#appView:not(.d-none)');
+  await page.click('.side-item[data-screen="settings"]');
+  await page.waitForSelector('#reqBarTrack');
+
+  // このテストが本当に「細いバー」を検証できているかの前提チェック。
+  // ここが崩れるとテストが何も守らなくなる。
+  const barWidth = await page.evaluate(() =>
+    document.querySelector('.rq-bar[data-name="深夜"]').getBoundingClientRect().width);
+  expect(barWidth).toBeLessThan(24);
+
+  const box = await page.locator('.rq-bar[data-name="深夜"] .rq-drag-top').boundingBox();
+  expect(box).not.toBeNull();
+
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2, box.y - 28, { steps: 6 });
+  await page.mouse.up();
+
+  const v = await page.inputValue('.rq-count[data-name="深夜"]');
+  expect(parseInt(v, 10)).toBeGreaterThan(2);
+});
+
+// レビュー指摘 I3: 時間帯ドラッグ中は段(data-lane/bottom)を凍結する設計だが
+// （installReqBarDrag参照）、pointerup で段が正しく組み直ることを守るテストが
+// 無かった（onUp内のrenderReqBarTrack呼び出しを丸ごと消しても全テストが
+// green のままだった）。
+// 仕込みはbeforeEachの早番(09-17)・夜番(17-22)をそのまま使う。この2つは
+// ちょうど17:00で接するだけ（reqBarLanesはend<=startを「空いている」と
+// みなす）なのでドラッグ前は同じ段を共有している。
+// （最初、別パターン「中番」を追加する設計で試したが、reqBarLanesの貪欲法は
+// 段の再利用が時系列で連鎖するため、早番・夜番が隣接しているだけで
+// 「早番と重ならない新規パターン」でも早番と別の段に割り当てられてしまい、
+// ドラッグ前から段が違う＝再割り当てを1度も経ずにgreenになってしまう
+// 落とし穴があった。beforeEachのデータだけで前提が単純に成立するこの形に
+// 直した。）
+// 早番の終了を17:00→18:00まで伸ばして夜番の領域へ食い込ませ、初めて
+// 重なるようにしたうえで、確定後に段が組み直ることを検証する。
+test('時間帯ドラッグで重なりが生じると、確定後に段が組み直る', async ({ page }) => {
+  // 前提確認: ドラッグ前は早番(09-17)と夜番(17-22)は接するだけで重ならないため
+  // 同じ段のはず。
+  const lanesBefore = await page.evaluate(() => {
+    const get = (n) => document.querySelector(`.rq-bar[data-name="${n}"]`).dataset.lane;
+    return { asa: get('早番'), yoru: get('夜番') };
+  });
+  expect(lanesBefore.asa).toBe(lanesBefore.yoru);
+
+  const box = await page.locator('.rq-bar[data-name="早番"] .rq-drag-end').boundingBox();
+  const trackBox = await page.locator('#reqBarTrack').boundingBox();
+  const handleCenterX = box.x + box.width / 2;
+  const pxPerMin = trackBox.width / (13 * 60);
+
+  await page.mouse.move(handleCenterX, box.y + box.height / 2);
+  await page.mouse.down();
+  // 17:00 → 18:00（夜番の領域に1時間食い込む）
+  await page.mouse.move(handleCenterX + pxPerMin * 60, box.y + box.height / 2, { steps: 10 });
+  await page.mouse.up();
+
+  // ドラッグ中は段を固定しているが、pointerup で再描画され、重なるように
+  // なった早番・夜番は別の段に組み直っているはず。
+  const rects = await page.evaluate(() => {
+    const get = (n) => document.querySelector(`.rq-bar[data-name="${n}"]`).getBoundingClientRect();
+    return { asa: get('早番'), yoru: get('夜番') };
+  });
+  const overlapsVertically = (a, b) => a.top < b.bottom && b.top < a.bottom;
+  expect(overlapsVertically(rects.asa, rects.yoru)).toBe(false);
+
+  const lanesAfter = await page.evaluate(() => {
+    const get = (n) => document.querySelector(`.rq-bar[data-name="${n}"]`).dataset.lane;
+    return { asa: get('早番'), yoru: get('夜番') };
+  });
+  expect(lanesAfter.asa).not.toBe(lanesAfter.yoru);
 });

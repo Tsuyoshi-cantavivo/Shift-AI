@@ -4219,6 +4219,15 @@ const REQ_BAR_MIN_PX = 6;
  *  ため、数px空ける（レビュー指摘 N2）。 */
 const REQ_BAR_LANE_GAP_PX = 4;
 
+/** 開始・終了（同日の生の分, 0-1439）から、日またぎを考慮した終了の絶対分を返す。
+ *  end <= start なら翌日側とみなし +1440 する。この考え方は reqBarRange /
+ *  reqBarPosition / reqBarLanes / 横ドラッグの endAbsMin 初期化の4箇所で
+ *  同じ if 文として複製されていた（レビュー指摘 Minor）。今後また複製が増えない
+ *  よう、ここ1箇所に寄せる。 */
+function reqBarOvernightEnd(startMin, endMin) {
+  return endMin <= startMin ? endMin + 1440 : endMin;
+}
+
 /** 時間帯パターン群から時間軸の範囲を返す。
  *  end <= start は日またぎとみなし、翌日側（+24h）まで軸を伸ばす。
  *  時刻パースは既存の _parseTimeParts（public/app.js:766付近）をそのまま使う。
@@ -4231,8 +4240,7 @@ function reqBarRange(patterns) {
     const [eh, em] = _parseTimeParts(p.end_time);
     if (isNaN(sh) || isNaN(eh)) return;
     const sMin = sh * 60 + sm;
-    let eMin = eh * 60 + em;
-    if (eMin <= sMin) eMin += 1440;   // 日またぎ
+    const eMin = reqBarOvernightEnd(sMin, eh * 60 + em);
     minH = Math.min(minH, Math.floor(sMin / 60));
     maxH = Math.max(maxH, Math.ceil(eMin / 60));
   });
@@ -4248,8 +4256,7 @@ function reqBarPosition(startTime, endTime, range) {
   const [eh, em] = _parseTimeParts(endTime);
   if (isNaN(sh) || isNaN(eh)) return { left: 0, width: 0 };
   const sMin = sh * 60 + sm;
-  let eMin = eh * 60 + em;
-  if (eMin <= sMin) eMin += 1440;
+  const eMin = reqBarOvernightEnd(sMin, eh * 60 + em);
   const rawLeft = ((sMin - range.rangeMin) / range.rangeLen) * 100;
   const rawRight = ((eMin - range.rangeMin) / range.rangeLen) * 100;
   const left = Math.max(0, rawLeft);
@@ -4306,10 +4313,10 @@ function reqBarLanes(patterns) {
   const items = (patterns || []).map((p) => {
     const [sh, sm] = _parseTimeParts(p.start_time);
     const [eh, em] = _parseTimeParts(p.end_time);
-    let s = sh * 60 + sm;
-    let e = eh * 60 + em;
-    if (isNaN(s) || isNaN(e)) return null;
-    if (e <= s) e += 1440;   // 日またぎ
+    const s = sh * 60 + sm;
+    const eRaw = eh * 60 + em;
+    if (isNaN(s) || isNaN(eRaw)) return null;
+    const e = reqBarOvernightEnd(s, eRaw);
     return { id: p.id, s, e };
   }).filter(Boolean);
   items.sort((a, b) => a.s - b.s || a.e - b.e);
@@ -4324,11 +4331,27 @@ function reqBarLanes(patterns) {
   return { lane, laneCount: Math.max(1, laneEnds.length) };
 }
 
-/** 軸上の X 位置（0..1 の比率）を "HH:MM" に変換する。15分単位に丸める。
- *  拡張時間（24時以降）は翌日の時刻として返す。 */
-function reqBarTimeFromRatio(ratio, range) {
+/** 軸上の X 位置（0..1 の比率）を「軸の原点（0時）からの絶対分」に変換する。
+ *  15分単位に丸める。24時を超えても折り返さない（例: 26:00 なら 1560）。
+ *  丸めの式はここ1箇所だけに置き、reqBarTimeFromRatio はこれを "HH:MM" に
+ *  整形するだけの薄いラッパーにする。
+ *  【レビュー指摘 I1】横ドラッグの妥当性判定（最小幅15分・start<end）は、
+ *  一度 "HH:MM"（24時で必ず折り返す）に整形した値を使って判定してはいけない。
+ *  折り返した値だけを見ると、「24時以降への正当な延長」（22:00→26:00）と
+ *  「開始を跨いで逆転した」（17:00→09:00 のような誤操作）を区別できず、
+ *  既存の「end <= start なら+1440」というイディオムを折り返し後の値に適用すると
+ *  後者を前者と誤認して素通りしてしまう（15分クランプが実質死んだガードになる）。
+ *  絶対分のまま比較すれば、この2つは自然に区別できる。 */
+function reqBarAbsMinFromRatio(ratio, range) {
   const r = Math.max(0, Math.min(1, ratio));
-  const min = Math.round((range.rangeMin + r * range.rangeLen) / 15) * 15;
+  return Math.round((range.rangeMin + r * range.rangeLen) / 15) * 15;
+}
+
+/** 軸上の X 位置（0..1 の比率）を "HH:MM" に変換する。15分単位に丸める。
+ *  拡張時間（24時以降）は翌日の時刻として返す（保存形式は日をまたがない
+ *  "HH:MM" のため、ここで初めて24時で折り返す）。 */
+function reqBarTimeFromRatio(ratio, range) {
+  const min = reqBarAbsMinFromRatio(ratio, range);
   const h = Math.floor(min / 60) % 24;
   const m = min % 60;
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
@@ -4698,25 +4721,25 @@ function installReqBarDrag(host, body) {
 
   const onMoveTime = (ev) => {
     const ratio = (ev.clientX - drag.trackRect.left) / drag.trackRect.width;
-    const snapped = reqBarTimeFromRatio(ratio, drag.range);
-    if (snapped === drag.lastTime) return;
-    const [h, m] = _parseTimeParts(snapped);
-    const snappedMin = h * 60 + m;
+    // 【レビュー指摘 I1】妥当性判定は "HH:MM" に整形する前の絶対分で行う。
+    // reqBarAbsMinFromRatio は24時で折り返さないため、開始/終了どちらを
+    // 引きずっても「正当な延長」と「逆転」を取り違えない。
+    const absMin = reqBarAbsMinFromRatio(ratio, drag.range);
+    if (absMin === drag.lastAbsMin) return;
 
     if (drag.mode === 'end') {
-      // 開始（固定）を基準に、既存の reqBarRange/reqBarLanes と同じ
-      // 「end <= start なら翌日側」という考え方で日またぎを判定する。
-      let endMin = snappedMin;
-      if (endMin <= drag.startMin) endMin += 1440;
-      if (endMin - drag.startMin < 15) return;   // 最小幅は15分。この操作は無視する
-      drag.p.end_time = snapped;
+      // 開始（固定・drag.startMin はドラッグ開始時の p.start_time をそのまま
+      // 分に直したもの。絶対分の frame は常に「開始は日0」で揃っているので
+      // ここでの折り返し判定は不要）を基準に、最小幅15分を満たすか見る。
+      if (absMin - drag.startMin < 15) return;   // 最小幅は15分。この操作は無視する
+      drag.p.end_time = reqBarTimeFromRatio(ratio, drag.range);
     } else {
       // 終了（固定・endAbsMin としてドラッグ開始時に日またぎ込みで確定済み）
-      // を基準に、新しい開始が近づきすぎないか確認する。
-      if (drag.endAbsMin - snappedMin < 15) return;
-      drag.p.start_time = snapped;
+      // を基準に、新しい開始が近づきすぎないか絶対分のまま確認する。
+      if (drag.endAbsMin - absMin < 15) return;
+      drag.p.start_time = reqBarTimeFromRatio(ratio, drag.range);
     }
-    drag.lastTime = snapped;
+    drag.lastAbsMin = absMin;
     drag.changed = true;
     reqBarState.dirty = true;
 
@@ -4803,8 +4826,8 @@ function installReqBarDrag(host, body) {
           range: reqBarRange(reqBarState.patterns),
           trackRect: track.getBoundingClientRect(),
           startMin,
-          endAbsMin: endRawMin <= startMin ? endRawMin + 1440 : endRawMin,
-          lastTime: null,
+          endAbsMin: reqBarOvernightEnd(startMin, endRawMin),
+          lastAbsMin: null,
           changed: false,
         };
         bar.classList.add('rq-dragging');
