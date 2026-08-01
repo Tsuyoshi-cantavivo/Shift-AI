@@ -27,9 +27,16 @@ def _read_appjs():
     return _read("public/app.js")
 
 
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+
+
 def _print_css():
-    """style.css の @media print ブロックの中身をすべて連結して返す。"""
-    css = _read_css()
+    """style.css の @media print ブロックの中身をすべて連結して返す。
+
+    コメント文中の "@media print"（style.css:998 など）をブロック開始と
+    誤認しないよう、先にコメントを落とす。
+    """
+    css = _CSS_COMMENT_RE.sub("", _read_css())
     parts = []
     i = 0
     while True:
