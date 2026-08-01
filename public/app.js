@@ -1142,20 +1142,30 @@ function buildStaticTimelineHtml(list, anchorDate) {
 }
 
 const PRINT_ORIENTATION_KEY = 'shift_print_orientation';
+// 実行中の選択値。localStorage が使えない環境（プライベートモード等）でも
+// トグルが効くように、真の現在値はこちらを優先する。
+// localStorage は「次回起動時に復元する」ためだけに使う。
+let _printOrientation = null;
 
-/** 保存されている用紙の向きを返す。既定は横（従来の @page と同じ）。 */
+/** 現在の用紙の向きを返す。初回だけ localStorage から復元する。既定は横。 */
 function getPrintOrientation() {
+  if (_printOrientation) return _printOrientation;
   try {
-    return localStorage.getItem(PRINT_ORIENTATION_KEY) === 'portrait' ? 'portrait' : 'landscape';
+    _printOrientation = localStorage.getItem(PRINT_ORIENTATION_KEY) === 'portrait' ? 'portrait' : 'landscape';
   } catch (e) {
-    return 'landscape';  // プライベートモード等で localStorage が使えない場合
+    _printOrientation = 'landscape';  // プライベートモード等で localStorage が使えない場合
   }
+  return _printOrientation;
 }
 
-/** 用紙の向きを保存して即座に反映する。 */
+/** 用紙の向きを切り替えて即座に反映する。保存に失敗しても表示は切り替わる。 */
 function setPrintOrientation(value) {
-  const o = value === 'portrait' ? 'portrait' : 'landscape';
-  try { localStorage.setItem(PRINT_ORIENTATION_KEY, o); } catch (e) { /* 保存できなくても表示は切り替える */ }
+  _printOrientation = value === 'portrait' ? 'portrait' : 'landscape';
+  try {
+    localStorage.setItem(PRINT_ORIENTATION_KEY, _printOrientation);
+  } catch (e) {
+    // 保存できないのは次回起動時に復元できないというだけ。今回の切替は _printOrientation が担う。
+  }
   applyPrintOrientation();
 }
 
@@ -1174,6 +1184,8 @@ function applyPrintOrientation() {
   if (pv) pv.dataset.orientation = o;
   const label = document.getElementById('printOrientLabel');
   if (label) label.textContent = (o === 'portrait' ? '縦' : '横');
+  const btn = document.getElementById('printOrientBtn');
+  if (btn) btn.title = (o === 'portrait' ? '現在: 縦向き / クリックで横向きに' : '現在: 横向き / クリックで縦向きに');
 }
 // アプリ起動時（スクリプト読み込み時）にも保存済みの向きを反映しておく。
 // #printView はシフト管理画面を開く前から存在する静的要素（index.html）で、

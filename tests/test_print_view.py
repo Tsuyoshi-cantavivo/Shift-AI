@@ -129,11 +129,22 @@ class TestPrintOrientation:
 
     def test_orientation_helpers_exist(self):
         js = _read_appjs()
+        # 呼び出しだけ残って定義が消えた場合も落とすため、定義の形で見る
         for name in ("getPrintOrientation", "setPrintOrientation", "applyPrintOrientation"):
-            assert name in js, f"{name} が実装されていない"
+            assert re.search(r"function\s+" + name + r"\s*\(", js), f"{name} が定義されていない"
 
     def test_orientation_toggle_button_exists(self):
-        assert "printOrientBtn" in _read_appjs()
+        # addEventListener 側だけ残ってボタンHTMLが消えた場合も落とすため、id 属性で見る
+        assert 'id="printOrientBtn"' in _read_appjs()
+
+    def test_orientation_applied_at_load(self):
+        """スクリプト読み込み時にも向きを適用していること。
+
+        シフト管理画面を一度も開かずに Ctrl+P したとき、@page が保存値ではなく
+        style.css の既定（landscape）に落ちてしまうのを防ぐ。
+        """
+        assert re.search(r"^applyPrintOrientation\(\);", _read_appjs(), re.M), \
+            "トップレベルで applyPrintOrientation() を呼んでいない"
 
     def test_portrait_layout_rules_exist(self):
         assert 'data-orientation="portrait"' in _print_css(), \

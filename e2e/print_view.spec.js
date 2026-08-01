@@ -173,3 +173,26 @@ test('選んだ向きは再読み込み後も保たれる', async ({ page }) => 
 
   await expect(page.locator('#printOrientLabel')).toHaveText('縦');
 });
+
+test('localStorage に保存できない環境でも向きを切り替えられる', async ({ page }) => {
+  // プライベートモード等で setItem が例外を投げる状況を再現する。
+  // 実行中の選択値を localStorage に依存させていると、ここでトグルが無反応になる。
+  await page.addInitScript(() => {
+    const orig = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (k, v) {
+      if (k === 'shift_print_orientation') throw new Error('QuotaExceededError');
+      return orig.call(this, k, v);
+    };
+  });
+  await page.reload();
+  await page.waitForSelector('#appView:not(.d-none)');
+  await page.click('.side-item[data-screen="shifts"]');
+  await page.waitForSelector('#printOrientBtn');
+
+  await expect(page.locator('#printOrientLabel')).toHaveText('横');
+  await page.click('#printOrientBtn');
+  await expect(page.locator('#printOrientLabel')).toHaveText('縦');
+
+  const rule = await page.evaluate(() => document.getElementById('printPageRule')?.textContent);
+  expect(rule).toContain('A4 portrait');
+});
