@@ -106,6 +106,22 @@ test('印刷ボタンを押していない状態の Ctrl+P でも白紙になら
   await expect(page.getByText('シフト表を印刷するには')).toHaveCount(1);
 });
 
+test('印刷メディアでタイムラインが横にはみ出さない', async ({ page }) => {
+  await openPrint(page);
+  await page.emulateMedia({ media: 'print' });
+
+  const overflow = await page.evaluate(() => {
+    const wrap = document.querySelector('#printView .tl-wrap');
+    if (!wrap) return null;
+    return { scrollWidth: wrap.scrollWidth, clientWidth: wrap.clientWidth };
+  });
+  expect(overflow).not.toBeNull();
+  // 中身が枠に収まっていること(切り捨てが起きていない)
+  expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+
+  await page.emulateMedia({ media: 'screen' });
+});
+
 test('案内ページの後に印刷ボタンを押すと本物の印刷内容に差し替わる', async ({ page }) => {
   // 案内ページ（目印 data-print-placeholder 付き）を先に出してから、
   // 印刷ボタンで本物の内容が上書きされ、案内ページが残らないことを確認する。

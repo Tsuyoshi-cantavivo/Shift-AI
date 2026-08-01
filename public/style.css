@@ -1247,8 +1247,11 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
   .print-page-header .print-shop { font-size: 14px; font-weight: 700; color: #111; }
 
   /* 印刷用タイムライン（画面用 .tl-* を印刷時に上書き） */
-  .print-page .tl-wrap { padding: 0; }
-  .print-page .tl-axis-row { margin-bottom: 6px; }
+  /* 画面用の overflow-x:auto と min-width:480px は印刷でも生きており、
+     用紙幅や縮小率で印刷ビューポートが 480px を割ると帯の右側が
+     ページ分割されずに切り捨てられる。印刷では両方とも解除する。 */
+  .print-page .tl-wrap { padding: 0; overflow-x: visible; }
+  .print-page .tl-axis-row { margin-bottom: 6px; min-width: 0; }
   .print-page .tl-name {
     width: 72px; flex: 0 0 72px;
     font-size: 11px; font-weight: 700; color: #111;
@@ -1265,7 +1268,7 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
     border-left: none; border-right: 1px solid #BBB;
     padding-left: 0; padding-right: 2px;
   }
-  .print-page .tl-row { margin-bottom: 8px; }
+  .print-page .tl-row { margin-bottom: 8px; min-width: 0; }
   /* 地色は background-color で指定する。ショートハンドの background を使うと
      .tl-track の background-image（1h/4hグリッド）まで none に落ちて、
      配置帯のシグネチャである1時間グリッドが紙から丸ごと消える。

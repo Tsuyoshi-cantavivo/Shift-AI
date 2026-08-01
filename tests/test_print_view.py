@@ -103,3 +103,22 @@ class TestPrintDomLifecycle:
     def test_print_payload_is_retained(self):
         assert re.search(r"printPayload\s*=", _read_appjs()), \
             "印刷内容を appState.printPayload に保持していない"
+
+
+class TestPrintTimelineNotClipped:
+    """印刷時にタイムラインが切り捨てられないこと。
+
+    画面用の .tl-wrap は overflow-x:auto、.tl-row は min-width:480px を持つ。
+    印刷でこれが残ると、用紙幅や縮小率によって帯の右側が丸ごと消える。
+    """
+
+    def test_overflow_is_released_in_print(self):
+        assert re.search(
+            r"\.print-page\s+\.tl-wrap\s*\{[^}]*overflow-x:\s*visible", _print_css()
+        ), "印刷で .tl-wrap の overflow-x を解除していない"
+
+    def test_min_width_is_released_in_print(self):
+        css = _print_css()
+        assert re.search(r"\.print-page\s+\.tl-row[^{]*\{[^}]*min-width:\s*0", css) \
+            or re.search(r"\.print-page\s+\.tl-axis-row[^{]*\{[^}]*min-width:\s*0", css), \
+            "印刷で .tl-row / .tl-axis-row の min-width を解除していない"
