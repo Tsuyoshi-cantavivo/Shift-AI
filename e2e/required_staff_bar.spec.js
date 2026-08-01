@@ -734,3 +734,71 @@ test('0人のバーでも左右ハンドルが掴めて時間帯を変えられ�
   const after = await row.locator('.rq-row-time').textContent();
   expect(after).not.toBe(before);
 });
+
+// ============================================================
+// Task 7: 時間帯0件のときの誤表示（public/app.js の loadShortage /
+// attendanceShortageKpi）。新規店舗は shift_patterns がゼロ件で始まるため、
+// _computeHourlyGaps が常に空配列を返し、シフト画面の不足コマ欄と
+// ダッシュボードKPIの両方が緑のチェックで「不足なし・充足」と嘘をついていた。
+// ============================================================
+test('時間帯0件のときシフト画面が「充足」と嘘をつかない', async ({ page, request }) => {
+  const res = await request.post('/api/login', {
+    data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
+  });
+  const token = (await res.json()).token;
+  await clearPatterns(request, token);
+
+  await page.reload();
+  await page.waitForSelector('#appView:not(.d-none)');
+  await page.click('.side-item[data-screen="shifts"]');
+  // #shortageBox は最初「読み込み中...」で描画され、loadShortage の非同期
+  // 完了後に案内へ差し替わる。取り替わるまで待つ（セレクタの出現だけでは
+  // まだプレースホルダのままのタイミングを拾ってしまう）。
+  await page.waitForFunction(() => {
+    const box = document.getElementById('shortageBox');
+    return box && !box.textContent.includes('読み込み中');
+  });
+
+  const text = await page.textContent('#shortageBox');
+  expect(text).not.toContain('全時間帯充足');
+  expect(text).toContain('時間帯が未設定');
+});
+
+test('時間帯が未設定の案内から設定画面へ遷移できる', async ({ page, request }) => {
+  const res = await request.post('/api/login', {
+    data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
+  });
+  const token = (await res.json()).token;
+  await clearPatterns(request, token);
+
+  await page.reload();
+  await page.waitForSelector('#appView:not(.d-none)');
+  await page.click('.side-item[data-screen="shifts"]');
+  await page.waitForFunction(() => {
+    const box = document.getElementById('shortageBox');
+    return box && !box.textContent.includes('読み込み中');
+  });
+
+  await page.click('#shortageGoSettings');
+  await page.waitForSelector('#reqBarTrack, #reqBarEmpty');
+  await expect(page.locator('#reqBarEmpty')).toBeVisible();
+});
+
+test('時間帯0件のときダッシュボードKPIが「充足」と嘘をつかない', async ({ page, request }) => {
+  const res = await request.post('/api/login', {
+    data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
+  });
+  const token = (await res.json()).token;
+  await clearPatterns(request, token);
+
+  await page.reload();
+  await page.waitForSelector('#appView:not(.d-none)');
+  await page.click('.side-item[data-screen="dashboard"]');
+  await page.waitForSelector('#kpiGrid .kpi-card');
+
+  const card = page.locator('#kpiGrid .kpi-card').filter({ hasText: '今日の出勤' });
+  await expect(card).toBeVisible();
+  const text = await card.textContent();
+  expect(text).not.toContain('充足');
+  expect(text).toContain('時間帯未設定');
+});

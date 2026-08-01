@@ -254,6 +254,16 @@ function kpiCard(icon, label, value, sub, variant) {
   </div>`;
 }
 
+/* ダッシュボードKPI「今日の出勤」の補足テキストと色を決める。
+   時間帯（shift_patterns）が0件だと不足計算の元になるパターンが無いため、
+   サーバ側の today_shortage は常に0を返す。それをそのまま「充足」と表示すると、
+   時間帯を1つも設定していない新規店舗でも緑で「充足」と嘘をつくことになる。
+   hasPatterns で区別し、未設定時は専用の文言・色を返す。 */
+function attendanceShortageKpi(hasPatterns, todayShortage) {
+  if (!hasPatterns) return { text: '時間帯未設定', variant: 'amber' };
+  return todayShortage ? { text: `${todayShortage}枠不足`, variant: 'amber' } : { text: '充足', variant: 'green' };
+}
+
 function pageHead(title, icon, sub) {
   return `<div class="page-head"><h4><i class="bi ${icon}"></i> ${esc(title)}</h4>${sub ? `<div class="sub">${esc(sub)}</div>` : ''}</div>`;
 }
@@ -1852,6 +1862,20 @@ async function loadShortage(box, start, end) {
   try {
     // 時間帯単位の不足を計算（「夜(17:00)」のような区分単位ではなく）
     await ensureBusinessHours();
+    if (!isAlive(tok) || !box.isConnected) return;
+    // 時間帯（shift_patterns）が1件も無いと _computeHourlyGaps は常に空配列を
+    // 返すため、以降の判定を素通りすると常に「不足なし」の表示になってしまう。
+    // 新規店舗は時間帯もシフトもゼロ件で始まるため、店長が最初に見る画面が
+    // 緑のチェックで嘘をつくことになる。ここで先に案内を出して抜ける。
+    if (!(appState.patterns || []).length) {
+      box.innerHTML = `<div class="info-box">
+        <i class="bi bi-exclamation-triangle"></i> 時間帯が未設定です。
+        設定 → シフト設定で時間帯を登録すると、ここに不足が表示されます。
+        <button class="btn btn-sm btn-light mt-2" id="shortageGoSettings">設定を開く</button>
+      </div>`;
+      box.querySelector('#shortageGoSettings')?.addEventListener('click', () => navigateTo('settings'));
+      return;
+    }
     const sd = await api(`/shop/shifts?start=${start}&end=${end}`);
     if (!isAlive(tok) || !box.isConnected) return;
     const allShifts = sd.shifts || [];
@@ -1945,14 +1969,19 @@ SCREENS.dashboard = async function (el) {
   })();
 
   try {
-    const d = await api('/shop/dashboard');
+    // ensureBusinessHours も並行して呼び、appState.patterns を今日の出勤KPIの
+    // 判定に使えるようにする（上のタイムライン用IIFEと呼び出しが競合しても、
+    // ここで自前で待つので順序に依存しない）。
+    const [d] = await Promise.all([api('/shop/dashboard'), ensureBusinessHours()]);
     // 画面遷移済み or DOM破棄済みなら更新中止（"Cannot set properties of null" 回避）
     if (!isAlive(tok) || !el.isConnected) return;
     // KPIs
+    const hasPatterns = !!(appState.patterns || []).length;
+    const attKpi = attendanceShortageKpi(hasPatterns, d.today_shortage);
     const kpiGrid = document.getElementById('kpiGrid');
     if (kpiGrid) kpiGrid.innerHTML =
       kpiCard('bi-people-fill', '稼働スタッフ', d.staff_count, `社員${d.employee_count} / バイト${d.part_time_count}`, 'indigo') +
-      kpiCard('bi-calendar-check', '今日の出勤', d.today_attendance + '名', d.today_shortage ? `${d.today_shortage}枠不足` : '充足', d.today_shortage ? 'amber' : 'green') +
+      kpiCard('bi-calendar-check', '今日の出勤', d.today_attendance + '名', attKpi.text, attKpi.variant) +
       kpiCard('bi-cash-stack', '今月の人件費', '¥' + (d.month_cost / 1000).toFixed(0) + 'K', `${d.month_hours}h`, 'indigo') +
       kpiCard('bi-inbox', '承認待ち', d.pending_approvals + d.pending_requests, '申請・希望', (d.pending_approvals + d.pending_requests) > 0 ? 'red' : 'green');
 
