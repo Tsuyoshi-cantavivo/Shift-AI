@@ -146,6 +146,98 @@ test('人数を増やしてもバーがトラックからはみ出さない', as
   expect(rects.barBottom).toBeLessThanOrEqual(rects.trackBottom + 1);
 });
 
+// レビュー Important（再々発防止）: syncReqBarTrackHeight は --rq-lane-h だけでなく
+// 各バーの bottom（renderReqBarTrack がインラインの静的値として焼き込む）も
+// 再計算しないと、重なる時間帯が2件以上あるとき編集中でない側のバーが
+// 古いオフセットのまま取り残される。上の「はみ出さない」テストは重ならない
+// 仕込み（早番09-17/夜番17-22）で実質1段のため、この問題を検知できない。
+// ここでは重なる時間帯を専用に追加して検証する（beforeEach の共通データは変えない）。
+test('重なる時間帯で人数を増やしてもバーが縦に重ならない', async ({ page, request }) => {
+  const res = await request.post('/api/login', {
+    data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
+  });
+  const token = (await res.json()).token;
+  await request.post('/api/shop/patterns', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { pattern_name: '中番', start_time: '12:00', end_time: '20:00', required_staff: 2 },
+  });
+  await page.reload();
+  await page.waitForSelector('#appView:not(.d-none)');
+  await page.click('.side-item[data-screen="settings"]');
+  await page.waitForSelector('#reqBarTrack');
+  await expect(page.locator('.rq-bar')).toHaveCount(3);
+
+  // 早番(09-17, 基本2人)を、現在の最大人数（夜番3人）を超える9人まで打つ。
+  // Locator.fill/pressSequentially はアクショナビリティ再試行でフォーカス
+  // 競合を自己修復することがあるため、click後にtoBeFocusedで前提を固定し、
+  // 実際の打鍵は page.keyboard で行う。
+  const inp = page.locator('.rq-count[data-name="早番"]');
+  await inp.click();
+  await expect(inp).toBeFocused();
+  await inp.fill('');
+  await page.keyboard.type('9');
+  await page.keyboard.press('Tab');
+
+  const rects = await page.evaluate(() => {
+    const get = (n) => document.querySelector(`.rq-bar[data-name="${n}"]`).getBoundingClientRect();
+    return { asa: get('早番'), naka: get('中番') };
+  });
+  const overlapsVertically = (a, b) => a.top < b.bottom && b.top < a.bottom;
+  // 早番(09-17)と中番(12-20)は時間が重なる → 縦にも重ならないはず。
+  // bottom を更新し忘れると、伸びた早番(0〜132px相当)が中番の古いbottom
+  // (52px相当)を飲み込み、ここが重なってしまう。
+  expect(overlapsVertically(rects.asa, rects.naka)).toBe(false);
+});
+
+test('重なる時間帯で人数を減らしても他方のバーがトラックに収まる', async ({ page, request }) => {
+  const res = await request.post('/api/login', {
+    data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
+  });
+  const token = (await res.json()).token;
+  const headers = { Authorization: `Bearer ${token}` };
+  // 早番の基本人数を先に9人にしておく（＝入力ハンドラを経由せず、初期の
+  // 全体再描画=renderReqBarTrackの時点でmaxCount=9として全バーのbottomが
+  // 一度だけ正しく焼き込まれる状態を作る）。ここでtypeで9まで増やしてから
+  // 2まで減らすと、最終maxCountが初期値(3)と偶然一致し、「更新し忘れた
+  // 古いbottom」と「本来あるべき値」が同じになって検知できない
+  // （実測で確認済み。テスト設計上の罠）。
+  const patternsRes = await (await request.get('/api/shop/patterns', { headers })).json();
+  const asa = patternsRes.patterns.find((p) => p.pattern_name === '早番');
+  await request.put(`/api/shop/patterns/${asa.id}`, {
+    headers,
+    data: { pattern_name: '早番', start_time: '09:00', end_time: '17:00', required_staff: 9 },
+  });
+  await request.post('/api/shop/patterns', {
+    headers,
+    data: { pattern_name: '中番', start_time: '12:00', end_time: '20:00', required_staff: 2 },
+  });
+  await page.reload();
+  await page.waitForSelector('#appView:not(.d-none)');
+  await page.click('.side-item[data-screen="settings"]');
+  await page.waitForSelector('#reqBarTrack');
+  await expect(page.locator('.rq-bar')).toHaveCount(3);
+
+  // ここまでは全体再描画で maxCount=9 として正しく焼き込まれている
+  // （中番の bottom もこの時点の laneHeightPx を使って計算済み）。
+  // 早番を2人まで減らす、この1アクションだけで再現する。
+  const inp = page.locator('.rq-count[data-name="早番"]');
+  await inp.click();
+  await expect(inp).toBeFocused();
+  await inp.fill('');
+  await page.keyboard.type('2');
+  await page.keyboard.press('Tab');
+
+  const rects = await page.evaluate(() => {
+    const t = document.querySelector('#reqBarTrack').getBoundingClientRect();
+    const b = document.querySelector('.rq-bar[data-name="中番"]').getBoundingClientRect();
+    return { trackTop: t.top, trackBottom: t.bottom, barTop: b.top, barBottom: b.bottom };
+  });
+  // bottom を更新し忘れると、中番は9人だった頃の高いオフセットのまま残り、
+  // トラックが縮んだ分だけ上端からはみ出す。
+  expect(rects.barTop).toBeGreaterThanOrEqual(rects.trackTop - 1);
+  expect(rects.barBottom).toBeLessThanOrEqual(rects.trackBottom + 1);
+});
+
 // レビュー Minor N3: C1 のうち最も危険な経路。空欄のまま離れると
 // parseInt('')=NaN → 0（＝Task1の契約で「募集しない」）に誤って
 // 保存されかねない。直前の正常値に戻ることを検証する。

@@ -4276,6 +4276,15 @@ function reqBarLaneHeightPx(maxCount) {
   return reqBarHeightPx(maxCount) + REQ_BAR_LANE_GAP_PX;
 }
 
+/** 段番号からバーの bottom(px)。renderReqBarTrack（初期描画）と
+ *  syncReqBarTrackHeight（入力中の軽量再同期）の両方がこれを呼ぶ。
+ *  bottom はバーごとにインラインの静的値として焼き込まれるため、
+ *  片方でしか式を計算しないと、編集中でない側のバーが古いオフセットの
+ *  まま取り残される（重なりの再発／トラックからのはみ出し。レビュー指摘）。 */
+function reqBarLaneBottomPx(laneIdx, maxCount) {
+  return laneIdx * reqBarLaneHeightPx(maxCount);
+}
+
 /** 曜日を考慮した実効必要人数。weekday が null なら基本値。 */
 function reqBarEffective(pattern, weekday) {
   const base = Math.max(0, Math.round(pattern.required_staff || 0));
@@ -4410,11 +4419,11 @@ function renderReqBarTrack(body) {
     const pos = reqBarPosition(p.start_time, p.end_time, range);
     const h = reqBarHeightPx(eff.count);
     const laneIdx = lanes.lane[String(p.id)] || 0;
-    const bottom = laneIdx * laneHeightPx;
+    const bottom = reqBarLaneBottomPx(laneIdx, maxCount);
     const titleBase = `${esc(p.pattern_name)} ${esc(p.start_time)}〜${esc(p.end_time)}`;
     const countLabel = esc(reqBarCountLabel(eff.count));
     return `<div class="rq-bar${eff.isOverride ? ' rq-override' : ''}${eff.count === 0 ? ' rq-zero' : ''}"
-      data-pid="${esc(p.id)}" data-name="${esc(p.pattern_name)}" data-title-base="${titleBase}"
+      data-pid="${esc(p.id)}" data-name="${esc(p.pattern_name)}" data-title-base="${titleBase}" data-lane="${laneIdx}"
       style="left:${pos.left.toFixed(2)}%;width:${pos.width.toFixed(2)}%;height:${h}px;bottom:${bottom}px"
       title="${titleBase} / ${countLabel}">
       <span class="rq-bar-label">${esc(p.pattern_name)} ${countLabel}</span>
@@ -4553,12 +4562,16 @@ function updateReqBarVisual(bar, count) {
   bar.title = `${titleBase} / ${countLabel}`;
 }
 
-/** トラックの高さ関連の CSS 変数だけを現在の state から再計算する。
+/** トラックの高さと、各バーの縦位置(bottom)を現在の state から再計算する。
  *  updateReqBarVisual は入力中にバー自身の高さしか更新しないため、これを
- *  呼ばないと、今表示されている最大人数を超えて入力したときにバーが
- *  トラックからはみ出したまま固定される（renderReqBarTrack を呼ばなくなった
- *  N1修正の副作用）。DOM ツリーは作り直さない（作り直すと入力中のフォーカスが
- *  飛び、C1が再発する）。
+ *  呼ばないと2つの回帰が起きる（レビュー指摘。N1修正の副作用）。
+ *    - トラックの高さ（--rq-lane-h）が古いままだと、今の最大人数を超えて
+ *      入力したときにバーがトラックからはみ出したまま固定される。
+ *    - bottom はバーごとにインラインの静的値として焼き込まれているため、
+ *      これも更新しないと、編集中でない側のバーが古いオフセットのまま
+ *      取り残される。最大人数が増えれば「I5で直したはずの重なり」が、
+ *      最大人数が減れば「はみ出し」が別方向で再発する。
+ *  DOM ツリーは作り直さない（作り直すと入力中のフォーカスが飛び、C1が再発する）。
  *  --rq-lanes（段数）は更新しない: reqBarLanes は start_time/end_time だけで
  *  決まり、必要人数（required_staff/weekday_required）を参照しないため、
  *  人数の変更だけでは段数は変わらない（reqBarLanes の実装で確認済み）。 */
@@ -4567,9 +4580,13 @@ function syncReqBarTrackHeight(body) {
   if (!track) return;
   const wd = reqBarState.weekday;
   const maxCount = Math.max(1, ...reqBarState.patterns.map((p) => reqBarEffective(p, wd).count));
-  // renderReqBarTrack と同じ reqBarLaneHeightPx() を呼ぶ。式を複製すると
-  // Task3・レビューN2で塞いだのと同じ「定数の食い違い」が再発する。
+  // renderReqBarTrack と同じ reqBarLaneHeightPx()/reqBarLaneBottomPx() を呼ぶ。
+  // 式を複製すると Task3・レビューN2で塞いだのと同じ「定数の食い違い」が再発する。
   track.style.setProperty('--rq-lane-h', `${reqBarLaneHeightPx(maxCount)}px`);
+  track.querySelectorAll('.rq-bar').forEach((bar) => {
+    const laneIdx = parseInt(bar.dataset.lane, 10) || 0;
+    bar.style.bottom = `${reqBarLaneBottomPx(laneIdx, maxCount)}px`;
+  });
 }
 
 /** 人数を設定して再描画する。± ボタンなど「再描画してよい」経路から使う。
