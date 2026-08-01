@@ -1498,6 +1498,54 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 .wti-detail-entry + .wti-detail-entry { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--rule); }
 .wti-summary-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 
+/* Task5: 画像取り込みゾーン（ステップ1、テキスト貼り付け欄の上）。
+   点線の枠は「ここへドロップ/貼り付け」を示す既存UIパターンが無いため新規に
+   起こす。色は既存トークンのみ使用（新規トークンを増やさない方針は既存 wti-* と
+   同じ）。コントラスト検査（tests/test_design_tokens.py）は文字色/地色の組を見る
+   ため、既に検証済みの組み合わせ（--ink-2 on --paper 等）を踏襲する。 */
+.wti-image-drop {
+  border: 1.5px dashed var(--rule);
+  border-radius: var(--radius);
+  background: var(--paper);
+  padding: 16px 12px;
+  text-align: center;
+  transition: border-color .15s ease, background-color .15s ease;
+}
+/* D&D中のハイライト。JSがdragover/dropで付け外しする（section 3 dropEl参照）。 */
+.wti-image-drop.dragover { border-color: var(--info); background: var(--surface); }
+.wti-image-drop-icon { font-size: 1.6rem; color: var(--ink-2); margin-bottom: 4px; }
+.wti-image-drop-text { color: var(--ink-2); font-size: .85rem; margin-bottom: 8px; }
+.wti-image-drop-actions { display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; }
+.wti-image-drop-hint { margin-top: 6px; }
+.wti-image-thumbs {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px;
+}
+.wti-image-thumbs:empty { margin-top: 0; }
+.wti-image-thumb {
+  position: relative; width: 72px; height: 72px;
+  border: 1px solid var(--rule); border-radius: var(--radius-sm);
+  overflow: hidden; background: var(--surface);
+}
+.wti-image-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.wti-image-thumb-del {
+  position: absolute; top: 2px; right: 2px; width: 20px; height: 20px;
+  min-height: 0; padding: 0; border: none; border-radius: 50%;
+  background: color-mix(in srgb, var(--ink) 55%, transparent);
+  color: var(--paper); font-size: .8rem; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.wti-or-divider { text-align: center; margin: 10px 0; }
+/* ステップ2冒頭のOCR全文折りたたみ（画像経路のみ）。中身は .wti-raw-quote と
+   同じ配色にして「引用された原文」という位置づけを視覚的に揃える。 */
+.wti-ocr-details summary {
+  cursor: pointer; color: var(--info); font-size: .85rem; margin-bottom: 4px;
+}
+.wti-ocr-text {
+  background: var(--surface); border-left: 3px solid var(--info); border-radius: var(--radius-sm);
+  padding: 6px 10px; line-height: 1.5; color: var(--ink-2);
+  white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow-y: auto;
+}
+
 /* 代理閲覧バー — 誤操作防止のため常時可視にする。
    意味色ベタ地の抜き文字は #fff ではなく var(--paper) を使う規約に従う。
    .app-header（sticky top:0）のすぐ下に自身も sticky で貼り付ける。

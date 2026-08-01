@@ -3178,6 +3178,12 @@ async function openWishImportModal(onImported) {
     // 再送のたびに「今回成功した分」しか見えず、一覧側のフィルタ拡張（onImported）が
     // 過去の成功分の日付を取りこぼす。
     succeededDates: [],
+    // Task5: 画像取り込み。images は選択順の data URL（最大3枚、リサイズ前）。
+    // viaImage/ocrText は _wtiParse が画像経路を通ったときだけ埋める。
+    // 画像経路の raw_verified は「LLMが返した OCR全文」対「LLMが返した raw」の
+    // 自己参照照合であり、テキスト経路（人間が貼ったテキストと照合）ほどの
+    // 保証が無い（Task3レビュー申し送り）。ステップ2側の文言分岐にこのフラグを使う。
+    images: [], viaImage: false, ocrText: null,
   };
   const wrap = openModal('<i class="bi bi-clipboard-plus"></i> テキストから取り込む',
     '<div class="text-secondary small">読み込み中...</div>', null, { width: 640 });
@@ -3255,6 +3261,94 @@ function _wtiSkippedSummary(skipped, skippedDetail) {
   return { phrase, hasRollback: rollback > 0 };
 }
 
+/* Task5: 画像縮小のサイズ計算（純関数）。長辺が maxEdge を超える場合だけ、
+   アスペクト比を保ったまま maxEdge に収まる整数サイズへ縮める。
+   canvas/Image に依存しない部分だけをここに切り出してあるので、
+   tests/helpers.py の run_js から Node で直接検証できる
+   （Phase 2 で座標計算（reqBarRange 等）を純関数化したのと同じ方針）。 */
+function reqImageResizeDims(width, height, maxEdge) {
+  if (!width || !height || width <= 0 || height <= 0 || !maxEdge || maxEdge <= 0) {
+    return { width: 0, height: 0 };
+  }
+  const longEdge = Math.max(width, height);
+  if (longEdge <= maxEdge) return { width: Math.round(width), height: Math.round(height) };
+  const scale = maxEdge / longEdge;
+  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+}
+
+/* 画像1枚を送信前に縮小・再エンコードする。通信量・LLMトークン数・
+   サーバのタイムアウト（gunicorn --timeout）の3つに効く（brief Step4）。
+   canvas を使うためブラウザでしか動かない（reqImageResizeDims と違いNodeでは
+   テストできない）ので、この関数自体は e2e（Playwright）側で検証する。 */
+function reqImageResize(dataUrl, maxEdge) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const { width, height } = reqImageResizeDims(img.naturalWidth, img.naturalHeight, maxEdge);
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', 0.85));
+      } catch (e) { reject(e); }
+    };
+    img.onerror = () => reject(new Error('画像の読み込みに失敗しました'));
+    img.src = dataUrl;
+  });
+}
+
+/* 画像上限（サーバ /api/shop/wishes/parse-image も1〜3件を要求する。src/app.py 参照）。 */
+const WTI_IMAGE_MAX = 3;
+
+/* File[] を data URL の配列に変換する（FileReader は Promise を返さないため薄くラップ）。 */
+function _wtiFilesToDataUrls(files) {
+  return Promise.all(Array.from(files).map((f) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(f);
+  })));
+}
+
+/* ファイル選択・撮影・D&D・貼り付けの4経路すべてがここを通る共通の追加処理。
+   3枚を超える分は追加せず（既存の分はそのまま残す）、超過をトーストで知らせる。
+   画像以外のファイル（D&D はaccept属性の制約を受けない）は黙って弾く。 */
+async function _wtiHandleImageFiles(wrap, state, fileList) {
+  const files = Array.from(fileList || []).filter((f) => f && f.type && f.type.startsWith('image/'));
+  if (!files.length) return;
+  const room = WTI_IMAGE_MAX - state.images.length;
+  if (room <= 0) { toast(`画像は${WTI_IMAGE_MAX}枚までです`, 'error'); return; }
+  const accepted = files.slice(0, room);
+  if (files.length > room) toast(`画像は${WTI_IMAGE_MAX}枚までです（超過分は追加していません）`, 'error');
+  let dataUrls;
+  try {
+    dataUrls = await _wtiFilesToDataUrls(accepted);
+  } catch (e) { toast('画像の読み込みに失敗しました', 'error'); return; }
+  state.images.push(...dataUrls);
+  _wtiRenderImageThumbs(wrap, state);
+}
+
+/* サムネイル一覧の再描画。data URL は base64＋固定プレフィクスのみのはずだが、
+   File.type はJS側で構築可能な文字列（実データと無関係に偽装しうる）なので、
+   属性値として差し込む前に esc() を通す（多層防御。プロジェクト全体の方針）。 */
+function _wtiRenderImageThumbs(wrap, state) {
+  const box = wrap.querySelector('#wtiImageThumbs');
+  if (!box) return;
+  box.innerHTML = state.images.map((src, idx) => `
+    <div class="wti-image-thumb" data-idx="${idx}">
+      <img src="${esc(src)}" alt="希望表の画像 ${idx + 1}">
+      <button type="button" class="wti-image-thumb-del" data-del-img="${idx}" aria-label="この画像を削除"><i class="bi bi-x-circle-fill"></i></button>
+    </div>`).join('');
+  box.querySelectorAll('[data-del-img]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idx = +btn.dataset.delImg;
+      state.images.splice(idx, 1);
+      _wtiRenderImageThumbs(wrap, state);
+    });
+  });
+}
+
 /* ステップ1: 貼り付け（対象月・スタッフ・テキスト・解析ボタン） */
 function _wtiRenderStep1(wrap, state) {
   const titleEl = wrap.querySelector('.modal-title');
@@ -3264,6 +3358,9 @@ function _wtiRenderStep1(wrap, state) {
   const monthOpts = _wtiMonthOptions();
   const staffOptsHtml = state.staffs.map((s) =>
     `<option value="${s.id}"${state.explicitStaffId === s.id ? ' selected' : ''}>${esc(s.name)}（${roleLabel(s.role)}）</option>`).join('');
+  // Task5: 画像ゾーンは「PCでは撮影ボタンを出さない」（brief）。isPC() は毎回の
+  // 描画時に判定する（ウィンドウ幅を変えて開き直すケースを考慮）。
+  const showCameraBtn = !isPC();
   safeSetHTML(body, `
     <div class="row mb-2">
       <div class="col-6"><label class="form-label" for="wtiMonth">対象月</label>
@@ -3274,16 +3371,82 @@ function _wtiRenderStep1(wrap, state) {
         <select id="wtiStaff" class="form-select"><option value="">自動判定</option>${staffOptsHtml}</select>
       </div>
     </div>
+    <div class="wti-image-zone mb-2">
+      <div class="wti-image-drop" id="wtiImageDrop">
+        <div class="wti-image-drop-icon"><i class="bi bi-camera"></i></div>
+        <div class="wti-image-drop-text">希望表の画像をここに貼り付け</div>
+        <div class="wti-image-drop-actions">
+          <button type="button" class="btn btn-light btn-sm" id="wtiImagePickBtn"><i class="bi bi-folder2-open"></i> ファイルを選ぶ</button>
+          ${showCameraBtn ? '<button type="button" class="btn btn-light btn-sm" id="wtiCameraBtn"><i class="bi bi-camera-fill"></i> 写真を撮る</button>' : ''}
+        </div>
+        <div class="wti-image-drop-hint small text-secondary">ドラッグ＆ドロップも可（最大${WTI_IMAGE_MAX}枚）</div>
+        <input type="file" accept="image/jpeg,image/png,image/webp" multiple hidden id="wtiImageInput">
+        ${showCameraBtn ? '<input type="file" accept="image/*" capture="environment" hidden id="wtiCameraInput">' : ''}
+      </div>
+      <div id="wtiImageThumbs" class="wti-image-thumbs"></div>
+    </div>
+    <div class="wti-or-divider small text-secondary">─── または ───</div>
     <label class="form-label" for="wtiText">貼り付けるテキスト</label>
     <textarea id="wtiText" class="form-control mb-2" rows="7" placeholder="例：8/3は休みたいです&#10;8/5、8/7、8/9は17時から22時まで入れます">${esc(state.rawText || '')}</textarea>
     <button class="btn btn-primary w-full" id="wtiParseBtn" type="button"><i class="bi bi-magic"></i> 解析する</button>
     <div id="wtiParseMsg" class="mt-2"></div>`);
   wrap.querySelector('#wtiParseBtn')?.addEventListener('click', () => _wtiParse(wrap, state));
+
+  // 「戻る」で再描画されても state.images は保持されているので、選択済みの
+  // サムネイルを毎回描き直す。
+  _wtiRenderImageThumbs(wrap, state);
+
+  const imageInput = wrap.querySelector('#wtiImageInput');
+  wrap.querySelector('#wtiImagePickBtn')?.addEventListener('click', () => imageInput?.click());
+  imageInput?.addEventListener('change', async (e) => {
+    const files = e.target.files;
+    if (files && files.length) await _wtiHandleImageFiles(wrap, state, files);
+    e.target.value = ''; // 同じファイルを続けて選び直せるようにする
+  });
+
+  const cameraInput = wrap.querySelector('#wtiCameraInput');
+  wrap.querySelector('#wtiCameraBtn')?.addEventListener('click', () => cameraInput?.click());
+  cameraInput?.addEventListener('change', async (e) => {
+    const files = e.target.files;
+    if (files && files.length) await _wtiHandleImageFiles(wrap, state, files);
+    e.target.value = '';
+  });
+
+  const dropEl = wrap.querySelector('#wtiImageDrop');
+  dropEl?.addEventListener('dragover', (e) => { e.preventDefault(); dropEl.classList.add('dragover'); });
+  dropEl?.addEventListener('dragleave', () => dropEl.classList.remove('dragover'));
+  dropEl?.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    dropEl.classList.remove('dragover');
+    const files = e.dataTransfer?.files;
+    if (files && files.length) await _wtiHandleImageFiles(wrap, state, files);
+  });
+
+  // 貼り付け（Ctrl/Cmd+V）は wrap（モーダル全体）に1回だけ束縛する。
+  // wrap 自身は openWishImportModal が openModal() で1回だけ生成する要素で、
+  // 「戻る」による _wtiRenderStep1 の再実行では作り直されない（body.innerHTML の
+  // 差し替えのみ）ため、ここで毎回 addEventListener すると多重束縛（貼り付け
+  // 1回で画像が複数回追加される）になる。wrap._wtiPasteBound で一度きりに絞る。
+  if (!wrap._wtiPasteBound) {
+    wrap._wtiPasteBound = true;
+    wrap.addEventListener('paste', async (e) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const files = Array.from(items)
+        .filter((it) => it.type && it.type.startsWith('image/'))
+        .map((it) => it.getAsFile())
+        .filter(Boolean);
+      if (files.length) await _wtiHandleImageFiles(wrap, state, files);
+    });
+  }
 }
 
 async function _wtiParse(wrap, state) {
   const text = (wrap.querySelector('#wtiText')?.value || '').trim();
-  if (!text) { toast('テキストを入力してください', 'error'); return; }
+  // Task5: 画像が1枚でもあれば画像経路。テキストと画像を両方入力していても、
+  // 画像経路を優先する（brief: 「state.images が空でなければ parse-image」）。
+  // どちらも空のときだけ弾く。
+  if (!text && !state.images.length) { toast('テキストを入力するか、画像を追加してください', 'error'); return; }
   state.rawText = text;
   state.yearMonth = wrap.querySelector('#wtiMonth')?.value || state.yearMonth;
   const staffSel = wrap.querySelector('#wtiStaff')?.value || '';
@@ -3292,10 +3455,29 @@ async function _wtiParse(wrap, state) {
   if (msgBox) msgBox.innerHTML = '<div class="text-secondary small">解析中...</div>';
   setLoading(true);
   try {
-    const body = { text, year_month: state.yearMonth };
+    // ここから先（entries の反映・カレンダー確認・_wtiSubmit）はテキスト経路と
+    // 画像経路で完全に共通。分岐するのは「どちらのAPIに何を送るか」だけ。
+    const endpoint = state.images.length ? '/shop/wishes/parse-image' : '/shop/wishes/parse';
+    let body;
+    if (state.images.length) {
+      // 送信前に長辺1600px・JPEG品質0.85へ縮小する（brief Step4。通信量・
+      // LLMトークン数・サーバのタイムアウトの3つに効く）。
+      const resized = await Promise.all(state.images.map((src) => reqImageResize(src, 1600)));
+      body = { images: resized, year_month: state.yearMonth };
+    } else {
+      body = { text, year_month: state.yearMonth };
+    }
     if (state.explicitStaffId) body.staff_id = state.explicitStaffId;
-    const r = await api('/shop/wishes/parse', { method: 'POST', body: JSON.stringify(body) });
+    const r = await api(endpoint, { method: 'POST', body: JSON.stringify(body) });
     state.source = r.source;
+    // 画像経路のときだけ OCR全文を保持する。ステップ2冒頭の折りたたみ表示と、
+    // raw_verified===false の警告文言（_wtiRenderCalendar / _wtiOpenDetail）の
+    // 分岐に使う。画像経路の raw_verified は「LLMが返した ocr_text」対「LLMが
+    // 返した raw」の自己参照照合でしかなく、テキスト経路（人間が貼った原文と
+    // 照合）ほどの保証が無いため、テキスト経路と同じ強さの文言にしない
+    // （Task3レビュー申し送り、Task5固有要件）。
+    state.viaImage = state.images.length > 0;
+    state.ocrText = state.viaImage ? (r.ocr_text || '') : null;
     state.unparsed = r.unparsed || [];
     state.items = _wtiFlatten(r.entries || []);
     state.viewedStaffIds = new Set();
@@ -3441,6 +3623,20 @@ function _wtiRenderStep2(wrap, state) {
     ? `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> 簡易解析で読み取りました。内容をよく確認してください。</div>`
     : '';
 
+  // Task5固有要件: 画像経路の「元の文」は、テキスト経路（人間が貼ったテキストと照合）
+  // ほど強い保証を持たない。ocr_text 自体が LLM の出力であり、raw もまた同じ LLM の
+  // 出力なので、raw_verified が true でも「LLMが自分の書いた raw に合わせて ocr_text を
+  // 書いた」可能性を排除できない（自己参照。Task3レビュー申し送り・設計書§6）。
+  // そのため常時（raw_verified の真偽に関わらず）OCR全文を見せ、店長に元画像との
+  // 突き合わせを促す。折りたたみにするのは、テキストが長いとカレンダーが下に
+  // 押し出されるため（_wtiUnparsedHtml 等と同じ「5件+他」的な配慮の折りたたみ版）。
+  const ocrDetailsHtml = state.viaImage ? `
+    <details class="wti-ocr-details mb-2">
+      <summary><i class="bi bi-image"></i> 画像から読み取った文章を見る</summary>
+      <div class="alert alert-warning py-2 mt-1 mb-1"><i class="bi bi-exclamation-triangle"></i> AIが画像から読み取った文章です。元の画像と見比べて確認してください。</div>
+      <div class="wti-ocr-text small">${esc(state.ocrText || '（読み取れませんでした）')}</div>
+    </details>` : '';
+
   const assignedStaffIds = [...new Set(state.items.filter((it) => it.staffId).map((it) => it.staffId))];
   if (!state.calStaffId || !assignedStaffIds.includes(state.calStaffId)) {
     state.calStaffId = assignedStaffIds[0] || null;
@@ -3462,6 +3658,7 @@ function _wtiRenderStep2(wrap, state) {
   // C-1: 同一(スタッフ,日付)の競合警告もカレンダーより上で必ず目に入るようにする。
   safeSetHTML(body, `
     ${sourceWarn}
+    ${ocrDetailsHtml}
     ${_wtiUnparsedHtml(state)}
     ${_wtiDuplicateWarnHtml(state)}
     ${staffSelectHtml}
@@ -3547,8 +3744,11 @@ function _wtiRenderCalendar(wrap, state) {
       mark = `<div class="wmark wti-conflict">競合${dayItems.length}</div>`;
     }
     const flag = hasExisting ? '<i class="bi bi-exclamation-circle-fill wti-existing-flag" title="既存の希望があります"></i>' : '';
+    // Task5固有要件: 画像経路は照合元（ocr_text）自体がLLM出力（自己参照）で、
+    // テキスト経路（人間が貼った原文と照合）ほどの保証が無い。過信を招かないよう
+    // 文言を分ける（テキスト経路は既存の文言をそのまま維持）。
     const unverifiedFlag = hasUnverified
-      ? '<i class="bi bi-patch-exclamation-fill wti-raw-unverified-flag" title="AIが要約・創作した可能性がある文があります"></i>' : '';
+      ? `<i class="bi bi-patch-exclamation-fill wti-raw-unverified-flag" title="${state.viaImage ? 'AIが画像を読み違えた可能性がある文があります' : 'AIが要約・創作した可能性がある文があります'}"></i>` : '';
     // M-3: 項目のない日は押しても何も起きないので、期間外セルと同じ .disabled で見た目も抑える。
     // ただし既存希望の印（wti-existing-flag）がある日は disabled にしない
     // （disabled の opacity:.35 が、意図的に目立たせたい警告アイコンまで薄めてしまうため）。
@@ -3587,8 +3787,14 @@ function _wtiOpenDetail(wrap, state, date) {
     // I-3: raw がAIの要約・言い換え・幻覚である可能性（raw_verified===false）を
     // 明示する。これが無いと店長は「捏造された元の文」と照合することになり、
     // カレンダープレビューという最後の関門が無効化される。
+    // Task5固有要件: 画像経路は照合元（ocr_text）自体が同じLLMの出力であり、
+    // 「幻覚したrawに合わせてocr_textを作れば検証を通過する」自己参照の弱さが
+    // ある（Task3レビュー申し送り）。テキスト経路（人間が貼った原文との照合、
+    // LLMは改変できない）と同じ強さの断定文言にしない。
     const unverifiedWarn = it.rawVerified === false
-      ? `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> ⚠ この文は貼り付けたテキストに見つかりませんでした。AIが要約または創作した可能性があります。</div>`
+      ? (state.viaImage
+          ? `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> ⚠ この文は、AIが画像から読み取った文章（OCR全文）の中に見つかりませんでした。元の画像と見比べて確認してください。</div>`
+          : `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-exclamation-triangle"></i> ⚠ この文は貼り付けたテキストに見つかりませんでした。AIが要約または創作した可能性があります。</div>`)
       : '';
     return `<div class="wti-detail-entry" data-idx="${idx}">
       ${idxs.length > 1 ? `<div class="small text-secondary mb-1">読み取り ${n + 1}/${idxs.length}</div>` : ''}
