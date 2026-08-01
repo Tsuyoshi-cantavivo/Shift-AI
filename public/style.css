@@ -1579,6 +1579,34 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 }
 .rq-bar.rq-dragging { outline: 2px solid var(--info); outline-offset: 1px; }
 
+/* 左右のハンドルは色を変える。時間帯の変更は全曜日に影響するため、
+   人数の変更（上端）と取り違えないようにする。
+   brief記載の元案（left:-6px/right:-6px でバーの外側にもはみ出させる）は
+   採用していない。.rq-bar は overflow:hidden（ラベルの文字あふれ防止。
+   このTaskより前から存在する）を持ち、これは同じ要素が containing block
+   になっている絶対配置の子（ここではハンドル）もクリップする。外側に
+   はみ出した分は見た目だけでなくヒットテストからも消え、実測（Playwright
+   の生マウスイベント）でハンドル中央をクリックしても隣接する .rq-bar に
+   吸われてドラッグが始まらなかった。さらに、隣接する時間帯（例:
+   早番17:00終了 / 夜番17:00開始）は境界の座標が完全に一致するため、
+   はみ出し方式のままだと片方のバーの終了ハンドルと、もう片方のバーの
+   開始ハンドルが同じ画面座標を取り合い、後からDOMに現れる側（夜番側）が
+   常に勝ってしまう（早番の終了を掴んだつもりが夜番の開始を掴む）。
+   ハンドルをバーの内側に収める（はみ出させない）ことで、この2つの問題を
+   同時に解消する: overflow:hidden の影響を受けず、隣接バーの境界でも
+   互いの当たり判定が重ならない。 */
+.rq-drag-start, .rq-drag-end {
+  position: absolute; top: 0; bottom: 0; width: 12px;
+  cursor: ew-resize; touch-action: none;
+}
+.rq-drag-start { left: 0; }
+.rq-drag-end { right: 0; }
+.rq-drag-start::after, .rq-drag-end::after {
+  content: ''; position: absolute; top: 50%; left: 50%;
+  width: 3px; height: 18px; margin: -9px 0 0 -1.5px; border-radius: 2px;
+  background: var(--warning); opacity: .8;
+}
+
 .rq-rows { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
 .rq-row {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;

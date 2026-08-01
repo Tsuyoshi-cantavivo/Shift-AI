@@ -4324,6 +4324,16 @@ function reqBarLanes(patterns) {
   return { lane, laneCount: Math.max(1, laneEnds.length) };
 }
 
+/** 軸上の X 位置（0..1 の比率）を "HH:MM" に変換する。15分単位に丸める。
+ *  拡張時間（24時以降）は翌日の時刻として返す。 */
+function reqBarTimeFromRatio(ratio, range) {
+  const r = Math.max(0, Math.min(1, ratio));
+  const min = Math.round((range.rangeMin + r * range.rangeLen) / 15) * 15;
+  const h = Math.floor(min / 60) % 24;
+  const m = min % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
 /* --- シフト設定（必要人数バー） --- */
 /** 必要人数バーUIの状態。曜日タブの選択と、編集中のパターン群を持つ。
  *  weekday: null = 「基本」タブ（shift_patterns.required_staff を編集）
@@ -4438,6 +4448,8 @@ function renderReqBarTrack(body) {
       style="left:${pos.left.toFixed(2)}%;width:${pos.width.toFixed(2)}%;height:${h}px;bottom:${bottom}px"
       title="${titleBase} / ${countLabel}">
       <span class="rq-drag-top" title="上下にドラッグして人数を変える"></span>
+      <span class="rq-drag-start" title="時間帯の開始を変える（全曜日に反映されます）"></span>
+      <span class="rq-drag-end" title="時間帯の終了を変える（全曜日に反映されます）"></span>
       <span class="rq-bar-label">${esc(p.pattern_name)} ${countLabel}</span>
     </div>`;
   }).join('');
@@ -4636,24 +4648,38 @@ function setReqBarCount(body, pid, count) {
   renderReqBarTrack(body);
 }
 
-/** バー上端の上下ドラッグで人数を変える。
+/** バー上端の上下ドラッグで人数を変える。左右端のドラッグで時間帯そのものを変える。
  *  シフト表の installDraftTimelineDrag と同じ作法（Pointer Events + setPointerCapture、
  *  ドラッグ中は preventDefault でスクロール等の既定動作を止める）を踏襲する。
  *
  *  ただし setReqBarCount（renderReqBarTrack を呼んで #reqBarBody 全体を作り直す）は
  *  使わない。ドラッグ中に毎回 DOM を作り直すと、setPointerCapture の対象である
- *  .rq-drag-top 自身が消えてしまい、次の pointermove を取りこぼしてドラッグが
+ *  ハンドル自身が消えてしまい、次の pointermove を取りこぼしてドラッグが
  *  1px 動くたびに途切れる（brief記載の既知の落とし穴）。
  *  代わりに `.rq-count` の input ハンドラと全く同じ3段構え
  *  （applyReqBarCount → refreshReqBarRowVisual(=updateReqBarVisual等) → syncReqBarTrackHeight）
  *  を使い、移動のたびに直接 DOM の値だけを書き換える。DOM ツリー自体は
  *  一度も作り直さないため、ドラッグ中もハンドル要素の参照が保たれ、
- *  pointerup を待たずに人数欄・バーとも見た目が追従する。 */
+ *  pointerup を待たずに人数欄・バーとも見た目が追従する。
+ *
+ *  【設計判断】左右端（時間帯そのもの）のドラッグは事情が異なる。reqBarLanes は
+ *  start_time/end_time だけで段（レーン）を決めるため、時間帯を変えると段の
+ *  割り当てそのものが変わりうる（人数の変更では段数・段割り当てとも変わらない
+ *  ことは syncReqBarTrackHeight のコメントで確認済み）。ドラッグの途中で段を
+ *  組み替えて他バーの bottom まで動かすと、いま掴んでいるバー自身の位置が
+ *  ポインタの下からずれて掴み続けられなくなる（「バーが飛び回る」brief記載の
+ *  懸念）。そこで横方向ドラッグは次の方式にする:
+ *    - ドラッグ中は段（data-lane / bottom）を一切変更しない。動かすのは
+ *      掴んでいるバー自身の left/width と、対応する行の時刻表示だけ。
+ *    - pointerup で初めて renderReqBarTrack を1回呼び、reqBarLanes を
+ *      再計算して段を正しく組み直す。ドラッグ中に再描画しないので
+ *      setPointerCapture の対象は最後まで残り、pointermove の取りこぼしは
+ *      起きない（縦ドラッグと同じ理由）。縦ドラッグと違い pointerup 後に
+ *      あえて全体再描画するのは、段の食い違いを残さないため。 */
 function installReqBarDrag(host, body) {
   let drag = null;
 
-  const onMove = (ev) => {
-    if (!drag) return;
+  const onMoveCount = (ev) => {
     // 上に動かすほど人数が増える。1人あたり REQ_BAR_UNIT_PX。
     const dy = drag.startY - ev.clientY;
     const next = reqBarCountFromPx(reqBarHeightPx(drag.startCount) + dy);
@@ -4668,6 +4694,51 @@ function installReqBarDrag(host, body) {
       const inp = host.querySelector(`.rq-count[data-pid="${CSS.escape(drag.pid)}"]`);
       if (inp) inp.value = String(next);
     }
+  };
+
+  const onMoveTime = (ev) => {
+    const ratio = (ev.clientX - drag.trackRect.left) / drag.trackRect.width;
+    const snapped = reqBarTimeFromRatio(ratio, drag.range);
+    if (snapped === drag.lastTime) return;
+    const [h, m] = _parseTimeParts(snapped);
+    const snappedMin = h * 60 + m;
+
+    if (drag.mode === 'end') {
+      // 開始（固定）を基準に、既存の reqBarRange/reqBarLanes と同じ
+      // 「end <= start なら翌日側」という考え方で日またぎを判定する。
+      let endMin = snappedMin;
+      if (endMin <= drag.startMin) endMin += 1440;
+      if (endMin - drag.startMin < 15) return;   // 最小幅は15分。この操作は無視する
+      drag.p.end_time = snapped;
+    } else {
+      // 終了（固定・endAbsMin としてドラッグ開始時に日またぎ込みで確定済み）
+      // を基準に、新しい開始が近づきすぎないか確認する。
+      if (drag.endAbsMin - snappedMin < 15) return;
+      drag.p.start_time = snapped;
+    }
+    drag.lastTime = snapped;
+    drag.changed = true;
+    reqBarState.dirty = true;
+
+    // バー自身の位置(left/width)と行の時刻表示だけを直接書き換える。
+    // 段(data-lane/bottom)はドラッグ中は触らない（上記コメント参照）。
+    const pos = reqBarPosition(drag.p.start_time, drag.p.end_time, drag.range);
+    drag.bar.style.left = `${pos.left.toFixed(2)}%`;
+    drag.bar.style.width = `${pos.width.toFixed(2)}%`;
+    // dataset/title への代入は DOM プロパティ経由（HTML文字列を組み立てて
+    // いない）ため、esc() は不要。updateReqBarVisual と同じ扱い。
+    const titleBase = `${drag.p.pattern_name} ${drag.p.start_time}〜${drag.p.end_time}`;
+    drag.bar.dataset.titleBase = titleBase;
+    const countLabel = reqBarCountLabel(reqBarEffective(drag.p, reqBarState.weekday).count);
+    drag.bar.title = `${titleBase} / ${countLabel}`;
+    const row = host.querySelector(`.rq-row[data-pid="${CSS.escape(drag.pid)}"] .rq-row-time`);
+    if (row) row.textContent = `${drag.p.start_time} 〜 ${drag.p.end_time}`;
+  };
+
+  const onMove = (ev) => {
+    if (!drag) return;
+    if (drag.mode === 'count') onMoveCount(ev);
+    else onMoveTime(ev);
     ev.preventDefault();
   };
 
@@ -4677,7 +4748,16 @@ function installReqBarDrag(host, body) {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
     window.removeEventListener('pointercancel', onUp);
+    const isTimeDrag = drag.mode !== 'count';
+    const changed = drag.changed;
     drag = null;
+    if (isTimeDrag && changed) {
+      // 時間帯は全曜日共通のパターン属性なので、操作後にも明示する
+      // （操作前のtitleに続いて2度目の明示。brief参照）。
+      toast('時間帯を変更しました（全曜日に反映されます）');
+      // ここで初めて再描画し、reqBarLanes による段の組み直しを反映する。
+      renderReqBarTrack(body);
+    }
   };
 
   host.querySelectorAll('.rq-drag-top').forEach((handle) => {
@@ -4688,6 +4768,7 @@ function installReqBarDrag(host, body) {
       const p = findReqPattern(pid);
       if (!p) return;
       drag = {
+        mode: 'count',
         pid, bar,
         startY: ev.clientY,
         startCount: reqBarEffective(p, reqBarState.weekday).count,
@@ -4701,6 +4782,42 @@ function installReqBarDrag(host, body) {
       ev.preventDefault();
     });
   });
+
+  const bindTimeHandle = (selector, mode) => {
+    host.querySelectorAll(selector).forEach((handle) => {
+      handle.addEventListener('pointerdown', (ev) => {
+        const bar = ev.target.closest('.rq-bar');
+        if (!bar) return;
+        const pid = bar.dataset.pid;
+        const p = findReqPattern(pid);
+        const track = host.querySelector('#reqBarTrack');
+        if (!p || !track) return;
+        const [sh, sm] = _parseTimeParts(p.start_time);
+        const [eh, em] = _parseTimeParts(p.end_time);
+        const startMin = sh * 60 + sm;
+        const endRawMin = eh * 60 + em;
+        drag = {
+          mode, pid, bar, p,
+          // ドラッグ開始時の軸を保持する。ドラッグ中に軸（reqBarRange）が
+          // 動くと座標がずれるため、確定（pointerup）まで固定する（brief参照）。
+          range: reqBarRange(reqBarState.patterns),
+          trackRect: track.getBoundingClientRect(),
+          startMin,
+          endAbsMin: endRawMin <= startMin ? endRawMin + 1440 : endRawMin,
+          lastTime: null,
+          changed: false,
+        };
+        bar.classList.add('rq-dragging');
+        try { ev.target.setPointerCapture(ev.pointerId); } catch (e) { /* 未対応でも動く */ }
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+        ev.preventDefault();
+      });
+    });
+  };
+  bindTimeHandle('.rq-drag-start', 'start');
+  bindTimeHandle('.rq-drag-end', 'end');
 }
 
 /** 編集中の state を一括APIで保存する。

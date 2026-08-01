@@ -252,3 +252,25 @@ class TestReqBarLanes:
         assert "1" not in r["lane"], "不正な時刻のパターンが段に含まれている"
         assert r["lane"]["2"] == 0
         assert r["laneCount"] == 1
+
+
+class TestReqBarTimeFromRatio:
+    def test_snaps_to_15min(self):
+        rng = {"minH": 9, "maxH": 22, "rangeMin": 540, "rangeLen": 780}
+        out = run_js(_fns("reqBarTimeFromRatio"),
+                     f"JSON.stringify([0, 0.01, 0.5, 1].map((r) => reqBarTimeFromRatio(r, {json.dumps(rng)})))")
+        vals = json.loads(out)
+        for v in vals:
+            assert int(v.split(":")[1]) % 15 == 0, f"{v} が15分単位でない"
+
+    def test_start_and_end_of_range(self):
+        rng = {"minH": 9, "maxH": 22, "rangeMin": 540, "rangeLen": 780}
+        out = run_js(_fns("reqBarTimeFromRatio"),
+                     f"JSON.stringify([reqBarTimeFromRatio(0, {json.dumps(rng)}), reqBarTimeFromRatio(1, {json.dumps(rng)})])")
+        assert json.loads(out) == ["09:00", "22:00"]
+
+    def test_past_midnight_wraps(self):
+        rng = {"minH": 9, "maxH": 26, "rangeMin": 540, "rangeLen": 1020}
+        out = run_js(_fns("reqBarTimeFromRatio"),
+                     f"String(reqBarTimeFromRatio(1, {json.dumps(rng)}))")
+        assert out.strip() == "02:00", "翌日の時刻が 26:00 のまま返っている"

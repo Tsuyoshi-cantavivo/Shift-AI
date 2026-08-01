@@ -514,3 +514,41 @@ test('0人未満にはならない', async ({ page }) => {
   const v = await page.inputValue('.rq-count[data-name="早番"]');
   expect(parseInt(v, 10)).toBe(0);
 });
+
+// Task6: 時間帯そのもの（開始・終了）をバーの左右端ドラッグで15分単位に
+// 伸縮できる。上端ハンドル（人数）とは別に .rq-drag-end / .rq-drag-start を持つ。
+test('バーの右端をドラッグして時間帯を伸ばせる', async ({ page }) => {
+  const before = await page.textContent('.rq-row[data-pid] .rq-row-time');
+  const box = await page.locator('.rq-bar[data-name="早番"] .rq-drag-end').boundingBox();
+  expect(box).not.toBeNull();
+
+  const trackBox = await page.locator('#reqBarTrack').boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  // 右へ 1時間ぶん動かす
+  await page.mouse.move(box.x + trackBox.width / 13, box.y + box.height / 2, { steps: 8 });
+  await page.mouse.up();
+
+  const after = await page.textContent('.rq-row[data-pid] .rq-row-time');
+  expect(after).not.toBe(before);
+});
+
+test('時間帯を変えると全曜日に影響する旨が出る', async ({ page }) => {
+  await expect(page.locator('.rq-drag-end').first()).toBeVisible();
+  const title = await page.getAttribute('.rq-bar[data-name="早番"] .rq-drag-end', 'title');
+  expect(title).toContain('全曜日');
+});
+
+test('時間帯は15分単位にスナップする', async ({ page }) => {
+  const box = await page.locator('.rq-bar[data-name="早番"] .rq-drag-end').boundingBox();
+  const trackBox = await page.locator('#reqBarTrack').boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + trackBox.width / 40, box.y + box.height / 2, { steps: 5 });
+  await page.mouse.up();
+
+  const t = await page.textContent('.rq-row[data-pid] .rq-row-time');
+  const m = t.match(/(\d{2}):(\d{2})\s*〜\s*(\d{2}):(\d{2})/);
+  expect(m).not.toBeNull();
+  expect(parseInt(m[4], 10) % 15).toBe(0);
+});
