@@ -4205,6 +4205,93 @@ function readShiftHourRow(wrap, key) {
   };
 }
 
+/* ============================================================
+   必要人数バー（設定→シフト設定）の座標計算
+   DOM に触らない純関数。tests/test_required_bar_geometry.py が Node で直接検証する。
+   ============================================================ */
+
+/** "HH:MM" を [h, m] にパースする。_parseTimeParts（public/app.js:766付近）と
+ *  同じ正規表現・同じ失敗時の戻り値（[NaN, NaN]）にしてある。
+ *  reqBarRange/reqBarPosition の関数内にそれぞれ複製して持たせている
+ *  （tests/test_required_bar_geometry.py は helpers.extract_js_function で
+ *  関数本体だけを Node に抜き出して実行するため、_parseTimeParts のような
+ *  モジュールスコープの別関数を呼ぶと ReferenceError になる）。 */
+
+/** 時間帯パターン群から時間軸の範囲を返す。
+ *  end <= start は日またぎとみなし、翌日側（+24h）まで軸を伸ばす。 */
+function reqBarRange(patterns) {
+  const parseTime = (t) => {
+    const m = String(t || '').match(/^(\d{1,2}):(\d{2})/);
+    return m ? [+m[1], +m[2]] : [NaN, NaN];
+  };
+  const list = patterns || [];
+  let minH = 24, maxH = 0;
+  list.forEach((p) => {
+    const [sh, sm] = parseTime(p.start_time);
+    const [eh, em] = parseTime(p.end_time);
+    if (isNaN(sh) || isNaN(eh)) return;
+    const sMin = sh * 60 + sm;
+    let eMin = eh * 60 + em;
+    if (eMin <= sMin) eMin += 1440;   // 日またぎ
+    minH = Math.min(minH, Math.floor(sMin / 60));
+    maxH = Math.max(maxH, Math.ceil(eMin / 60));
+  });
+  if (maxH <= minH) { minH = 9; maxH = 22; }   // パターン0件など。幅0だと全バーが消える
+  minH = Math.max(0, minH);
+  maxH = Math.min(48, maxH);
+  return { minH, maxH, rangeMin: minH * 60, rangeLen: (maxH - minH) * 60 };
+}
+
+/** 時間帯の左端と幅を軸に対する % で返す。 */
+function reqBarPosition(startTime, endTime, range) {
+  const parseTime = (t) => {
+    const m = String(t || '').match(/^(\d{1,2}):(\d{2})/);
+    return m ? [+m[1], +m[2]] : [NaN, NaN];
+  };
+  const [sh, sm] = parseTime(startTime);
+  const [eh, em] = parseTime(endTime);
+  if (isNaN(sh) || isNaN(eh)) return { left: 0, width: 0 };
+  const sMin = sh * 60 + sm;
+  let eMin = eh * 60 + em;
+  if (eMin <= sMin) eMin += 1440;
+  const rawLeft = ((sMin - range.rangeMin) / range.rangeLen) * 100;
+  const rawRight = ((eMin - range.rangeMin) / range.rangeLen) * 100;
+  const left = Math.max(0, rawLeft);
+  const width = Math.max(1, Math.min(100, rawRight) - left);
+  return { left, width };
+}
+
+/** 必要人数からバーの高さ(px)。
+ *  REQ_BAR_UNIT_PX: 1人あたりの高さ(px)。人数が視覚的に比較できる最小単位。
+ *  REQ_BAR_MIN_PX: 0人でも掴めるように残す高さ(px)。0だと画面から消えて操作不能になる。
+ *  値は reqBarCountFromPx と関数内に重複して持たせている（tests/test_required_bar_geometry.py
+ *  は helpers.extract_js_function で関数本体だけを Node に抜き出して実行するため、
+ *  モジュールスコープの定数に依存すると ReferenceError になる）。 */
+function reqBarHeightPx(count) {
+  const REQ_BAR_UNIT_PX = 14;
+  const REQ_BAR_MIN_PX = 6;
+  const n = Math.max(0, Math.round(count || 0));
+  return REQ_BAR_MIN_PX + n * REQ_BAR_UNIT_PX;
+}
+
+/** バーの高さ(px)から必要人数。上下ドラッグの逆変換。reqBarHeightPx と定数を揃えること。 */
+function reqBarCountFromPx(px) {
+  const REQ_BAR_UNIT_PX = 14;
+  const REQ_BAR_MIN_PX = 6;
+  return Math.max(0, Math.round(((px || 0) - REQ_BAR_MIN_PX) / REQ_BAR_UNIT_PX));
+}
+
+/** 曜日を考慮した実効必要人数。weekday が null なら基本値。 */
+function reqBarEffective(pattern, weekday) {
+  const base = Math.max(0, Math.round(pattern.required_staff || 0));
+  if (weekday === null || weekday === undefined) return { count: base, isOverride: false };
+  const wr = pattern.weekday_required || {};
+  const v = wr[String(weekday)];
+  // 0 は falsy なので `v || base` としてはいけない（0人設定が基本値に化ける）
+  if (v === undefined || v === null) return { count: base, isOverride: false };
+  return { count: Math.max(0, Math.round(v)), isOverride: true };
+}
+
 /* --- シフト設定（マトリクス） --- */
 function renderShiftMatrixTab(body) {
   body.innerHTML = card(
