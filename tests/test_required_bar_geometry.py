@@ -180,3 +180,59 @@ class TestReqBarEffective:
         e = json.loads(out)
         assert e["count"] == 0, "0 の上書きが基本値にフォールバックしている"
         assert e["isOverride"] is True
+
+
+class TestReqBarLanes:
+    """重なる時間帯を段（レーン）に振り分ける reqBarLanes（レビュー指摘 I5）。
+
+    不透明な .rq-bar を同一トラックに絶対配置で重ねると、後勝ちのバーが
+    前のバーを隠して読めなくなり、Task5以降のドラッグでも掴めなくなる。
+    重ならないバー同士は段を共有して縦を節約する（区間スケジューリングの貪欲法）。
+    """
+
+    def _lanes(self, pats):
+        out = run_js(_fns("reqBarLanes") + [_parse_time_fn()],
+                     f"JSON.stringify(reqBarLanes({json.dumps(pats)}))")
+        return json.loads(out)
+
+    def test_non_overlapping_share_lane_zero(self):
+        pats = [{"id": 1, "start_time": "09:00", "end_time": "12:00"},
+                {"id": 2, "start_time": "12:00", "end_time": "17:00"}]
+        r = self._lanes(pats)
+        assert r["lane"]["1"] == 0
+        assert r["lane"]["2"] == 0
+        assert r["laneCount"] == 1
+
+    def test_overlapping_get_different_lanes(self):
+        pats = [{"id": 1, "start_time": "09:00", "end_time": "17:00"},
+                {"id": 2, "start_time": "12:00", "end_time": "20:00"}]
+        r = self._lanes(pats)
+        assert r["lane"]["1"] != r["lane"]["2"], "重なる時間帯が同じ段に置かれている"
+        assert r["laneCount"] == 2
+
+    def test_three_way_overlap_needs_three_lanes(self):
+        """3件が同時刻に重なるときは3段になる。"""
+        pats = [{"id": 1, "start_time": "09:00", "end_time": "15:00"},
+                {"id": 2, "start_time": "10:00", "end_time": "16:00"},
+                {"id": 3, "start_time": "11:00", "end_time": "17:00"}]
+        r = self._lanes(pats)
+        assert r["laneCount"] == 3
+        assert len({r["lane"]["1"], r["lane"]["2"], r["lane"]["3"]}) == 3
+
+    def test_overnight_does_not_conflict_with_unrelated_daytime(self):
+        """日またぎ（22:00-02:00）が翌日側（+24h）に伸びて扱われ、
+        時間的に無関係な日中の時間帯と誤って重なり扱いにならないこと。"""
+        pats = [{"id": 1, "start_time": "22:00", "end_time": "02:00"},
+                {"id": 2, "start_time": "09:00", "end_time": "17:00"}]
+        r = self._lanes(pats)
+        assert r["lane"]["1"] == 0
+        assert r["lane"]["2"] == 0
+        assert r["laneCount"] == 1
+
+    def test_invalid_time_pattern_is_excluded(self):
+        pats = [{"id": 1, "start_time": "invalid", "end_time": "17:00"},
+                {"id": 2, "start_time": "09:00", "end_time": "17:00"}]
+        r = self._lanes(pats)
+        assert "1" not in r["lane"], "不正な時刻のパターンが段に含まれている"
+        assert r["lane"]["2"] == 0
+        assert r["laneCount"] == 1

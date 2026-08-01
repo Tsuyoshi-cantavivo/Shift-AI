@@ -106,3 +106,63 @@ test('時間帯が0件のとき案内が出る', async ({ page, request }) => {
   await page.click('.side-item[data-screen="settings"]');
   await expect(page.locator('#reqBarEmpty')).toBeVisible();
 });
+
+// レビュー Critical C1: 数値欄の input で行DOMを再構築すると、入力中の
+// input 要素自体が破棄されてフォーカスが飛び、2文字目以降が入らなくなる
+// （10人以上を打てない）。page.fill() は値を一括設定するため、この
+// フォーカス喪失を再現しない。1文字ずつキー入力する pressSequentially で検証する。
+test('数値欄に複数桁を1文字ずつ入力できる（10人以上）', async ({ page }) => {
+  const inp = page.locator('.rq-count[data-name="早番"]');
+  await inp.click();
+  await inp.fill('');
+  await inp.pressSequentially('12', { delay: 30 });
+  await expect(inp).toHaveValue('12');
+});
+
+// レビュー Important I5: 時間帯が重なると不透明なバーが互いを隠して読めなくなる。
+// 早番(09:00-17:00)と重なる「中番」(12:00-20:00)を追加し、縦に重ならない
+// （別の段に描かれる）ことを実測で確認する。
+test('重なる時間帯はバーが縦に重ならない', async ({ page, request }) => {
+  const res = await request.post('/api/login', {
+    data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
+  });
+  const token = (await res.json()).token;
+  await request.post('/api/shop/patterns', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { pattern_name: '中番', start_time: '12:00', end_time: '20:00', required_staff: 2 },
+  });
+  await page.reload();
+  await page.waitForSelector('#appView:not(.d-none)');
+  await page.click('.side-item[data-screen="settings"]');
+  await page.waitForSelector('#reqBarTrack');
+  await expect(page.locator('.rq-bar')).toHaveCount(3);
+
+  const rects = await page.evaluate(() => {
+    const get = (n) => document.querySelector(`.rq-bar[data-name="${n}"]`).getBoundingClientRect();
+    return { asa: get('早番'), naka: get('中番') };
+  });
+  const overlapsVertically = (a, b) => a.top < b.bottom && b.top < a.bottom;
+  // 早番(09-17)と中番(12-20)は時間が重なる → 別の段に描かれ、縦にも重ならない
+  expect(overlapsVertically(rects.asa, rects.naka)).toBe(false);
+});
+
+// レビュー Important I4: 0人は「募集しない」（Task1の契約）。斜線だけでは
+// 判別できないため、ラベル自体が「募集しない」に切り替わることを検証する。
+test('0人のバーは「募集しない」と表示される', async ({ page, request }) => {
+  const res = await request.post('/api/login', {
+    data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
+  });
+  const token = (await res.json()).token;
+  await request.post('/api/shop/patterns', {
+    headers: { Authorization: `Bearer ${token}` },
+    data: { pattern_name: '深夜', start_time: '22:00', end_time: '23:00', required_staff: 0 },
+  });
+  await page.reload();
+  await page.waitForSelector('#appView:not(.d-none)');
+  await page.click('.side-item[data-screen="settings"]');
+  await page.waitForSelector('#reqBarTrack');
+
+  const bar = page.locator('.rq-bar[data-name="深夜"]');
+  await expect(bar).toHaveClass(/rq-zero/);
+  await expect(bar.locator('.rq-bar-label')).toContainText('募集しない');
+});

@@ -47,14 +47,14 @@ test.describe('シフト時間設定 ⇔ パターン同期', () => {
     // 3. シフト設定タブに切り替え
     // Task4 でマトリクス表（#matrixWrap）はバーUI（#reqBarBody）に置き換わった。
     await page.click('.tab[data-tab="shift"]');
-    await page.waitForSelector('#reqBarBody, .empty-state', { timeout: 10000 });
 
     // 4. パターンが 04:00-02:00 になっているか確認
     // ※ 新規店舗なら「通し」パターンが自動作成されているはず
-    const matrixText = await page.locator('#reqBarBody').textContent().catch(() => '');
-    // 04:00 と 02:00 が含まれることを確認
-    expect(matrixText).toContain('04:00');
-    expect(matrixText).toContain('02:00');
+    // waitForSelector 直後に textContent() を単発で読むと、再描画中の
+    // 一瞬（古い内容 or 空）を掴んでflakyになる（レビュー指摘 M15）。
+    // toContainText の自動リトライに任せる。
+    await expect(page.locator('#reqBarBody')).toContainText('04:00', { timeout: 10000 });
+    await expect(page.locator('#reqBarBody')).toContainText('02:00', { timeout: 10000 });
     expect(errors).toEqual([]);
   });
 
@@ -86,12 +86,11 @@ test.describe('シフト時間設定 ⇔ パターン同期', () => {
     await page.waitForSelector('#shMsg .text-success, .toast', { timeout: 8000 });
 
     // シフト設定タブに戻って確認
+    // 04:00-02:00 のまま（同期していないので）。toContainText の自動リトライで
+    // 再描画中の一瞬を掴むレースを避ける（レビュー指摘 M15）。
     await page.click('.tab[data-tab="shift"]');
-    await page.waitForSelector('#reqBarBody, .empty-state', { timeout: 10000 });
-    const afterMatrix = await page.locator('#reqBarBody').textContent().catch(() => '');
-    // 04:00-02:00 のまま（同期していないので）
-    expect(afterMatrix).toContain('04:00');
-    expect(afterMatrix).toContain('02:00');
+    await expect(page.locator('#reqBarBody')).toContainText('04:00', { timeout: 10000 });
+    await expect(page.locator('#reqBarBody')).toContainText('02:00', { timeout: 10000 });
     expect(errors).toEqual([]);
   });
 });

@@ -3948,7 +3948,7 @@ SCREENS.settings = function (el) {
   renderSettingsTab(el.querySelector('#settingsBody'));
 };
 function renderSettingsTab(body) {
-  ({ shift: renderShiftMatrixTab, shifthours: renderShiftHoursTab, shop: renderShopTab, periods: renderPeriodsTab, password: renderPasswordTab }[settingsTab])(body);
+  ({ shift: renderReqBarTab, shifthours: renderShiftHoursTab, shop: renderShopTab, periods: renderPeriodsTab, password: renderPasswordTab }[settingsTab])(body);
 }
 
 /* --- シフト時間設定（シフト作成可能時間・曜日別/一括） --- */
@@ -4275,6 +4275,34 @@ function reqBarEffective(pattern, weekday) {
   return { count: Math.max(0, Math.round(v)), isOverride: true };
 }
 
+/** 時間帯が重なるバーを別々の段に振り分ける。
+ *  同一トラックに絶対配置で重ねると、不透明なバーが互いを隠して読めなくなり、
+ *  ドラッグでも掴めなくなる（レビュー指摘 I5）。重ならないものは同じ段を
+ *  共有して縦を節約する（区間スケジューリングの貪欲法）。
+ *  戻り値: パターンID -> 段番号(0始まり) のマップと、必要な段数。
+ *  不正な時刻のパターンは lane に含めない（バーが描かれないので段も不要）。 */
+function reqBarLanes(patterns) {
+  const items = (patterns || []).map((p) => {
+    const [sh, sm] = _parseTimeParts(p.start_time);
+    const [eh, em] = _parseTimeParts(p.end_time);
+    let s = sh * 60 + sm;
+    let e = eh * 60 + em;
+    if (isNaN(s) || isNaN(e)) return null;
+    if (e <= s) e += 1440;   // 日またぎ
+    return { id: p.id, s, e };
+  }).filter(Boolean);
+  items.sort((a, b) => a.s - b.s || a.e - b.e);
+  const laneEnds = [];   // 各段の現在の終端
+  const lane = {};
+  items.forEach((it) => {
+    let i = laneEnds.findIndex((end) => end <= it.s);
+    if (i < 0) { laneEnds.push(it.e); i = laneEnds.length - 1; }
+    else { laneEnds[i] = it.e; }
+    lane[String(it.id)] = i;
+  });
+  return { lane, laneCount: Math.max(1, laneEnds.length) };
+}
+
 /* --- シフト設定（必要人数バー） --- */
 /** 必要人数バーUIの状態。曜日タブの選択と、編集中のパターン群を持つ。
  *  weekday: null = 「基本」タブ（shift_patterns.required_staff を編集）
@@ -4283,9 +4311,16 @@ let reqBarState = { patterns: [], weekday: null, dirty: false };
 
 const REQ_BAR_WD_LABELS = ['日', '月', '火', '水', '木', '金', '土'];
 
-function renderShiftMatrixTab(body) {
+/** 必要人数の表示ラベル。0人は「募集しない」（Task1の契約: 0=配置禁止）と
+ *  分かる表記にする。6px の斜線バーだけでは判別できないというレビュー指摘
+ *  （I4）に対応するため、人数表示そのものを文言で切り替える。 */
+function reqBarCountLabel(count) {
+  return count === 0 ? '募集しない' : `${count}人`;
+}
+
+function renderReqBarTab(body) {
   body.innerHTML = card(
-    sectionTitle('bi-grid-3x3-gap', 'シフト設定', '<span class="small text-secondary">— 時間帯ごとの必要人数</span>') +
+    sectionTitle('bi-bar-chart-steps', 'シフト設定', '<span class="small text-secondary">— 時間帯ごとの必要人数</span>') +
     `<div id="reqBarTabs" class="rq-tabs"></div>
      <div id="reqBarBody"></div>
      <div class="flex gap-2 mt-3">
@@ -4315,11 +4350,11 @@ function renderReqBarTabs(body) {
   const cur = reqBarState.weekday;
   const items = [{ wd: '', label: '基本' }]
     .concat(REQ_BAR_WD_LABELS.map((l, i) => ({ wd: String(i), label: l })));
-  tabs.innerHTML = items.map((it) => {
+  safeSetHTML(tabs, items.map((it) => {
     const isActive = (it.wd === '' && cur === null) || (it.wd !== '' && String(cur) === it.wd);
     const wdClass = it.wd === '0' ? ' rq-sun' : (it.wd === '6' ? ' rq-sat' : '');
     return `<button class="rq-tab${isActive ? ' active' : ''}${wdClass}" data-wd="${it.wd}">${esc(it.label)}</button>`;
-  }).join('');
+  }).join(''));
   tabs.querySelectorAll('.rq-tab').forEach((b) => b.addEventListener('click', () => {
     if (reqBarState.dirty && !confirm('保存していない変更があります。タブを切り替えると失われます。よろしいですか？')) return;
     reqBarState.weekday = b.dataset.wd === '' ? null : parseInt(b.dataset.wd, 10);
@@ -4334,7 +4369,7 @@ function renderReqBarTrack(body) {
   if (!host) return;
   const pats = reqBarState.patterns;
   if (!pats.length) {
-    safeSetHTML(host, `<div id="reqBarEmpty">${emptyState('bi-grid-3x3-gap', '時間帯がありません。「時間帯を追加」で作成してください')}</div>`);
+    safeSetHTML(host, `<div id="reqBarEmpty">${emptyState('bi-bar-chart-steps', '時間帯がありません。「時間帯を追加」で作成してください')}</div>`);
     return;
   }
   const wd = reqBarState.weekday;
@@ -4349,15 +4384,24 @@ function renderReqBarTrack(body) {
   const trackVars = `--tl-hours:${range.maxH - range.minH}`;
   const maxCount = Math.max(1, ...pats.map((p) => reqBarEffective(p, wd).count));
 
+  // 時間帯が重なると不透明なバー同士が隠し合って読めなくなる（レビュー I5）。
+  // 段（レーン）に分けて縦にずらし、トラックの高さは段数ぶん確保する。
+  const lanes = reqBarLanes(pats);
+  const laneHeightPx = reqBarHeightPx(maxCount);
+
   const bars = pats.map((p) => {
     const eff = reqBarEffective(p, wd);
     const pos = reqBarPosition(p.start_time, p.end_time, range);
     const h = reqBarHeightPx(eff.count);
+    const laneIdx = lanes.lane[String(p.id)] || 0;
+    const bottom = laneIdx * laneHeightPx;
+    const titleBase = `${esc(p.pattern_name)} ${esc(p.start_time)}〜${esc(p.end_time)}`;
+    const countLabel = esc(reqBarCountLabel(eff.count));
     return `<div class="rq-bar${eff.isOverride ? ' rq-override' : ''}${eff.count === 0 ? ' rq-zero' : ''}"
-      data-pid="${esc(p.id)}" data-name="${esc(p.pattern_name)}"
-      style="left:${pos.left.toFixed(2)}%;width:${pos.width.toFixed(2)}%;height:${h}px"
-      title="${esc(p.pattern_name)} ${esc(p.start_time)}〜${esc(p.end_time)} / ${eff.count}人">
-      <span class="rq-bar-label">${esc(p.pattern_name)} ${eff.count}人</span>
+      data-pid="${esc(p.id)}" data-name="${esc(p.pattern_name)}" data-title-base="${titleBase}"
+      style="left:${pos.left.toFixed(2)}%;width:${pos.width.toFixed(2)}%;height:${h}px;bottom:${bottom}px"
+      title="${titleBase} / ${countLabel}">
+      <span class="rq-bar-label">${esc(p.pattern_name)} ${countLabel}</span>
     </div>`;
   }).join('');
 
@@ -4376,16 +4420,18 @@ function renderReqBarTrack(body) {
     </div>`;
   }).join('');
 
+  // 「0人=募集しない」（Task1の契約）を注記に明示する。旧マトリクス表にあった
+  // 説明文がバーUIへの置き換えで消えていたレビュー指摘（I4）への対応。
   const note = wd === null
-    ? '<div class="small text-secondary mb-2">曜日ごとに人数を変えたいときは、上のタブで曜日を選んでください。</div>'
-    : `<div class="small text-secondary mb-2">${esc(REQ_BAR_WD_LABELS[wd])}曜日の人数を設定しています。<strong>時間帯そのものを変えると全曜日に反映されます。</strong></div>`;
+    ? '<div class="small text-secondary mb-2">曜日ごとに人数を変えたいときは、上のタブで曜日を選んでください。<strong>0</strong>にするとその時間帯は募集しません。</div>'
+    : `<div class="small text-secondary mb-2">${esc(REQ_BAR_WD_LABELS[wd])}曜日の人数を設定しています。<strong>時間帯そのものを変えると全曜日に反映されます。</strong> <strong>0</strong>にするとその曜日は募集しません。</div>`;
 
   safeSetHTML(host, `${note}
     <div class="rq-wrap">
       <div class="tl-axis-row"><div class="tl-name"></div><div class="tl-axis">${hours.join('')}</div></div>
       <div class="rq-track-row">
         <div class="tl-name"></div>
-        <div class="tl-track rq-track" id="reqBarTrack" style="${trackVars};--rq-max:${maxCount}">${bars}</div>
+        <div class="tl-track rq-track" id="reqBarTrack" style="${trackVars};--rq-max:${maxCount};--rq-lanes:${lanes.laneCount}">${bars}</div>
       </div>
     </div>
     <div class="rq-rows">${rows}</div>`);
@@ -4399,16 +4445,34 @@ function bindReqBarRows(body) {
   if (!host) return;
 
   host.querySelectorAll('.rq-count').forEach((inp) => inp.addEventListener('input', () => {
-    setReqBarCount(body, inp.dataset.pid, parseInt(inp.value, 10));
+    // 行DOMを作り直すとこの input 要素自体が破棄され、フォーカスが飛んで
+    // 2文字目以降が入らなくなる（10人以上を打てない。レビュー Critical C1）。
+    // 入力中は state とバーの見た目だけを直接更新し、行の再描画はしない。
+    const raw = inp.value.trim();
+    if (raw === '') return;   // 打ち直しの途中。0 に丸めない（誤って「募集しない」にしない）
+    const n = Math.max(0, Math.round(parseInt(raw, 10)));
+    if (isNaN(n)) return;
+    applyReqBarCount(inp.dataset.pid, n);
+    const bar = host.querySelector(`.rq-bar[data-pid="${CSS.escape(inp.dataset.pid)}"]`);
+    if (bar) updateReqBarVisual(bar, n);
+  }));
+  // 確定時（フォーカスが外れたとき）に正規化して再描画する。空欄のまま
+  // 離れても input 側では state を更新していないので、直前の正常値に戻る。
+  host.querySelectorAll('.rq-count').forEach((inp) => inp.addEventListener('blur', () => {
+    renderReqBarTrack(body);
   }));
   host.querySelectorAll('.rq-step').forEach((b) => b.addEventListener('click', () => {
-    const cur = reqBarEffective(findReqPattern(b.dataset.pid), reqBarState.weekday).count;
+    const p = findReqPattern(b.dataset.pid);
+    if (!p) return;
+    const cur = reqBarEffective(p, reqBarState.weekday).count;
     setReqBarCount(body, b.dataset.pid, cur + parseInt(b.dataset.step, 10));
   }));
   host.querySelectorAll('.rq-reset').forEach((b) => b.addEventListener('click', () => {
     const p = findReqPattern(b.dataset.pid);
     if (!p || reqBarState.weekday === null) return;
-    delete (p.weekday_required || {})[String(reqBarState.weekday)];
+    // weekday_required が無ければ削除対象も無い。存在するときだけ、
+    // 実在するキーを消す（意図が読めない「捨てオブジェクトから delete」を避ける）。
+    if (p.weekday_required) delete p.weekday_required[String(reqBarState.weekday)];
     reqBarState.dirty = true;
     renderReqBarTrack(body);
   }));
@@ -4432,8 +4496,10 @@ function findReqPattern(pid) {
   return reqBarState.patterns.find((p) => String(p.id) === String(pid));
 }
 
-/** 人数を設定して再描画する。バーの高さと数値欄はここを通じて常に同期する。 */
-function setReqBarCount(body, pid, count) {
+/** state のみを更新する（再描画しない）。入力中の `.rq-count` から呼ぶ専用。
+ *  再描画すると input 要素が壊れてフォーカスが飛ぶため（C1）、
+ *  DOM更新は呼び出し側で updateReqBarVisual に任せる。 */
+function applyReqBarCount(pid, count) {
   const p = findReqPattern(pid);
   if (!p) return;
   const n = Math.max(0, Math.round(isNaN(count) ? 0 : count));
@@ -4444,6 +4510,26 @@ function setReqBarCount(body, pid, count) {
     p.weekday_required[String(reqBarState.weekday)] = n;
   }
   reqBarState.dirty = true;
+}
+
+/** バー要素の見た目（高さ・0人ラベル・rq-zeroクラス・title）だけを直接書き換える。
+ *  入力中の再描画を避けるための専用関数（C1）。イベントハンドラの再バインドは
+ *  行わない（要素自体を作り直していないので不要）。 */
+function updateReqBarVisual(bar, count) {
+  const h = reqBarHeightPx(count);
+  bar.style.height = `${h}px`;
+  bar.classList.toggle('rq-zero', count === 0);
+  const label = bar.querySelector('.rq-bar-label');
+  const countLabel = reqBarCountLabel(count);
+  if (label) label.textContent = `${bar.dataset.name || ''} ${countLabel}`;
+  const titleBase = bar.dataset.titleBase || '';
+  bar.title = `${titleBase} / ${countLabel}`;
+}
+
+/** 人数を設定して再描画する。± ボタンなど「再描画してよい」経路から使う。
+ *  バーの高さと数値欄はここを通じて常に同期する。 */
+function setReqBarCount(body, pid, count) {
+  applyReqBarCount(pid, count);
   renderReqBarTrack(body);
 }
 function openPatternModal(data, onDone) {
@@ -4453,7 +4539,7 @@ function openPatternModal(data, onDone) {
      <div class="row"><div class="col-6"><label class="form-label" for="pSt">開始</label><input id="pSt" class="form-control" value="${esc(data?.st || '17:00')}"></div>
      <div class="col-6"><label class="form-label" for="pEt">終了</label><input id="pEt" class="form-control" value="${esc(data?.et || '22:00')}"></div></div>
      <label class="form-label mt-2">基本必要人数</label><input id="pReq" type="number" class="form-control" value="${esc(data?.req ?? 2)}">
-     <div class="small text-secondary mt-2">作成後、マトリクスで曜日別の人数を設定できます。</div>`,
+     <div class="small text-secondary mt-2">作成後、タブで曜日を選ぶと曜日別の人数を設定できます。</div>`,
     async (w, close) => {
       try {
         if (isEdit) {

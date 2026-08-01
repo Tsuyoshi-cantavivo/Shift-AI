@@ -1033,32 +1033,6 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .nt-body { font-size: .8rem; color: var(--ink-3); margin-top: 2px; }
 .nt-time { font-size: .68rem; color: var(--ink-3); margin-top: 4px; }
 
-/* ---------- 23. Shift Matrix (シフト設定) ---------- */
-.matrix-wrap { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--rule); }
-.matrix-table { width: 100%; border-collapse: collapse; min-width: 560px; }
-.matrix-table th, .matrix-table td { padding: 0; text-align: center; border-bottom: 1px solid var(--rule); border-right: 1px solid var(--rule); }
-.matrix-table th { padding: 10px 6px; font-size: .72rem; font-weight: 700; color: var(--ink-3); background: var(--paper); white-space: nowrap; }
-.matrix-table th.sun { color: var(--danger); }
-.matrix-table th.sat { color: var(--info); }
-.matrix-table td:first-child { text-align: left; padding: 10px 14px; background: var(--paper); }
-.matrix-pat-name { font-weight: 700; font-size: .88rem; }
-.matrix-pat-time { font-size: .7rem; color: var(--ink-3); }
-.matrix-input {
-  width: 100%; min-height: 48px; border: none; background: transparent;
-  color: var(--ink); text-align: center; font-family: var(--font-num);
-  font-size: 1rem; font-weight: 700; padding: 6px; transition: var(--dur) var(--ease);
-}
-.matrix-input:focus { background: color-mix(in srgb, var(--info) 10%, transparent); outline: none; }
-.matrix-input:focus-visible { outline: 2px solid var(--info); outline-offset: -2px; }
-.matrix-input.has-override { color: var(--info); }
-.matrix-row-actions { display: flex; gap: 4px; }
-.matrix-row-actions button {
-  width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--rule);
-  background: var(--surface); color: var(--ink-3); cursor: pointer; font-size: .8rem;
-  display: flex; align-items: center; justify-content: center;
-}
-.matrix-row-actions button:hover { background: var(--ink); color: var(--paper); }
-
 /* ---------- 24. Chat ---------- */
 .chat-card { display: flex; flex-direction: column; min-height: 520px; }
 @media (min-width: 992px) { .chat-card { min-height: 600px; } }
@@ -1560,13 +1534,20 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 
 .rq-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .rq-track-row { display: flex; align-items: flex-end; min-width: 480px; }
-/* バーは下端揃え。高さが人数を表すので、上に伸びる形にする。 */
+/* バーは下端揃え。高さが人数を表すので、上に伸びる形にする。
+   --rq-lanes は重なる時間帯を別の段に振り分けた段数（reqBarLanes）。
+   段数ぶん高さを掛けないと、上の段のバーがトラックからはみ出す。
+   .tl-track（セクション20）から cursor:pointer と :hover の背景変化を
+   継承してしまうため（この Task ではまだクリック編集を実装していない）、
+   ここで打ち消す（レビュー指摘 M12）。 */
 .rq-track {
   position: relative; display: flex; align-items: flex-end;
-  height: calc(var(--rq-max, 4) * 14px + 24px); min-height: 60px;
+  height: calc((var(--rq-max, 4) * 14px + 24px) * var(--rq-lanes, 1)); min-height: 60px;
+  cursor: default;
 }
+.rq-track:hover { background-color: transparent; }
 .rq-bar {
-  position: absolute; bottom: 0;
+  position: absolute;
   background: var(--role-part-time); color: var(--role-part-time-ink);
   border: 1px solid var(--grid-4h); border-radius: var(--radius-xs);
   display: flex; align-items: center; justify-content: center;

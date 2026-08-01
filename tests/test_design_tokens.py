@@ -359,13 +359,15 @@ class TestMediaPrintSplit:
     def test_screen_css_keeps_rules_after_first_media_print(self):
         css = _read_css()
         screen, _printed = _split_media_print(css)
-        # .matrix-input / .shortage-chip は 1 つ目の @media print（アニメーション停止、
+        # .notif-item / .shortage-chip は 1 つ目の @media print（アニメーション停止、
         # style.css:1015）より後にある画面用CSS。単純 split ではここが丸ごと落ちる。
         # 落ちていたことを実証するため、旧実装との差も同時に確認する。
-        assert ".matrix-input" in screen
+        # （旧セレクタ .matrix-input は Phase2 Task4 のレビューで必要人数マトリクスの
+        #  廃止に伴い削除されたため、番兵を .notif-item に差し替えた。）
+        assert ".notif-item" in screen
         assert ".shortage-chip" in screen
         naive = css.split("@media print")[0]
-        assert ".matrix-input" not in naive, \
+        assert ".notif-item" not in naive, \
             "旧実装でも拾えるセレクタでは、この回帰テストは何も守っていない"
 
     def test_print_css_contains_page_rule(self):
