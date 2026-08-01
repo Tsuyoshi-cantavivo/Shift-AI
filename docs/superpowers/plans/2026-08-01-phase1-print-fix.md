@@ -502,13 +502,22 @@ class TestPrintDomLifecycle:
     いたため、プレビューの再描画・Ctrl+P・2回目の印刷がすべて白紙になっていた。
     """
 
-    def test_afterprint_does_not_clear_print_view(self):
+    def test_print_view_is_not_cleared_after_print(self):
+        """afterprint リスナの中で printView を破棄していないこと。
+
+        リスナ自体を置かない実装も条件を満たす（そちらが本タスクの正解）。
+        「printView を空文字にする記述が afterprint の中にある」場合だけ落とす。
+        リスナが無いときに素通りするのを補うのが下の 2 テスト。
+        """
         js = _read_appjs()
-        # afterprint リスナの中で printView を空文字にしていないこと
-        m = re.search(r"addEventListener\(\s*['\"]afterprint['\"][\s\S]{0,400}", js)
-        if m:
-            assert "innerHTML = ''" not in m.group(0), \
-                "afterprint で printView を破棄すると、向き変更や2回目の印刷が白紙になる"
+        offenders = []
+        for m in re.finditer(r"addEventListener\(\s*['\"]afterprint['\"]", js):
+            body = js[m.start():m.start() + 400]
+            if re.search(r"printView[\s\S]{0,200}innerHTML\s*=\s*(''|\"\")", body):
+                offenders.append(body.splitlines()[0])
+        assert not offenders, \
+            "afterprint で printView を破棄している（向き変更や2回目の印刷が白紙になる）: " \
+            + "; ".join(offenders)
 
     def test_beforeprint_listener_exists(self):
         assert re.search(r"addEventListener\(\s*['\"]beforeprint['\"]", _read_appjs())
