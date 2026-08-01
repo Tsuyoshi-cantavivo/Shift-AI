@@ -65,6 +65,39 @@ def _read_js():
     return JS_PATH.read_text(encoding="utf-8") + "\n" + ADMIN_JS_PATH.read_text(encoding="utf-8")
 
 
+def _split_media_print(css):
+    """CSS を (画面用, 印刷用) に分ける。
+
+    @media print は複数箇所にあるため split では足りない。開き波括弧から
+    対応する閉じ波括弧までを数え、ブロックごとに正確に切り出す。
+    戻り値の印刷用は @media print の中身のみ（外側の波括弧を含まない）。
+    """
+    screen_parts, print_parts = [], []
+    i = 0
+    while True:
+        j = css.find("@media print", i)
+        if j < 0:
+            screen_parts.append(css[i:])
+            break
+        screen_parts.append(css[i:j])
+        open_at = css.find("{", j)
+        if open_at < 0:                      # 壊れたCSS。残り全部を画面側として扱う
+            screen_parts.append(css[j:])
+            break
+        depth, m = 0, open_at
+        while m < len(css):
+            if css[m] == "{":
+                depth += 1
+            elif css[m] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            m += 1
+        print_parts.append(css[open_at + 1:m])
+        i = m + 1
+    return "".join(screen_parts), "\n".join(print_parts)
+
+
 def _tokens_in_scope(selector):
     """指定セレクタのブロックから CSS 変数を辞書で取り出す。"""
     text = _read_css()
@@ -269,8 +302,9 @@ class TestRenderedContrast:
         #fff はダークで地と同化する。地に var(--token) を使う宣言では #fff を禁じる。
         """
         css = _read_css()
-        # @media print は常にライトのトークン値で固定されるため対象外
-        screen_css = css.split("@media print")[0]
+        # @media print は常にライトのトークン値で固定されるため対象外。
+        # ただし @media print は複数箇所にあるので、波括弧対応で正確に除く。
+        screen_css, _printed = _split_media_print(css)
         offenders = []
         for line in screen_css.splitlines():
             if re.search(r"background(-color)?:\s*(var\(--|linear-gradient)", line) \
@@ -302,3 +336,30 @@ class TestDraftBarNotOverridden:
         m = re.search(r"\n\.tl-bar\.tl-bar-draft\s*\{(.*?)\n\}", css, re.S)
         assert m is None, \
             ".tl-bar.tl-bar-draft（詳細度0,2,0）の規則は .tl-st-requested に負ける"
+
+
+class TestMediaPrintSplit:
+    """@media print の切り出しが正しいことを保証する。
+
+    style.css には @media print が 2 箇所（アニメーション停止用と印刷レイアウト用）
+    ある。単純な split("@media print")[0] だと 1 つ目以降の画面用CSSが丸ごと
+    検査対象から落ちるため、波括弧の対応を数えて分離する。
+    """
+
+    def test_screen_css_keeps_rules_after_first_media_print(self):
+        css = _read_css()
+        screen, _printed = _split_media_print(css)
+        # .tl-legend は 1 つ目の @media print(アニメーション停止) より後にある画面用CSS。
+        # 単純 split ではここが検査対象から落ちる。
+        assert ".tl-legend" in screen
+
+    def test_print_css_contains_page_rule(self):
+        css = _read_css()
+        _screen, printed = _split_media_print(css)
+        assert "@page" in printed
+
+    def test_screen_css_excludes_print_only_rules(self):
+        css = _read_css()
+        screen, _printed = _split_media_print(css)
+        # 印刷ブロック内にしか存在しないセレクタが画面側に混ざっていないこと
+        assert ".print-page-header" not in screen
