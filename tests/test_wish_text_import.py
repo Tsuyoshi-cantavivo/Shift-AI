@@ -516,6 +516,18 @@ class TestStaffHintAmbiguity:
             "佐藤さんの代わりに小久保が8/3は休み", "2026-08", ["小久保", "佐藤"])
         assert all(e["staff_hint"] is None for e in r["entries"])
 
+    def test_fallback_does_not_extract_partial_name_without_notation(self):
+        """記法なしの部分名は staff_hint に載らない（既知の制約）。
+
+        _extract_staff_hint は名簿名の完全部分一致しか拾わないため、
+        「田中 8/3は休み」で名簿が「田中太郎」だと hint は None になる。
+        そのぶん候補提示（app.py の best_exact/match_staff）はフォールバック
+        経路では発火しにくい。LLM 経路では staff_hint が素通しされるため、
+        そちらでは機能する（TestWishParseApi の LLM 経路テスト参照）。
+        """
+        r = ai._parse_wish_fallback("田中 8/3は休みたいです", "2026-08", ["田中太郎"])
+        assert r["entries"][0].get("staff_hint") is None
+
 
 class TestWishParserMinorFixes:
     """fix round 6 の Minor 2件。"""
@@ -921,18 +933,103 @@ class TestWishParseApi:
         assert r.status_code == 400
 
     def test_normalized_exact_match_resolves_staff(self, client):
-        """敬称や全角空白が付いていても staff_id が解決されること。"""
+        """敬称が付いていても staff_id が解決されること。
+
+        入力はコロン記法にする。「田中太郎さん 8/3は…」（コロン無し）だと
+        フォールバック解析（src/ai.py の _extract_staff_hint）が名簿の完全一致
+        文字列を先に抽出してしまい、staff_hint が既に "田中太郎"（登録名と
+        完全一致）まで剥がされた状態で app.py に渡ってしまうため、app.py 側の
+        正規化（best_exact）を素通りしても偶然テストが通ってしまう
+        （非正規化の完全一致に戻す変異でも green のままになることをレビューで実測済み）。
+        コロン記法なら _WISH_STAFF_COLON_RE が敬称込みの生文字列をそのまま
+        staff_hint に渡すため、app.py 側の正規化を確実に経由する。
+        """
         shop_id = insert_shop()
         sid = insert_staff(shop_id, "PT1", "田中太郎")
         tok = make_session("shop", shop_id, shop_id)
+
+        r = client.post("/api/shop/wishes/parse",
+                        json={"text": "田中太郎さん: 8/3は休みたいです", "year_month": "2026-08"},
+                        headers=auth(tok))
+        assert r.status_code == 200
+        d = r.get_json()
+        assert d["entries"][0]["staff_id"] == sid, \
+            "敬称付きの名前が解決されていない（完全一致のままになっている）"
+
+    @pytest.mark.parametrize("hint_text", [
+        "ﾀﾅｶ: 8/3は休みたいです",   # 半角カナ → NFKC で全角化
+        "たなか: 8/3は休みたいです",  # ひらがな → カタカナ寄せ
+    ])
+    def test_normalized_exact_match_resolves_across_kana_forms(self, client, hint_text):
+        """半角カナ・ひらがな表記でも、登録名（カタカナ）に正規化して解決されること。"""
+        shop_id = insert_shop()
+        sid = insert_staff(shop_id, "PT1", "タナカ")
+        tok = make_session("shop", shop_id, shop_id)
+
+        r = client.post("/api/shop/wishes/parse",
+                        json={"text": hint_text, "year_month": "2026-08"},
+                        headers=auth(tok))
+        assert r.status_code == 200
+        d = r.get_json()
+        assert d["entries"][0]["staff_id"] == sid, \
+            f"'{hint_text}' の表記ゆれが解決されていない"
+
+    def test_llm_path_normalized_exact_match_resolves_staff(self, client, monkeypatch):
+        """★LLM経路★ 敬称付きの staff_hint でも staff_id が解決されること。
+
+        本番で実際に走るのはLLM経路であり、_sanitize_llm_wish_result
+        （src/ai.py）は staff_hint を strip() するだけで敬称・表記ゆれは
+        そのまま素通しする。フォールバック経路のような名簿名フィルタが無いため、
+        app.py 側の正規化（best_exact）がここでこそ唯一の防波堤になる。
+
+        monkeypatch は appmod.ai（app.py が `import ai` で束縛した、
+        bare "ai" モジュール）に対して行う。本ファイル冒頭の
+        `from src import ai` は "src.ai" という別のモジュールオブジェクトに
+        なる（sys.modules 上で "ai" と "src.ai" は別エントリ）ため、
+        そちらを差し替えても app.py 経由の呼び出しには反映されない
+        （実測して確認済み）。
+        """
+        shop_id = insert_shop()
+        sid = insert_staff(shop_id, "PT1", "田中太郎")
+        tok = make_session("shop", shop_id, shop_id)
+        monkeypatch.setattr(appmod.ai, "is_llm_available", lambda: True)
+        monkeypatch.setattr(appmod.ai, "call_llm", lambda *a, **k: json.dumps({
+            "entries": [{"staff_hint": "田中太郎さん", "dates": ["2026-08-03"],
+                         "availability": "rest", "start": None, "end": None,
+                         "raw": "田中太郎さん 8/3は休みたいです"}],
+            "unparsed": []}, ensure_ascii=False))
 
         r = client.post("/api/shop/wishes/parse",
                         json={"text": "田中太郎さん 8/3は休みたいです", "year_month": "2026-08"},
                         headers=auth(tok))
         assert r.status_code == 200
         d = r.get_json()
+        assert d["source"] == "llm"
         assert d["entries"][0]["staff_id"] == sid, \
-            "敬称付きの名前が解決されていない（完全一致のままになっている）"
+            "LLM経路で敬称付きの名前が解決されていない"
+
+    def test_llm_path_unresolved_hint_returns_candidates(self, client, monkeypatch):
+        """★LLM経路★ 完全一致しない staff_hint には候補が返ること。"""
+        shop_id = insert_shop()
+        sid = insert_staff(shop_id, "PT1", "田中太郎")
+        tok = make_session("shop", shop_id, shop_id)
+        monkeypatch.setattr(appmod.ai, "is_llm_available", lambda: True)
+        monkeypatch.setattr(appmod.ai, "call_llm", lambda *a, **k: json.dumps({
+            "entries": [{"staff_hint": "田中", "dates": ["2026-08-03"],
+                         "availability": "rest", "start": None, "end": None,
+                         "raw": "田中 8/3は休みたいです"}],
+            "unparsed": []}, ensure_ascii=False))
+
+        r = client.post("/api/shop/wishes/parse",
+                        json={"text": "田中 8/3は休みたいです", "year_month": "2026-08"},
+                        headers=auth(tok))
+        assert r.status_code == 200
+        d = r.get_json()
+        assert d["source"] == "llm"
+        assert d["entries"][0]["staff_id"] is None
+        cands = (d.get("name_candidates") or {}).get("0") or []
+        assert cands, "LLM経路で未解決なのに候補が返っていない"
+        assert cands[0]["staff_id"] == sid
 
     def test_ambiguous_name_is_not_auto_resolved(self, client):
         """同姓同名が2人いたら自動確定しないこと。"""
@@ -972,14 +1069,26 @@ class TestWishParseApi:
         assert cands[0]["reason"]
 
     def test_candidates_only_include_own_shop_staff(self, client):
-        """他店舗のスタッフが候補に混ざらないこと。"""
+        """他店舗のスタッフが候補に混ざらないこと。
+
+        shop_a に在籍者（佐藤）を実在させ、入力はコロン記法にする。
+        （旧版は shop_a の在籍者がゼロで、かつコロン無し入力だったため、
+        staff_hint 自体が None になり候補ロジックに到達せず、SQL から
+        `shop_id=?` を外しても検知できない空虚なテストだった。
+        コロン記法なら staff_hint 抽出が shop_a の在籍者リストに依存しなくなり、
+        「佐藤」は "田中" と似ていないため自店舗からは候補が出ない一方、
+        shop_b の "田中太郎" は "田中" の姓一致（_split_candidates）で
+        候補に出うる。shop_id フィルタが外れると shop_b の staff_id が
+        混入することを実測して確認済み）。
+        """
         shop_a = insert_shop(code="SHOPA")
         shop_b = insert_shop(code="SHOPB", name="別店舗")
+        insert_staff(shop_a, "PT1", "佐藤")
         insert_staff(shop_b, "PT9", "田中太郎")
         tok = make_session("shop", shop_a, shop_a)
 
         r = client.post("/api/shop/wishes/parse",
-                        json={"text": "田中 8/3は休みたいです", "year_month": "2026-08"},
+                        json={"text": "田中: 8/3は休みたいです", "year_month": "2026-08"},
                         headers=auth(tok))
         d = r.get_json()
         for cands in (d.get("name_candidates") or {}).values():
