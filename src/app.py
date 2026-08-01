@@ -7,13 +7,14 @@ import os
 import json
 import re
 import secrets
+import threading
 import traceback
 import unicodedata
 import base64
 import binascii
 from datetime import datetime, timedelta
 from flask import (Flask, request, jsonify, abort, Response, send_file, g)
-from werkzeug.exceptions import HTTPException
+from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import safe_join
 from dotenv import load_dotenv
@@ -81,6 +82,19 @@ def _csv_safe(value):
     if any(c in s for c in (",", '"', "\n", "\r")):
         s = '"' + s.replace('"', '""') + '"'
     return s
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_too_large(e):
+    """MAX_CONTENT_LENGTH（app.config、/api/shop/wishes/parse-image 用）超過時。
+
+    werkzeug既定の e.description は英語（"The data value transmitted exceeds
+    the capacity limit."）で、他のエラー文言（すべて日本語）と体裁が揃わない。
+    HTTPException より先にマッチさせるため、より具体的な例外クラスとして
+    個別に登録する（Flask/werkzeugはMROで最も具体的なハンドラを優先するため、
+    登録順に関わらずこちらが handle_http より優先される）。
+    """
+    return jsonify({"error": "送信されたデータが大きすぎます。画像を圧縮するか、枚数を減らしてください。"}), 413
 
 
 @app.errorhandler(HTTPException)
@@ -3380,22 +3394,31 @@ def shop_wishes_parse():
 
 # 画像取込（/api/shop/wishes/parse-image）用の data URL 検証。
 # ヘッダの mime は攻撃者が任意に詐称できるため（例: image/png と名乗って
-# 実際は画像でないバイト列を送る）、"image/(png|jpeg|webp)" への限定と
+# 実際は画像でないバイト列を送る）、"image/(png|jpeg|jpg|webp)" への限定と
 # デコード後のマジックナンバー確認の2層で守る。
 #   層1: この正規表現。data: スキーム以外（http(s) 等）を弾く。
 #        http(s) URL をそのまま LLM プロバイダに渡すと、そのURLを
 #        フェッチさせられる（内部ネットワーク・クラウドのメタデータ
 #        エンドポイント等へのSSRF）ため、data: 以外は一切許可しない。
-#   層2: _WISH_IMAGE_MAGIC_CHECKS。層1のヘッダ表示だけを信用せず、
+#        jpg は jpeg の非標準だが実在する mime 表記（canvas.toDataURL は
+#        image/jpeg しか出さないが、手書きクライアントが送ってくる可能性を
+#        1文字の変更で潰しておく）。
+#   層2: 先頭バイトのマジックナンバー確認。層1のヘッダ表示だけを信用せず、
 #        実バイト列の先頭を見て初めて画像として扱う。
-_WISH_IMAGE_DATA_URL_RE = re.compile(r"^data:image/(png|jpeg|webp);base64,(.+)$", re.DOTALL)
+_WISH_IMAGE_DATA_URL_RE = re.compile(r"^data:image/(png|jpe?g|webp);base64,(.+)$", re.DOTALL)
 
-# 画像1枚あたりの上限（decode前のbase64表現の文字数で見る）。
-# base64は元バイト数の約4/3に膨らむため、この閾値は「デコード後4MB」を
-# 安全側（若干厳しめ）に近似したもの。decode前に弾けるため、巨大な
-# 文字列を毎回デコードするコスト（decode bomb的な負荷）も避けられる。
-_WISH_IMAGE_MAX_B64_CHARS = 4 * 1024 * 1024
+# 画像1枚あたりの上限（デコード後のバイト数で4MB。実際の判定は _WISH_IMAGE_MAX_BYTES）。
 _WISH_IMAGE_MAX_BYTES = 4 * 1024 * 1024
+# decode前のbase64表現の文字数での事前足切り。base64は3バイトを4文字に
+# 符号化するため、4MB（_WISH_IMAGE_MAX_BYTES）ぶんのバイト列は最大で
+# ceil(4MB/3)*4 文字になる。ここを 4*1024*1024（文字数）のまま据え置くと
+# 実効上限が 3MiB（4*1024*1024文字 → floor(.../4)*3 バイト）に縮んでしまい、
+# _WISH_IMAGE_MAX_BYTES のデコード後4MBチェックに絶対に到達しなくなる
+# （3.5MBのスマホ写真という主要ユースケースが「4MBを超えています」という
+# 誤った理由で弾かれるバグになっていた。レビューで指摘・修正）。
+# この事前チェックは「decodeする前に明らかに大きすぎるものを弾く」ためだけの
+# ものなので、_WISH_IMAGE_MAX_BYTES ちょうどを表現できる文字数を計算する。
+_WISH_IMAGE_MAX_B64_CHARS = -(-_WISH_IMAGE_MAX_BYTES // 3) * 4  # ceil(bytes/3)*4
 
 
 def _validate_wish_image(data_url):
@@ -3409,7 +3432,7 @@ def _validate_wish_image(data_url):
     m = _WISH_IMAGE_DATA_URL_RE.match(data_url)
     if not m:
         # ここで http(s) 等の外部URLも含めて一律に拒否する（層1、SSRF対策）。
-        abort(400, description="images は data:image/png;base64,... 形式（png/jpeg/webp）で指定してください")
+        abort(400, description="images は data:image/png;base64,... 形式（png/jpeg/jpg/webp）で指定してください")
     payload = m.group(2)
     if len(payload) > _WISH_IMAGE_MAX_B64_CHARS:
         abort(413, description="画像1枚あたり4MBを超えています")
@@ -3427,6 +3450,15 @@ def _validate_wish_image(data_url):
     is_webp = raw[:4] == b"RIFF" and raw[8:12] == b"WEBP"
     if not (is_png or is_jpeg or is_webp):
         abort(400, description="対応していない画像形式です（png/jpeg/webpのみ）")
+
+
+# 画像解析は vision の推論に最大90秒かかる（src/ai.py の timeout=90）。
+# gunicorn は --workers 2 --threads 4 で同時8リクエストしか捌けないため、
+# 無制限に受けると画像取込だけで全スレッドが埋まり、他店舗のあらゆる API が
+# 最大90秒止まる（レビュー指摘: 認証済みの店長が同時に数件投げるだけで
+# テナント全体を巻き込むDoSになる）。ワーカーあたり2件までに制限し、
+# 残りのスレッドを通常のリクエストに残す。
+_WISH_IMAGE_SEMAPHORE = threading.BoundedSemaphore(2)
 
 
 @app.post("/api/shop/wishes/parse-image")
@@ -3473,7 +3505,22 @@ def shop_wishes_parse_image():
         abort(503, description="AI未接続のため画像を読み取れません。テキストを貼り付けてください")
 
     staffs = query_all("SELECT id, name FROM staffs WHERE shop_id=? AND is_resigned=0", (shop_id,))
-    result = ai.parse_wish_image(images, year_month, [s["name"] for s in staffs])
+
+    # ★ 同時実行数の上限（レビュー指摘）。取れなければ即座に429で返す
+    # （blocking=False。90秒待たせてから429にしても店長を待たせるだけ）。
+    if not _WISH_IMAGE_SEMAPHORE.acquire(blocking=False):
+        abort(429, description="画像の読み取りが混み合っています。少し待ってからもう一度お試しください")
+    try:
+        # ★ プロセスグローバルな _LAST_LLM_ERROR は他店舗の直近の失敗を引きずる
+        # ことがある（レビュー指摘）。呼び出し直前にクリアすることで、無関係な
+        # 店舗の失敗詳細が entries=[] のレスポンスに紛れ込む確率を下げる
+        # （完全な保証ではない。並行リクエスト同士の競合は残る）。
+        ai.clear_last_llm_error()
+        result = ai.parse_wish_image(images, year_month, [s["name"] for s in staffs])
+    finally:
+        # ★ 例外が飛んでも必ず解放する。ここが漏れると1回の失敗でセマフォが
+        # 永久に埋まり、画像取込機能全体が死ぬ（レビュー指摘）。
+        _WISH_IMAGE_SEMAPHORE.release()
     if result is None:
         # is_llm_available() を上で確認済みだが、呼び出しの間に設定が変わる
         # 可能性もゼロではないため、契約どおり None も 503 として扱う

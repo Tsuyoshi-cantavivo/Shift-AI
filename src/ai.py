@@ -54,6 +54,19 @@ def get_last_llm_error():
     return _LAST_LLM_ERROR
 
 
+def clear_last_llm_error():
+    """_LAST_LLM_ERROR をクリアする。
+
+    プロセスグローバルなので、無関係な呼び出し（他店舗・他リクエスト）の
+    エラーがそのまま残っていることがある。呼び出し元（例:
+    POST /api/shop/wishes/parse-image）が「この呼び出しの直前」に呼んでおくことで、
+    無関係な失敗詳細を entries が空のレスポンスに紛れ込ませる確率を下げられる。
+    完全な保証ではない（並行リクエスト同士が競合すればすり替わりうる）。
+    """
+    global _LAST_LLM_ERROR
+    _LAST_LLM_ERROR = None
+
+
 def _safe_err_body(resp):
     """HTTPエラーレスポンスからユーザー表示可能なエラー詳細を抽出（APIキー等の機密を除く）。"""
     try:

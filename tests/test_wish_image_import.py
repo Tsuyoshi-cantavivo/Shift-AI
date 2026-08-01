@@ -329,3 +329,136 @@ class TestParseImageApi:
         detail = d.get("llm_error_detail") or ""
         assert "image_url" in detail and "400" in detail, \
             "get_last_llm_error() の詳細がレスポンスに含まれていない"
+
+    # --- ここから: レビュー指摘（Important 1・2、Minor 1・2・3）の回帰テスト ---
+
+    def test_accepts_3_5mb_decoded_image(self, client, monkeypatch):
+        """デコード後3.5MBの画像（スマホ写真の主要ユースケース）は通ること。
+
+        修正前は base64 の文字数上限を「デコード後4MB」と同じ 4*1024*1024
+        （文字数）にしていたため、実効上限が floor(4*1024*1024/4)*3 = 3MiB に
+        縮んでおり、3.5MBの画像が「4MBを超えています」という誤った理由で
+        413になっていた（レビュー指摘・実測して確認済み）。
+        """
+        shop_id = insert_shop()
+        payload_3_5mb = _PNG_MAGIC + b"\x00" * (int(3.5 * 1024 * 1024) - len(_PNG_MAGIC))
+        img = _b64_data_url("image/png", payload_3_5mb)
+        _use_vision_api(monkeypatch, json.dumps({
+            "ocr_text": "", "entries": [], "unparsed": [],
+        }))
+        r = client.post("/api/shop/wishes/parse-image",
+                        json={"images": [img], "year_month": "2026-08"},
+                        headers=auth(self._tok(shop_id)))
+        assert r.status_code == 200, \
+            f"3.5MBの画像が弾かれた（実効上限3MiB化のバグ再発）: {r.get_json()}"
+
+    def test_rejects_4_5mb_decoded_image(self, client):
+        """デコード後4.5MBの画像は仕様どおり（4MB上限）弾かれること。"""
+        shop_id = insert_shop()
+        payload_4_5mb = _PNG_MAGIC + b"\x00" * (int(4.5 * 1024 * 1024) - len(_PNG_MAGIC))
+        img = _b64_data_url("image/png", payload_4_5mb)
+        r = client.post("/api/shop/wishes/parse-image",
+                        json={"images": [img]}, headers=auth(self._tok(shop_id)))
+        assert r.status_code in (400, 413)
+
+    def test_returns_429_when_concurrency_limit_reached(self, client, monkeypatch):
+        """同時実行数（appmod._WISH_IMAGE_SEMAPHORE、上限2）を使い切ると429。
+
+        画像解析は最大90秒かかる（src/ai.py timeout=90）ため、無制限に受け付けると
+        gunicornの全スレッド（--workers 2 --threads 4）を画像取込だけで
+        埋めてしまい、他店舗のAPIまで止まる（レビュー指摘）。
+        """
+        monkeypatch.setattr(appmod.ai, "is_llm_available", lambda: True)
+        # セマフォを外側から使い切って「混み合っている」状態を再現する。
+        acquired = []
+        while appmod._WISH_IMAGE_SEMAPHORE.acquire(blocking=False):
+            acquired.append(1)
+        assert acquired, "セマフォの初期値が0（テスト前提が崩れている）"
+        try:
+            shop_id = insert_shop()
+            r = client.post("/api/shop/wishes/parse-image",
+                            json={"images": [_PNG_1PX], "year_month": "2026-08"},
+                            headers=auth(self._tok(shop_id)))
+            assert r.status_code == 429
+            assert "混み合" in (r.get_json() or {}).get("error", "")
+        finally:
+            for _ in acquired:
+                appmod._WISH_IMAGE_SEMAPHORE.release()
+
+    def test_semaphore_released_after_exception(self, client, monkeypatch):
+        """ai.parse_wish_image が例外を投げても、セマフォは解放されること。
+
+        finally が無いと、1回の失敗（本番でも起こりうる: LLM応答のパース中の
+        想定外の例外等）でセマフォの枠が永久に1つ埋まったままになり、
+        繰り返せば画像取込機能全体が使えなくなる（レビュー指摘）。
+        """
+        monkeypatch.setattr(appmod.ai, "is_llm_available", lambda: True)
+
+        def boom(*a, **k):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(appmod.ai, "parse_wish_image", boom)
+        shop_id = insert_shop()
+        tok = self._tok(shop_id)
+        body = {"images": [_PNG_1PX], "year_month": "2026-08"}
+        # セマフォの上限（2）を超える回数だけ失敗させる。finallyで解放されて
+        # いれば何回失敗しても429にならない。解放されていなければ、上限回数の
+        # 失敗でセマフォが枯渇し、以降の呼び出しが429になる。
+        for _ in range(4):
+            r = client.post("/api/shop/wishes/parse-image", json=body, headers=auth(tok))
+            assert r.status_code == 500
+        r_next = client.post("/api/shop/wishes/parse-image", json=body, headers=auth(tok))
+        assert r_next.status_code != 429, \
+            "例外時にセマフォが解放されていない（1回の失敗で機能が詰まる）"
+
+    def test_413_message_is_japanese(self, client):
+        """MAX_CONTENT_LENGTH（16MB）超過時のエラー文言が日本語であること。
+
+        werkzeug既定の英語文言 "The data value transmitted exceeds the
+        capacity limit." がそのまま漏れていた（Minor指摘）。
+        """
+        shop_id = insert_shop()
+        # 1枚あたりのdata URL検証より前に、Flask全体のMAX_CONTENT_LENGTH
+        # （16MB）で弾かれる大きさのボディを送る。
+        huge = "data:image/png;base64," + ("A" * (17 * 1024 * 1024))
+        r = client.post("/api/shop/wishes/parse-image",
+                        json={"images": [huge]}, headers=auth(self._tok(shop_id)))
+        assert r.status_code == 413
+        error = (r.get_json() or {}).get("error", "")
+        assert "capacity limit" not in error, "werkzeug既定の英語文言のまま漏れている"
+        assert any(ch >= "぀" for ch in error), "日本語のエラー文言になっていない"
+
+    def test_clears_stale_llm_error_before_call(self, client, monkeypatch):
+        """前回（他店舗などの）失敗詳細を、今回のentries空レスポンスに含めないこと。
+
+        _LAST_LLM_ERROR はプロセスグローバルなので、ai.parse_wish_image を
+        呼ぶ前に appmod.ai.clear_last_llm_error() を呼んでいないと、店舗Aの
+        失敗詳細が、直後にentries空になった店舗Bのレスポンスに紛れ込む
+        （Minor指摘）。ここでは clear_last_llm_error() 自体はモックせず本物を
+        使い、直前に残しておいた古いエラーが今回のレスポンスに出ないことを
+        確認する。
+        """
+        appmod.ai._LAST_LLM_ERROR = "古い店舗Aの失敗の詳細（HTTP 500）"
+        shop_id = insert_shop()
+        # 今回の呼び出し自体はJSONが読めた体で、entriesが空になるケース
+        # （読み取れる希望が無かった）を再現する。get_last_llm_error/
+        # clear_last_llm_error はモックせず本物を使う。
+        _use_vision_api(monkeypatch, json.dumps({"ocr_text": "", "entries": [], "unparsed": []}))
+        r = client.post("/api/shop/wishes/parse-image",
+                        json={"images": [_PNG_1PX], "year_month": "2026-08"},
+                        headers=auth(self._tok(shop_id)))
+        assert r.status_code == 200
+        d = r.get_json()
+        assert d.get("llm_error_detail") is None, \
+            f"無関係な店舗の古い失敗詳細が紛れ込んでいる: {d.get('llm_error_detail')!r}"
+
+    def test_accepts_jpg_mime(self, client, monkeypatch):
+        """image/jpg（jpegの非標準表記）のヘッダも受け付けること。"""
+        shop_id = insert_shop()
+        jpeg_bytes = b"\xff\xd8\xff" + b"\x00" * 100
+        img = _b64_data_url("image/jpg", jpeg_bytes)
+        _use_vision_api(monkeypatch, json.dumps({"ocr_text": "", "entries": [], "unparsed": []}))
+        r = client.post("/api/shop/wishes/parse-image",
+                        json={"images": [img], "year_month": "2026-08"},
+                        headers=auth(self._tok(shop_id)))
+        assert r.status_code == 200, f"image/jpg が拒否された: {r.get_json()}"
