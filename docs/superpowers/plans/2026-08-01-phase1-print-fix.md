@@ -398,7 +398,7 @@ test.beforeEach(async ({ page, request }) => {
     managerCode: SHOP.managerCode,
     password: SHOP.managerPassword,
   });
-  await page.click('[data-nav="shifts"]');
+  await page.click('.side-item[data-screen="shifts"]');
   await page.waitForSelector('#printBtn');
 });
 
@@ -459,7 +459,7 @@ npx playwright test e2e/print_view.spec.js
 ```
 Expected: 「afterprint の後も…」と「beforeprint が発火しない…」の 2 件が FAIL（`expect(count).toBe(1)` に対し `0`）。残り 2 件は PASS。
 
-失敗しない場合は、`ensureShop` / `loginAsManager` / `[data-nav="shifts"]` のセレクタが実装と合っていない可能性がある。`e2e/helpers.js` と `public/app.js:615-643`（`renderNav`）を読んで実際の属性名に合わせること。
+失敗しない場合は、テストが実装に届いていない（ログイン失敗・画面遷移失敗）ことを疑う。`page.content()` をダンプして確認すること。ナビは `renderNav()`（`public/app.js:615-643`）が `.side-item[data-screen="<key>"]` を生成する。E2E のビューポートは 1280x800（PC）なのでサイドバーが見えている。
 
 - [ ] **Step 3: `openPrintView` が payload を保持するようにする**
 
@@ -744,7 +744,7 @@ test('選んだ向きは再読み込み後も保たれる', async ({ page }) => 
 
   await page.reload();
   await page.waitForSelector('#appView:not(.d-none)');
-  await page.click('[data-nav="shifts"]');
+  await page.click('.side-item[data-screen="shifts"]');
   await page.waitForSelector('#printOrientBtn');
 
   await expect(page.locator('#printOrientLabel')).toHaveText('縦');
