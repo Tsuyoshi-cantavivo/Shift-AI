@@ -32,41 +32,6 @@ jobs:
       - name: シフトエンジン不変量テスト
         run: python tests/run_tests.py
 
-  # 一時的な切り分け用ジョブ。
-  # CI のログは管理者権限が無いと API から読めないため、仮説ごとにステップを分けて
-  # 「どのステップが落ちたか」を外から読めるようにしている。原因が確定したら削除する。
-  diag:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: 依存パッケージをインストール
-        run: pip install -r requirements.txt
-      # 全件を1プロセスで走らせたときだけ落ちる（ファイル単位・グループ単位では通る）。
-      # 失敗内容をジョブサマリに書き出す。サマリは check-runs API の output.text として
-      # 公開で読めるため、ログの取得権限が無くても中身を確認できる。
-      - name: 'diag-full-suite'
-        continue-on-error: true
-        run: |
-          set +e
-          python -m pytest tests/ -q --tb=short -rf > /tmp/pytest.log 2>&1
-          echo "pytest exit=$?"
-          grep -E '^(FAILED|ERROR)' /tmp/pytest.log > /tmp/failed.txt
-          tail -5 /tmp/pytest.log > /tmp/tail.txt
-          python3 -c "
-          def emit(title, path, limit):
-              s = open(path, encoding='utf-8', errors='replace').read()[-limit:]
-              s = s.replace('%','%25').replace('\r','').replace('\n','%0A')
-              print('::error title=' + title + '::' + s)
-          emit('failed-tests', '/tmp/failed.txt', 4000)
-          emit('summary-line', '/tmp/tail.txt', 1000)
-          emit('pytest-tail', '/tmp/pytest.log', 4000)
-          "
-          exit 0
-
   jscheck:
     runs-on: ubuntu-latest
     steps:
