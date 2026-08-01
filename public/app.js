@@ -3184,6 +3184,10 @@ async function openWishImportModal(onImported) {
     // 自己参照照合であり、テキスト経路（人間が貼ったテキストと照合）ほどの
     // 保証が無い（Task3レビュー申し送り）。ステップ2側の文言分岐にこのフラグを使う。
     images: [], viaImage: false, ocrText: null,
+    // Task6: 名前候補（name_candidates、entryIdx文字列→候補配列）。_wtiParse が
+    // レスポンスから毎回入れ直す。_wtiRenderUnassigned が参照するまでの間
+    // undefined にならないよう空オブジェクトで初期化しておく。
+    nameCandidates: {},
   };
   const wrap = openModal('<i class="bi bi-clipboard-plus"></i> テキストから取り込む',
     '<div class="text-secondary small">読み込み中...</div>', null, { width: 640 });
@@ -3478,6 +3482,11 @@ async function _wtiParse(wrap, state) {
     // （Task3レビュー申し送り、Task5固有要件）。
     state.viaImage = state.images.length > 0;
     state.ocrText = state.viaImage ? (r.ocr_text || '') : null;
+    // Task6: name_candidates はテキスト経路・画像経路のどちらのレスポンスにも
+    // 同じ形（{"<entry index>": [{staff_id,name,score,reason}]}）で載っている
+    // （src/app.py の /wishes/parse・/parse-image 共通実装）ため、endpoint に
+    // 関わらずここ1箇所で拾えば両経路とも _wtiRenderUnassigned に伝わる。
+    state.nameCandidates = r.name_candidates || {};
     state.unparsed = r.unparsed || [];
     state.items = _wtiFlatten(r.entries || []);
     state.viewedStaffIds = new Set();
@@ -3882,6 +3891,16 @@ function _wtiOpenDetail(wrap, state, date) {
 
 /* 未割り当て一覧: staff_id が null のエントリを、元の1文（entryIdx）単位でまとめて
    表示する。スタッフを選ぶまでは登録対象に入らない（推測で割り当てない）。 */
+/* Task6: name_candidates のスコア→確度ラベル対応。brief記載の3段階（境界値は
+   上のバケツに含める。0.7は「よく似ています」、0.9は「ほぼ一致」）。
+   サーバ側のスコアは 1.0/0.85/0.75/0.7/0.65 の離散値、または編集距離ベースの
+   連続値（0.6以上のみ候補化）なので、境界を跨ぐ値が実際に来うる。 */
+function _wtiCandLabel(score) {
+  if (score >= 0.9) return 'ほぼ一致';
+  if (score >= 0.7) return 'よく似ています';
+  return '似ているかもしれません';
+}
+
 function _wtiRenderUnassigned(wrap, state) {
   const box = wrap.querySelector('#wtiUnassigned');
   if (!box) return;
@@ -3891,34 +3910,66 @@ function _wtiRenderUnassigned(wrap, state) {
   if (!entryIdxs.length) { box.innerHTML = ''; return; }
   const label = { rest: '休み', any: 'いつでも可', morning: '早番', evening: '遅番', time: '時間指定' };
   const staffOpts = state.staffs.map((s) => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+  const nameCandidates = state.nameCandidates || {};
   const rows = entryIdxs.map((eidx) => {
     const grp = groups[eidx];
     const raw = grp[0].raw;
     const datesTxt = grp.map((g) => g.date.slice(5)).join('、');
     const availTxt = label[grp[0].availability] || grp[0].availability;
     const hintTxt = grp[0].staffHint ? `（候補: ${esc(grp[0].staffHint)}）` : '';
+    // Task6: サーバが候補を返した entry だけ、確度付きラジオを <select> の上に足す。
+    // 候補が無い entry は従来どおり <select> のみ（brief: 候補が無ければフォールバック）。
+    const cands = nameCandidates[eidx] || [];
+    const candListHtml = cands.length ? `
+      <div class="wti-cand-list" role="radiogroup" aria-label="名前候補">
+        ${cands.map((c, ci) => `
+          <div class="form-check wti-cand-radio wti-cand-option">
+            <input class="form-check-input" type="radio" name="wtiCand${esc(eidx)}" id="wtiCand${esc(eidx)}_${ci}" data-entry="${esc(eidx)}" data-cand-staff="${c.staff_id}">
+            <label class="form-check-label" for="wtiCand${esc(eidx)}_${ci}">${esc(c.name)} <span class="wti-cand-score-label text-secondary small">${esc(_wtiCandLabel(c.score))}</span></label>
+          </div>`).join('')}
+        <div class="form-check wti-cand-radio wti-cand-other">
+          <input class="form-check-input" type="radio" name="wtiCand${esc(eidx)}" id="wtiCandOther${esc(eidx)}" data-entry="${esc(eidx)}" data-cand-other="1">
+          <label class="form-check-label" for="wtiCandOther${esc(eidx)}">その他から選ぶ</label>
+        </div>
+      </div>` : '';
     return `<div class="wti-unassigned-row">
       <div class="wti-unassigned-info">
         <div class="small text-secondary">${esc(datesTxt)} ・ ${esc(availTxt)}${hintTxt}</div>
         <div class="wti-raw-quote">${esc(raw)}</div>
       </div>
-      <select class="form-select wti-unassigned-select" data-entry="${eidx}">
+      ${candListHtml}
+      <select class="form-select wti-unassigned-select" data-entry="${esc(eidx)}"${cands.length ? ' style="display:none"' : ''}>
         <option value="">誰の希望か選ぶ</option>${staffOpts}
       </select>
     </div>`;
   }).join('');
   box.innerHTML = `<div class="alert alert-warning py-2 mb-2"><i class="bi bi-person-exclamation"></i> 未割り当て ${entryIdxs.length}件（スタッフを選ぶまで登録されません）</div>${rows}`;
-  box.querySelectorAll('[data-entry]').forEach((sel) => sel?.addEventListener('change', async () => {
-    const eidx = sel.dataset.entry;
-    const sid = +sel.value || null;
+
+  // 候補ラジオ・フォールバックselectのどちらから来ても、スタッフ確定処理は
+  // 完全に共通（I-7: 既存希望の取得を必ず経由させる）。
+  const assign = async (eidx, sid) => {
     if (!sid) return;
-    state.items.forEach((it) => { if (String(it.entryIdx) === eidx && !it.staffId) it.staffId = sid; });
+    state.items.forEach((it) => { if (String(it.entryIdx) === String(eidx) && !it.staffId) it.staffId = sid; });
     state.calStaffId = sid;
     buzz(10);
     // I-7: 未割り当てから新たにスタッフへ振り分けたときは、そのスタッフ分の既存希望が
     // まだ未取得（初回parse時点では staffId が null で対象外だった）なので取得する。
     await _wtiEnsureExistingLoaded(state, [sid]);
     _wtiRenderStep2(wrap, state);
+  };
+
+  // 候補ラジオを選んだ場合: 即座にそのスタッフで確定する。
+  box.querySelectorAll('[data-cand-staff]').forEach((radio) => radio?.addEventListener('change', () => {
+    assign(radio.dataset.entry, +radio.dataset.candStaff || null);
+  }));
+  // 「その他から選ぶ」を選んだ場合: 確定はせず、隠れている <select> を出すだけ
+  // （brief Step1のモックアップどおり、▼で一覧から選ぶ動線に切り替える）。
+  box.querySelectorAll('[data-cand-other]').forEach((radio) => radio?.addEventListener('change', () => {
+    const sel = box.querySelector(`.wti-unassigned-select[data-entry="${CSS.escape(radio.dataset.entry)}"]`);
+    if (sel) { sel.style.display = ''; sel.focus(); }
+  }));
+  box.querySelectorAll('.wti-unassigned-select').forEach((sel) => sel?.addEventListener('change', async () => {
+    await assign(sel.dataset.entry, +sel.value || null);
   }));
 }
 

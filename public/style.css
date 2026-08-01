@@ -1546,6 +1546,15 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
   white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow-y: auto;
 }
 
+/* Task6: 未割り当て一覧の名前候補（name_candidates）ラジオ。.wti-unassigned-row の
+   flex子として、情報ブロックの下・<select>の上に幅いっぱいで並べる。
+   誤配属防止のため既定でどれも選択済みにしない仕様（brief）なので、視覚的にも
+   「選ばれていない」ことが分かるよう既存の .form-check の見た目をそのまま使う
+   （チェック済み/未チェックの区別は新規トークンを増やさずブラウザ既定に委ねる）。 */
+.wti-cand-list { flex: 1 1 100%; display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
+.wti-cand-radio { margin-bottom: 0; }
+.wti-cand-score-label { margin-left: 2px; }
+
 /* 代理閲覧バー — 誤操作防止のため常時可視にする。
    意味色ベタ地の抜き文字は #fff ではなく var(--paper) を使う規約に従う。
    .app-header（sticky top:0）のすぐ下に自身も sticky で貼り付ける。
