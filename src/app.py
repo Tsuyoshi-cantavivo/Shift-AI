@@ -20,7 +20,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # src/ をモジュールパスに追加
 
 from db import query_all, query_one, execute, insert_row, init_schema
-from auth import hash_password, verify_password, gen_token, strip_password
+from auth import hash_password, verify_password, gen_token, strip_password, dummy_verify
 from utils import (
     calc_next_period, jst_now, jst_today, minutes_between, compute_break_minutes,
     night_minutes, validate_password, parse_settings, build_ics, parse_iso, normalize_iso,
@@ -873,6 +873,10 @@ def login():
         admin = query_one("SELECT * FROM system_admins WHERE admin_id=?", (admin_id_guess,))
         if not admin and admin_id_guess != "admin":
             admin = query_one("SELECT * FROM system_admins WHERE admin_id=?", ("admin",))
+        if not admin:
+            # 存在しない管理者IDでも、存在する場合と同じだけ時間を使う。
+            # 省くと応答時間の差でIDの実在を判別できてしまう（auth.dummy_verify 参照）。
+            dummy_verify(pw)
         if admin and verify_password(pw, admin["password_hash"]):
             _clear_login_failures(attempt_key)
             audit("auth.login", target_type="system_admin", target_id=admin["id"],
@@ -894,6 +898,11 @@ def login():
         "WHERE sh.shop_code=? AND s.staff_code=? AND s.is_resigned=0 AND sh.is_active=1 "
         "AND COALESCE(sh.is_archived,0)=0",
         (shop_code, user_code))
+    if not staff:
+        # 実在するユーザーコードかどうかを応答時間で判別されないよう、
+        # 見つからなかった場合も同じだけ計算コストを払う（auth.dummy_verify 参照）。
+        # ここが最も現実的なユーザー列挙の入口（店舗コードは推測しやすいため）。
+        dummy_verify(pw)
     if staff and verify_password(pw, staff["password_hash"]):
         _clear_login_failures(attempt_key)
         audit("auth.login", target_type="staff", target_id=staff["id"], shop_id=staff["shop_id"],

@@ -290,21 +290,65 @@ class TestAuthSecurity:
         r = client.post("/api/login", json={"id": "admin", "password": "Admin123"})
         assert r.status_code == 200
 
-    def test_login_timing_attack_resistance(self, client):
-        """存在しないIDと存在するIDの応答時間が近いこと（タイミング攻撃耐性）。"""
+    def _count_hashes(self, monkeypatch, client, payload):
+        """1回のログイン試行でパスワードハッシュ計算が何回走ったかを数える。
+
+        実時間で測る方式はマシン速度に左右されて信用できない。
+        PBKDF2 は手元(Apple Silicon)で約3.6ms、CI(共有ランナー)で約17msと5倍違い、
+        同じ実装でも速い機械では差が閾値に埋もれて検出できなかった。
+        「ハッシュ計算を省いていないか」を直接数えることで決定的に判定する。
+        """
+        import auth as authmod
+        calls = []
+        real = authmod.hash_password
+
+        def counting(password):
+            calls.append(password)
+            return real(password)
+
+        # verify_password / dummy_verify は auth モジュール内の名前で
+        # hash_password を引くため、ここを差し替えれば両方が捕捉できる。
+        monkeypatch.setattr(authmod, "hash_password", counting)
+        client.post("/api/login", json=payload)
+        return len(calls)
+
+    def test_login_hashes_password_even_when_staff_does_not_exist(self, client, monkeypatch):
+        """実在しないユーザーコードでもパスワードハッシュ計算を行うこと。
+
+        ハッシュ(PBKDF2 5万回)を省くと、存在する場合と存在しない場合で応答時間が
+        桁違いになり、応答時間を測るだけでユーザーコードの実在を判別できてしまう
+        （ユーザー列挙攻撃）。店舗コードは推測しやすいため、ここが最も現実的な入口。
+
+        ※ 旧版は実時間の比を見ていたが、(a) 比較対象が「admin分岐」と
+           「user_code欠落による入力エラー」でユーザーの実在とは無関係な経路差を
+           測っていた、(b) 下限 0.001 秒のせいで速い機械では差が埋もれた、
+           の2点で検出力が無かった。呼び出し回数で直接見る形に改めている。
+        """
+        shop_id = insert_shop(code="TMSHOP")
+        insert_staff(shop_id, "REAL01", "実在スタッフ")
+        base = {"shop_code": "TMSHOP", "password": "wrong-password"}
+
+        n_real = self._count_hashes(monkeypatch, client, dict(base, user_code="REAL01"))
+        n_ghost = self._count_hashes(monkeypatch, client, dict(base, user_code="GHOST1"))
+
+        assert n_real >= 1, "実在ユーザーでハッシュ計算が走っていない（前提が崩れている）"
+        assert n_ghost >= 1, \
+            "実在しないユーザーコードでハッシュ計算を省いている。応答時間の差で実在を判別できる"
+        assert n_ghost == n_real, \
+            f"ハッシュ計算の回数が実在の有無で異なる (existing={n_real} vs missing={n_ghost})"
+
+    def test_login_hashes_password_even_when_admin_does_not_exist(self, client, monkeypatch):
+        """実在しない管理者IDでもパスワードハッシュ計算を行うこと。"""
+        n_ghost = self._count_hashes(monkeypatch, client, {"id": "admin", "password": "wrong"})
+
         insert_admin("admin", "Admin123")
-        # 存在する ID
-        t1 = time.time()
-        client.post("/api/login", json={"id": "admin", "password": "wrong"})
-        e1 = time.time() - t1
-        # 存在しない ID
-        t2 = time.time()
-        client.post("/api/login", json={"id": "nonexistent", "password": "wrong"})
-        e2 = time.time() - t2
-        # PBKDF2 50000 iter で十分遅いため、差が小さい（存在確認のみ先にしていると差が大）
-        # 5倍以上の差がないこと（緩い閾値）
-        assert max(e1, e2) / max(min(e1, e2), 0.001) < 5.0, \
-            f"存在/不在で応答時間差が大きい (existing={e1:.3f}s vs missing={e2:.3f}s)"
+        n_real = self._count_hashes(monkeypatch, client, {"id": "admin", "password": "wrong"})
+
+        assert n_real >= 1
+        assert n_ghost >= 1, \
+            "実在しない管理者IDでハッシュ計算を省いている。応答時間の差で実在を判別できる"
+        assert n_ghost == n_real, \
+            f"ハッシュ計算の回数が実在の有無で異なる (existing={n_real} vs missing={n_ghost})"
 
     def test_password_hash_not_in_login_response(self, client):
         """ログイン成功レスポンスに password_hash を含めない。"""

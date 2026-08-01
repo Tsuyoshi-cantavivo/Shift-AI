@@ -29,7 +29,9 @@ mcp = FastMCP("shift-test-runner")
 
 def _run(cmd, cwd=BASE_DIR, timeout=180):
     try:
-        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        # encoding を明示する（ロケール依存だと日本語のテスト名で落ちる）
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                           encoding="utf-8", timeout=timeout)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "タイムアウト(%ds)" % timeout
