@@ -137,9 +137,14 @@ class TestMediaPrintSplit:
     def test_screen_css_keeps_rules_after_first_media_print(self):
         css = _read_css()
         screen, _printed = _split_media_print(css)
-        # .tl-legend は 1 つ目の @media print(アニメーション停止) より後にある画面用CSS。
-        # 単純 split ではここが検査対象から落ちる。
-        assert ".tl-legend" in screen
+        # .matrix-input / .shortage-chip は 1 つ目の @media print（アニメーション停止、
+        # style.css:1015）より後にある画面用CSS。単純 split ではここが丸ごと落ちる。
+        # 落ちていたことを実証するため、旧実装との差も同時に確認する。
+        assert ".matrix-input" in screen
+        assert ".shortage-chip" in screen
+        naive = css.split("@media print")[0]
+        assert ".matrix-input" not in naive, \
+            "旧実装でも拾えるセレクタでは、この回帰テストは何も守っていない"
 
     def test_print_css_contains_page_rule(self):
         css = _read_css()
@@ -166,13 +171,23 @@ Expected: FAIL with `NameError: name '_split_media_print' is not defined`
 `tests/test_design_tokens.py` の既存ヘルパ群（`_read_css` の隣）に追加:
 
 ```python
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+
+
 def _split_media_print(css):
     """CSS を (画面用, 印刷用) に分ける。
 
     @media print は複数箇所にあるため split では足りない。開き波括弧から
     対応する閉じ波括弧までを数え、ブロックごとに正確に切り出す。
+
+    先にコメントを落とすのが要。style.css:998 のようにコメント文中へ
+    "@media print" と書かれている箇所があり、落とさないとそこをブロック開始と
+    誤認して、直後の画面用ルールを印刷ブロックとして取り込んでしまう
+    （＝その範囲がコントラスト検査から漏れる）。
+
     戻り値の印刷用は @media print の中身のみ（外側の波括弧を含まない）。
     """
+    css = _CSS_COMMENT_RE.sub("", css)
     screen_parts, print_parts = [], []
     i = 0
     while True:
@@ -261,9 +276,16 @@ def _read_appjs():
     return _read("public/app.js")
 
 
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+
+
 def _print_css():
-    """style.css の @media print ブロックの中身をすべて連結して返す。"""
-    css = _read_css()
+    """style.css の @media print ブロックの中身をすべて連結して返す。
+
+    コメント文中の "@media print"（style.css:998 など）をブロック開始と
+    誤認しないよう、先にコメントを落とす。
+    """
+    css = _CSS_COMMENT_RE.sub("", _read_css())
     parts = []
     i = 0
     while True:
