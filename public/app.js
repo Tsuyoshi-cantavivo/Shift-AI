@@ -1975,6 +1975,25 @@ async function loadShortage(box, start, end) {
 const SCREENS = {};
 
 /* ---------- Dashboard ---------- */
+/* 気にかけたい人カード。該当者がゼロなら空文字（カードごと出さない）。
+   出すのは「データがこう変わったか」という事実と声かけの例だけ。原因や状態は
+   書かない（勤務データから分かるのは働き方の変化だけで、理由は本人にしか
+   分からない）。末尾の但し書きは常に添える。 */
+function _dashAttentionCard(items) {
+  if (!items || !items.length) return '';
+  const rows = items.map((it) => `
+    <div class="dash-attention-row">
+      <div class="dash-attention-head"><b>${esc(it.name)}</b>さん — ${esc(it.headline)}</div>
+      <div class="dash-attention-fact">${esc(it.detail)}</div>
+      <div class="dash-attention-msg"><i class="bi bi-chat-left-quote"></i> ${esc(it.message)}</div>
+    </div>`).join('');
+  // bi-person-heart は Bootstrap Icons 1.11.3（public/index.html:10）に存在する
+  return card(sectionTitle('bi-person-heart', '気にかけたい人', badge('AI', 'ai')) +
+    `<div id="dashAttention">${rows}
+      <div class="dash-attention-note">変化には本人の希望や学業・家庭の事情など理由があります。決めつけずに伺ってください。</div>
+    </div>`);
+}
+
 SCREENS.dashboard = async function (el) {
   const tok = navToken();
   const today = todayStr();
@@ -2057,8 +2076,16 @@ SCREENS.dashboard = async function (el) {
     const rightBox = document.getElementById('dashRight');
     let aiAdvice = 'シフトデータを分析中...';
     try { const rev = await api('/shop/ai/review', { method: 'POST', body: JSON.stringify({ start: todayStr().slice(0, 8) + '01', end: todayStr().slice(0, 8) + '31' }) }); aiAdvice = rev.advice; } catch {}
+    // 気にかけたい人（働き方の変化）。該当者がいるときだけカードを出す。
+    // 毎回何か出ると見流されるので、出ること自体に意味を持たせる。
+    let attention = [];
+    try {
+      const at = await api('/shop/staff-attention', { method: 'POST' });
+      attention = at.items || [];
+    } catch { /* 取得できなくてもダッシュボードの他は出す */ }
     if (!isAlive(tok) || !el.isConnected) return;
     if (rightBox) rightBox.innerHTML =
+      _dashAttentionCard(attention) +
       card(sectionTitle('bi-stars', 'AIからの提案', badge('AI', 'ai')) + `<div class="reason-text" style="font-size:.88rem;line-height:1.7;white-space:pre-wrap">${esc(aiAdvice)}</div>`) +
       card(sectionTitle('bi-lightning', 'クイック操作') +
         `<button class="btn btn-ai w-full mb-2" id="qGen"><i class="bi bi-stars"></i> AIでシフト作成</button>

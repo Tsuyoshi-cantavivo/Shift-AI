@@ -64,7 +64,22 @@
   --header-h:    56px;
   --side-w:      248px;
   --bottom-h:    64px;
-  /* 代理閲覧バーの高さ。JS(renderImpersonationBar)が実測して上書きする（既定=非表示なので0）。
+  /* ダッシュボード「気にかけたい人」。該当者がいるときだけ出るカードなので、
+   目に入る強さは持たせつつ、警告色（danger）は使わない。これは異常の通知
+   ではなく、声をかけるきっかけの提示だから。 */
+.dash-attention-row { padding: 8px 0; border-bottom: 1px solid var(--rule); }
+.dash-attention-row:last-of-type { border-bottom: none; }
+.dash-attention-head { font-size: .9rem; margin-bottom: 2px; }
+.dash-attention-fact { font-size: .82rem; color: var(--ink-2); }
+.dash-attention-msg {
+  font-size: .82rem; color: var(--ink-2); background: var(--zebra);
+  border-radius: var(--radius-sm); padding: 6px 8px; margin-top: 6px;
+}
+.dash-attention-note {
+  font-size: .76rem; color: var(--ink-3); margin-top: 10px; line-height: 1.6;
+}
+
+/* 代理閲覧バーの高さ。JS(renderImpersonationBar)が実測して上書きする（既定=非表示なので0）。
      side-nav/side-overlay の上端オフセットはこれを含む --content-top を使うことで、
      バー表示中もヘッダ直下に正しく積み重なり重ならないようにする。 */
   --imp-bar-h:   0px;
