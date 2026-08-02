@@ -1554,6 +1554,10 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
 .wti-cand-list { flex: 1 1 100%; display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
 .wti-cand-radio { margin-bottom: 0; }
 .wti-cand-score-label { margin-left: 2px; }
+/* 候補を選んだだけでは確定させず、この明示操作でだけ確定する（キーボードで
+   ラジオを渡り歩いただけの誤確定を防ぐ）。列いっぱいに伸びると「次へ進む」
+   主導線に見えてしまうので、内容幅で左に置く。 */
+.wti-cand-confirm { align-self: flex-start; margin-top: 4px; }
 
 /* 代理閲覧バー — 誤操作防止のため常時可視にする。
    意味色ベタ地の抜き文字は #fff ではなく var(--paper) を使う規約に従う。

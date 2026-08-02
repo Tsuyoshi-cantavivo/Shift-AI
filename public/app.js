@@ -3932,13 +3932,14 @@ function _wtiRenderUnassigned(wrap, state) {
       <div class="wti-cand-list" role="radiogroup" aria-label="名前候補">
         ${cands.map((c, ci) => `
           <div class="form-check wti-cand-radio wti-cand-option">
-            <input class="form-check-input" type="radio" name="wtiCand${esc(eidx)}" id="wtiCand${esc(eidx)}_${ci}" data-entry="${esc(eidx)}" data-cand-staff="${c.staff_id}">
+            <input class="form-check-input" type="radio" name="wtiCand${esc(eidx)}" id="wtiCand${esc(eidx)}_${ci}" data-entry="${esc(eidx)}" data-cand-staff="${esc(c.staff_id)}" data-cand-name="${esc(c.name)}">
             <label class="form-check-label" for="wtiCand${esc(eidx)}_${ci}">${esc(c.name)} <span class="wti-cand-score-label text-secondary small">${esc(_wtiCandLabel(c.score))}</span></label>
           </div>`).join('')}
         <div class="form-check wti-cand-radio wti-cand-other">
           <input class="form-check-input" type="radio" name="wtiCand${esc(eidx)}" id="wtiCandOther${esc(eidx)}" data-entry="${esc(eidx)}" data-cand-other="1">
           <label class="form-check-label" for="wtiCandOther${esc(eidx)}">その他から選ぶ</label>
         </div>
+        <button type="button" class="btn btn-primary btn-sm wti-cand-confirm" data-entry="${esc(eidx)}" disabled>選んだ人で確定</button>
       </div>` : '';
     return `<div class="wti-unassigned-row">
       <div class="wti-unassigned-info">
@@ -3966,15 +3967,42 @@ function _wtiRenderUnassigned(wrap, state) {
     _wtiRenderStep2(wrap, state);
   };
 
-  // 候補ラジオを選んだ場合: 即座にそのスタッフで確定する。
+  const confirmBtnFor = (eidx) => box.querySelector(`.wti-cand-confirm[data-entry="${CSS.escape(String(eidx))}"]`);
+  const selectFor = (eidx) => box.querySelector(`.wti-unassigned-select[data-entry="${CSS.escape(String(eidx))}"]`);
+
+  // 候補ラジオを選んでも、その場では確定しない（選択と確定を分ける）。
+  // ラジオグループはキーボード操作（Tab でフォーカス → 矢印キーで見比べる）でも
+  // change が発火するため、change で即 assign すると「候補を見比べようとしただけ」で
+  // 確定してしまう。誤配属は希望の取り違えに直結するうえ、確定すると未割り当て
+  // 一覧から消えるので店長が気づけない。「既定でどれも選択済みにしない」という
+  // 誤配属防止の設計を、キーボード操作でも崩さないための分離。
   box.querySelectorAll('[data-cand-staff]').forEach((radio) => radio?.addEventListener('change', () => {
-    assign(radio.dataset.entry, +radio.dataset.candStaff || null);
+    const btn = confirmBtnFor(radio.dataset.entry);
+    if (btn) {
+      btn.disabled = false;
+      // 誰で確定しようとしているかをボタン自身に書く（ラジオから目を離しても
+      // 押す直前に対象を確認できる）。
+      btn.textContent = `${radio.dataset.candName || 'この人'} で確定`;
+    }
+    // 候補を選び直したら「その他」の一覧は引っ込める（確定先が2つ見えると迷う）
+    const sel = selectFor(radio.dataset.entry);
+    if (sel) { sel.style.display = 'none'; sel.value = ''; }
   }));
   // 「その他から選ぶ」を選んだ場合: 確定はせず、隠れている <select> を出すだけ
   // （brief Step1のモックアップどおり、▼で一覧から選ぶ動線に切り替える）。
+  // 確定ボタンは候補用なので、こちらに切り替えたら押せない状態に戻す。
   box.querySelectorAll('[data-cand-other]').forEach((radio) => radio?.addEventListener('change', () => {
-    const sel = box.querySelector(`.wti-unassigned-select[data-entry="${CSS.escape(radio.dataset.entry)}"]`);
+    const sel = selectFor(radio.dataset.entry);
     if (sel) { sel.style.display = ''; sel.focus(); }
+    const btn = confirmBtnFor(radio.dataset.entry);
+    if (btn) { btn.disabled = true; btn.textContent = '選んだ人で確定'; }
+  }));
+  // 確定はこのボタンだけが行う（候補経路の唯一の確定操作）。
+  box.querySelectorAll('.wti-cand-confirm').forEach((btn) => btn?.addEventListener('click', async () => {
+    const eidx = btn.dataset.entry;
+    const radio = box.querySelector(`[data-cand-staff][data-entry="${CSS.escape(String(eidx))}"]:checked`);
+    if (!radio) return;
+    await assign(eidx, +radio.dataset.candStaff || null);
   }));
   box.querySelectorAll('.wti-unassigned-select').forEach((sel) => sel?.addEventListener('change', async () => {
     await assign(sel.dataset.entry, +sel.value || null);

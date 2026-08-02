@@ -336,9 +336,20 @@ test.describe('希望画像取り込み（wish image import）', () => {
     await expect(options.nth(2)).toContainText('田仲三郎');
     await expect(options.nth(2)).toContainText('似ているかもしれません');
     await expect(page.locator('.wti-cand-other')).toContainText('その他から選ぶ');
-    // どの候補も既定で選択済みになっていないこと（誤配属防止の大前提）
-    await expect(page.locator('.wti-cand-radio input:checked')).toHaveCount(0);
-    // 候補があるentryでは従来のselectは隠れている（フォールバック用に残るが既定は非表示）
+    // どの候補も既定で選択済みになっていないこと（誤配属防止の大前提）。
+    // 件数を数えるセレクタは option 側と同じ集合（.wti-cand-option）に揃える。
+    // .wti-cand-radio は「その他から選ぶ」も含むため、上の toHaveCount(3) と
+    // 別集合を数えていることになり、候補が1件も描かれていない退行でも
+    // 「checked 0件」で緑になりうる。
+    await expect(page.locator('.wti-cand-option input:checked')).toHaveCount(0);
+    await expect(page.locator('.wti-cand-other input:checked')).toHaveCount(0);
+    // 選択と確定は分かれている。何も選んでいない状態では確定できないこと。
+    await expect(page.locator('.wti-cand-confirm')).toHaveCount(1);
+    await expect(page.locator('.wti-cand-confirm')).toBeDisabled();
+    // 候補があるentryでは従来のselectは隠れている（フォールバック用に残るが既定は非表示）。
+    // toBeHidden() は要素が存在しないときも真になるため、先に存在を確かめる
+    // （select ごと描かれなくなる退行を、この assert だけでは検知できない）。
+    await expect(page.locator('.wti-unassigned-select')).toHaveCount(1);
     await expect(page.locator('.wti-unassigned-select')).toBeHidden();
     expect(errors).toEqual([]);
   });
@@ -368,13 +379,18 @@ test.describe('希望画像取り込み（wish image import）', () => {
     await page.click('#wtiParseBtn');
     await page.waitForSelector('#wtiSubmitBtn', { timeout: 10000 });
     await expect(page.locator('.wti-cand-option')).toHaveCount(2);
-    await expect(page.locator('.wti-cand-radio input:checked')).toHaveCount(0);
+    await expect(page.locator('.wti-cand-option input:checked')).toHaveCount(0);
 
     // 先頭（鈴木一郎）ではなく2番目（鈴木次郎）を選ぶ。誤って先頭が既定選択に
     // なっていた実装なら、この操作をしなくても既に鈴木一郎が選ばれてしまう。
     const existingReq = page.waitForRequest((req) =>
       req.method() === 'GET' && req.url().includes('/api/shop/wishes') && req.url().includes(`staff_id=${sidB}`));
     await page.locator('.wti-cand-option').nth(1).locator('input[type="radio"]').click();
+    // 選んだだけでは確定しない。確定ボタンに対象の名前が出て、押せる状態になる。
+    await expect(page.locator('.wti-unassigned-row')).toHaveCount(1);
+    await expect(page.locator('.wti-cand-confirm')).toBeEnabled();
+    await expect(page.locator('.wti-cand-confirm')).toContainText('鈴木次郎');
+    await page.locator('.wti-cand-confirm').click();
     await existingReq; // _wtiEnsureExistingLoaded の呼び出しが落とされていないことの検証
     await expect(page.locator('.wti-unassigned-row')).toHaveCount(0);
 
@@ -412,6 +428,112 @@ test.describe('希望画像取り込み（wish image import）', () => {
     await expect(page.locator('.wti-unassigned-select')).toBeVisible();
     await page.locator('.wti-unassigned-select').selectOption(String(sid));
     await page.waitForTimeout(300);
+    await expect(page.locator('.wti-unassigned-row')).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
+  // ==========================================================
+  // ケース9（レビュー指摘 Important）: 「その他から選ぶ」の動線。
+  // AIが挙げた候補が全部間違っているとき、店長がこの取込を完了させる唯一の
+  // 逃げ道がこれ。ここが壊れると「候補は出るが誰も選べない」行き止まりになり、
+  // 未割り当てのまま登録するしかなくなる（＝その希望が丸ごと落ちる）。
+  // ケース8（候補が無いときの素の select）とは別物で、あちらが緑でも
+  // 「候補があるとき隠した select を出し直す」経路は無検証だった。
+  // ==========================================================
+  test('候補が全部外れでも「その他から選ぶ」で一覧が現れ、候補に無いスタッフへ割り当てられる', async ({ page, request }) => {
+    const errors = attachConsoleCollector(page);
+    // 候補として出るが間違っている人と、正解だが候補に載らない人を用意する。
+    const sidWrong = await createStaff(request, shopHdr, `NC7_${RUN_ID}`, '高橋一郎');
+    const sidReal = await createStaff(request, shopHdr, `NC8_${RUN_ID}`, '山本二郎');
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await openImportModal(page);
+    await page.selectOption('#wtiMonth', '2026-08');
+    await page.setInputFiles('#wtiImageInput', FIXTURE_PNG);
+
+    await stubParseImage(page, {
+      entries: [{ staff_id: null, staff_hint: '高橋', dates: ['2026-08-15'], availability: 'rest', start: null, end: null, raw: '8/15 高橋 休み', raw_verified: true }],
+      unparsed: [], source: 'llm', ocr_text: '8/15 高橋 休み',
+      name_candidates: { '0': [{ staff_id: sidWrong, name: '高橋一郎', score: 0.7, reason: '姓が一致' }] },
+    });
+    await page.click('#wtiParseBtn');
+    await page.waitForSelector('#wtiSubmitBtn', { timeout: 10000 });
+
+    // 候補があるので select は「存在するが隠れている」。toBeHidden() は要素が
+    // 無いときも真になるため、先に存在を確かめてから隠れていることを見る。
+    const sel = page.locator('.wti-unassigned-select');
+    await expect(sel).toHaveCount(1);
+    await expect(sel).toBeHidden();
+
+    // 「その他から選ぶ」で隠れていた一覧が出る
+    await page.locator('.wti-cand-other input[type="radio"]').click();
+    await expect(sel).toBeVisible();
+
+    // 候補に載っていないスタッフを選ぶと確定し、既存希望の取得も走る
+    const existingReq = page.waitForRequest((req) =>
+      req.method() === 'GET' && req.url().includes('/api/shop/wishes') && req.url().includes(`staff_id=${sidReal}`));
+    await sel.selectOption(String(sidReal));
+    await existingReq;
+    await expect(page.locator('.wti-unassigned-row')).toHaveCount(0);
+
+    const bulkRequests = [];
+    await page.route((url) => url.pathname.endsWith('/api/shop/wishes/bulk'), async (route) => {
+      const body = route.request().postDataJSON();
+      bulkRequests.push(body);
+      await route.fulfill({ json: { ok: true, created: body.wishes.length, skipped: 0, message: 'ok' } });
+    });
+    await page.click('#wtiSubmitBtn');
+    await page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 10000 });
+    expect(bulkRequests.length).toBe(1);
+    // 間違った候補ではなく、一覧から選んだ本人で登録されること
+    expect(bulkRequests[0].wishes[0].staff_id).toBe(sidReal);
+    expect(errors).toEqual([]);
+  });
+
+  // ==========================================================
+  // ケース10（レビュー指摘 Minor）: 候補ラジオの change で即確定しないこと。
+  // ラジオグループはキーボード（Tab でフォーカス → 矢印キー）でも change が
+  // 発火するため、change で即 assign すると「候補を見比べようとしただけ」で
+  // 確定してしまう。誤配属は希望の取り違えに直結し、確定後は未割り当て一覧から
+  // 消えるので気づきにくい。「既定でどれも選択済みにしない」という誤配属防止の
+  // 設計をキーボード操作でも崩さないことを固定する。
+  // ==========================================================
+  test('候補ラジオはキーボードで見比べても確定せず、確定ボタンを押して初めて割り当てられる', async ({ page, request }) => {
+    const errors = attachConsoleCollector(page);
+    const sidA = await createStaff(request, shopHdr, `NC9_${RUN_ID}`, '中村一郎');
+    const sidB = await createStaff(request, shopHdr, `NC10_${RUN_ID}`, '中村次郎');
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await openImportModal(page);
+    await page.selectOption('#wtiMonth', '2026-08');
+    await page.setInputFiles('#wtiImageInput', FIXTURE_PNG);
+
+    await stubParseImage(page, {
+      entries: [{ staff_id: null, staff_hint: '中村', dates: ['2026-08-16'], availability: 'rest', start: null, end: null, raw: '8/16 中村 休み', raw_verified: true }],
+      unparsed: [], source: 'llm', ocr_text: '8/16 中村 休み',
+      name_candidates: {
+        '0': [
+          { staff_id: sidA, name: '中村一郎', score: 0.8, reason: '姓が一致' },
+          { staff_id: sidB, name: '中村次郎', score: 0.8, reason: '姓が一致' },
+        ],
+      },
+    });
+    await page.click('#wtiParseBtn');
+    await page.waitForSelector('#wtiSubmitBtn', { timeout: 10000 });
+
+    // キーボードでラジオを渡り歩く（＝候補を見比べる操作）。矢印キーは
+    // ブラウザ既定で選択を移動させ change を発火させる。
+    await page.locator('.wti-cand-option input[type="radio"]').first().focus();
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowUp');
+    await page.keyboard.press('ArrowDown');
+    await page.waitForTimeout(300); // assign は非同期。誤確定していれば行が消える
+    // まだ誰にも割り当てられていないこと
+    await expect(page.locator('.wti-unassigned-row')).toHaveCount(1);
+
+    // 確定ボタンを押して初めて、最後に選んだ候補（2番目）で確定する
+    const existingReq = page.waitForRequest((req) =>
+      req.method() === 'GET' && req.url().includes('/api/shop/wishes') && req.url().includes(`staff_id=${sidB}`));
+    await page.locator('.wti-cand-confirm').click();
+    await existingReq;
     await expect(page.locator('.wti-unassigned-row')).toHaveCount(0);
     expect(errors).toEqual([]);
   });
