@@ -11,6 +11,11 @@ try {
 
 module.exports = defineConfig({
   testDir: './e2e',
+  // capture_*.spec.js はテストではなく操作説明書用のスクリーンショット撮影で、
+  // 何も検証しないため通常のスイートからは外す。撮り直すときは
+  // playwright.capture.config.js を使うこと（testIgnore は実行時にファイルを
+  // 明示しても効くので、この設定のままでは撮影できない）。
+  testIgnore: '**/capture_*.spec.js',
   timeout: 30000,
   retries: 1,
   // 直列実行。全テストが単一の SQLite（shift_e2e.db）と単一の Flask サーバを
