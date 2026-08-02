@@ -3791,6 +3791,25 @@ function _wtiRenderCalendar(wrap, state) {
   state.items.filter((it) => it.staffId === state.calStaffId).forEach((it) => {
     (byDate[it.date] = byDate[it.date] || []).push(it);
   });
+  // カレンダーは選択中スタッフの1人分しか描かない。そのままだと「他の人の希望が
+  // ある日」と「本当に何も無い日」が同じ .disabled になり、押しても何も起きない。
+  // 希望表を写真で撮ると複数人が1枚に写るため、店長からは「一部の日付しか変更
+  // できない」ように見えてしまう。日ごとに「他の誰か」「未割り当て」を集めて、
+  // 印を付けて押せるようにする。
+  const othersByDate = {};    // date -> [{staffId, name}]（表示中スタッフ以外）
+  const unassignedByDate = {}; // date -> 件数（staffId が未確定のもの）
+  state.items.forEach((it) => {
+    if (!it.staffId) {
+      unassignedByDate[it.date] = (unassignedByDate[it.date] || 0) + 1;
+      return;
+    }
+    if (it.staffId === state.calStaffId) return;
+    const list = othersByDate[it.date] = othersByDate[it.date] || [];
+    if (!list.some((o) => o.staffId === it.staffId)) {
+      const s = state.staffs.find((x) => x.id === it.staffId);
+      list.push({ staffId: it.staffId, name: s ? s.name : ('不明#' + it.staffId) });
+    }
+  });
   let cells = '';
   for (let i = 0; i < startWd; i++) cells += '<div class="wish-cell empty"></div>';
   for (let d = 1; d <= dim; d++) {
@@ -3822,17 +3841,51 @@ function _wtiRenderCalendar(wrap, state) {
     // （disabled の opacity:.35 が、意図的に目立たせたい警告アイコンまで薄めてしまうため）。
     // Minor(3161): 項目が無く既存希望の印だけがある日はクリックしても no-op なので、
     // 目立たせたい（=薄くしない）まま cursor だけ default に戻す（別クラス）。
+    // 他スタッフ・未割り当ての印。読み取った希望が1件も見えない日を作らない。
+    const others = othersByDate[ds] || [];
+    const unassignedCnt = unassignedByDate[ds] || 0;
+    const otherMark = others.length
+      ? `<i class="bi bi-person-fill wti-other-staff-mark" title="${esc(others.map((o) => o.name).join('・'))}さんの希望があります（押すと切り替わります）"></i>` : '';
+    const unassignedMark = unassignedCnt
+      ? `<i class="bi bi-person-dash-fill wti-unassigned-mark" title="まだ誰の希望か決まっていない読み取りが${unassignedCnt}件あります"></i>` : '';
     let cellCls;
     if (dayItems.length) cellCls = 'wish-cell';
+    else if (others.length || unassignedCnt) cellCls = 'wish-cell wti-other-day';
     else if (hasExisting) cellCls = 'wish-cell wti-existing-only';
     else cellCls = 'wish-cell disabled';
-    cells += `<div class="${cellCls}" data-day="${ds}"><div class="wd ${wdCls}">${d}</div>${mark}${flag}${unverifiedFlag}</div>`;
+    cells += `<div class="${cellCls}" data-day="${ds}"><div class="wd ${wdCls}">${d}</div>${mark}${flag}${unverifiedFlag}${otherMark}${unassignedMark}</div>`;
   }
   gridEl.innerHTML = cells;
   gridEl.querySelectorAll('.wish-cell[data-day]').forEach((c) => {
     c?.addEventListener('click', () => {
-      const has = state.items.some((it) => it.staffId === state.calStaffId && it.date === c.dataset.day);
-      if (has) _wtiOpenDetail(wrap, state, c.dataset.day);
+      const day = c.dataset.day;
+      const has = state.items.some((it) => it.staffId === state.calStaffId && it.date === day);
+      if (has) { _wtiOpenDetail(wrap, state, day); return; }
+      // 表示中スタッフの希望が無い日でも、他のスタッフの希望があるなら
+      // そのスタッフへ切り替えて開く（押しても何も起きない日を作らない）。
+      const others = othersByDate[day] || [];
+      if (others.length) {
+        state.calStaffId = others[0].staffId;
+        _wtiRenderStep2(wrap, state);
+        _wtiOpenDetail(wrap, state, day);
+        if (others.length > 1) {
+          toast(`${others[0].name}さんの希望を開きました（この日は他に${others.length - 1}名分あります）`, 'info');
+        } else {
+          toast(`${others[0].name}さんの希望に切り替えました`, 'info');
+        }
+        return;
+      }
+      // 未割り当てしか無い日は、まず誰の希望かを決める必要がある。
+      // カレンダー上では直せないので、操作すべき場所（未割り当て欄）へ導く。
+      if ((unassignedByDate[day] || 0) > 0) {
+        const box = wrap.querySelector('#wtiUnassigned');
+        if (box) {
+          box.classList.add('wti-highlight');
+          box.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          setTimeout(() => box.classList.remove('wti-highlight'), 2000);
+        }
+        toast('この日の読み取りは、まだ誰の希望か決まっていません。下の未割り当てから選んでください。', 'info');
+      }
     });
   });
 }

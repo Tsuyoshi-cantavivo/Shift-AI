@@ -1484,6 +1484,22 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
    （no-op）。.disabled のように暗くはしたくない（印を目立たせたい）ので、
    opacity はそのままに cursor だけ既定へ戻す別クラス。 */
 .wti-cal .wish-cell.wti-existing-only { cursor: default; }
+/* いま表示していないスタッフの希望・未割り当ての読み取りがある日。
+   .disabled（opacity:.35）にすると「何も無い日」と見分けが付かず、
+   読み取った希望を丸ごと見落とすため、薄くせず印を付けて押せるままにする。 */
+.wti-cal .wish-cell.wti-other-day { cursor: pointer; }
+.wti-other-staff-mark {
+  position: absolute; bottom: 3px; right: 3px; font-size: .6rem; color: var(--ink-3);
+}
+.wti-unassigned-mark {
+  position: absolute; bottom: 3px; left: 3px; font-size: .6rem; color: var(--warning);
+}
+/* カレンダーから未割り当て欄へ誘導したときの一時的な強調。
+   どこを操作すればよいかを、色ではなく枠と地色の両方で示す。 */
+#wtiUnassigned.wti-highlight {
+  outline: 2px solid var(--warning); outline-offset: 3px;
+  border-radius: var(--radius-sm); background: var(--zebra);
+}
 /* 同一(スタッフ,日付)に複数の読み取りが残っている日のマーク（レビュー C-1）。
    .wmark.morning と同じ配色（--warning地に--paper文字）を流用し、コントラストは
    既に検証済みの組み合わせのまま新規トークンを増やさない。 */
