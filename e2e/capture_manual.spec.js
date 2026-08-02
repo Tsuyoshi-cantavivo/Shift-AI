@@ -122,6 +122,65 @@ test.describe('操作説明書用キャプチャ', () => {
     }
   });
 
+  test('08 確認画面カレンダー: 他のスタッフの希望がある日', async ({ page }) => {
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await page.click('button[data-screen="requests"]');
+    await page.waitForSelector('#reqImportBtn', { timeout: 10000 });
+    await page.click('#reqImportBtn');
+    await page.waitForSelector('#wtiImageDrop', { timeout: 10000 });
+    await page.selectOption('#wtiMonth', '2026-08');
+    await page.setInputFiles('#wtiImageInput', FIXTURE_PNG);
+
+    // 希望表の写真は複数人が1枚に写る。カレンダーは1人分ずつ表示するので、
+    // 他の人の希望がある日に印が出ることを見せる。
+    await page.route((url) => url.pathname.endsWith('/api/shop/wishes/parse-image'), (route) =>
+      route.fulfill({
+        json: {
+          entries: [
+            { staff_id: staffIds.a, staff_hint: '田中', dates: ['2026-08-10'], availability: 'rest', start: null, end: null, raw: '8/10 田中 休み', raw_verified: true },
+            { staff_id: staffIds.b, staff_hint: '花子', dates: ['2026-08-12'], availability: 'rest', start: null, end: null, raw: '8/12 花子 休み', raw_verified: true },
+            { staff_id: null, staff_hint: 'ヤマダ', dates: ['2026-08-14'], availability: 'rest', start: null, end: null, raw: '8/14 ヤマダ 休み', raw_verified: true },
+          ],
+          unparsed: [], source: 'llm',
+          ocr_text: '8/10 田中 休み\n8/12 花子 休み\n8/14 ヤマダ 休み',
+          name_candidates: {},
+        },
+      }));
+    await page.click('#wtiParseBtn');
+    await page.waitForSelector('#wtiSubmitBtn', { timeout: 10000 });
+    // カレンダーが見えるところまでスクロールしてから撮る
+    await page.locator('.wish-cell[data-day="2026-08-12"]').scrollIntoViewIfNeeded();
+    await shot(page, '08-calendar-other-staff', MODAL);
+  });
+
+  test('09 ダッシュボード: 気にかけたい人', async ({ page, request }) => {
+    // 実データで検出させる（スタブしない）。基準期間（30〜89日前）に多く出勤し、
+    // 直近30日はわずか、という状態を作る。
+    const today = new Date();
+    const iso = (daysAgo) => {
+      const d = new Date(today);
+      d.setDate(d.getDate() - daysAgo);
+      return d.toISOString().slice(0, 10);
+    };
+    const days = [];
+    for (let i = 31; i <= 70; i += 2) days.push(i);   // 基準期間に20日
+    days.push(5);                                      // 直近30日は1日だけ
+    for (const d of days) {
+      await request.post('/api/shop/shifts', {
+        data: {
+          staff_id: staffIds.c,
+          start_datetime: `${iso(d)}T09:00:00`,
+          end_datetime: `${iso(d)}T17:00:00`,
+          status: 'confirmed',
+        },
+        headers: shopHdr,
+      });
+    }
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await page.waitForSelector('#dashAttention', { timeout: 20000 });
+    await shot(page, '09-dashboard-attention', '#dashRight');
+  });
+
   test('07 スタッフ管理のロール選択（外国籍アルバイト）', async ({ page }) => {
     await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
     await page.click('button[data-screen="staffs"]');

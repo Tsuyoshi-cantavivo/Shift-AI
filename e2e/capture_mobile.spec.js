@@ -181,6 +181,38 @@ test.describe('スマホ版 操作説明書キャプチャ', () => {
   });
 
   // ==========================================================
+  // 気にかけたい人（働き方の変化）
+  // ==========================================================
+  test('気にかけたい人カード', async ({ page, request }) => {
+    // 実データで検出させる。基準期間（30〜89日前）に多く出勤し、
+    // 直近30日はわずか、という状態を作る。
+    const today = new Date();
+    const iso = (daysAgo) => {
+      const d = new Date(today);
+      d.setDate(d.getDate() - daysAgo);
+      return d.toISOString().slice(0, 10);
+    };
+    const days = [];
+    for (let i = 31; i <= 70; i += 2) days.push(i);   // 基準期間に20日
+    days.push(4);                                      // 直近30日は1日だけ
+    for (const d of days) {
+      await request.post('/api/shop/shifts', {
+        data: {
+          staff_id: staffIds['鈴木みなみ'],
+          start_datetime: `${iso(d)}T09:00:00`,
+          end_datetime: `${iso(d)}T17:00:00`,
+          status: 'confirmed',
+        },
+        headers: shopHdr,
+      });
+    }
+    await login(page, SHOP.managerCode, SHOP.managerPassword);
+    await page.waitForSelector('#dashAttention', { timeout: 20000 });
+    await page.locator('#dashAttention').scrollIntoViewIfNeeded();
+    await shot(page, 'm10-attention');
+  });
+
+  // ==========================================================
   // スマホ特有の導線（メニュー・希望の入力）
   // ==========================================================
   test('メニューと入力の導線', async ({ page }) => {
