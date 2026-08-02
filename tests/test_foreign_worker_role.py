@@ -129,3 +129,116 @@ class TestEngineWeeklyCap:
         hit = exceeds_weekly_cap(minutes_by_day(spans))
         assert hit is not None, \
             "パートにも週28hがかかっている（このロールは制約対象外のはず）"
+
+
+class TestManualShiftWeeklyCap:
+    """手動でシフトを入れるときの週28h検査と、店長の承諾による強行。"""
+
+    def _setup(self):
+        shop_id = insert_shop(settings=SETTINGS)
+        sid = insert_staff(shop_id, "FW20", "外国籍C", "foreign_worker", 1100, 0, 160)
+        tok = make_session("shop", shop_id, shop_id)
+        return shop_id, sid, tok
+
+    def _add_confirmed(self, shop_id, sid, day, start="09:00", end="18:00", brk=60):
+        from db import execute
+        return execute(
+            "INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, "
+            "break_time_minutes, status) VALUES (?,?,?,?,?,'confirmed')",
+            (shop_id, sid, f"{day}T{start}:00", f"{day}T{end}:00", brk))["last_row_id"]
+
+    def test_post_rejects_shift_over_28h(self, client):
+        """既に24h入っている週に、さらに8hを手で足すと拒否されること。"""
+        shop_id, sid, tok = self._setup()
+        for d in ("2026-08-10", "2026-08-11", "2026-08-12"):
+            self._add_confirmed(shop_id, sid, d)   # 8h × 3 = 24h
+        r = client.post("/api/shop/shifts", json={
+            "staff_id": sid, "start_datetime": "2026-08-13T09:00:00",
+            "end_datetime": "2026-08-13T18:00:00",
+        }, headers=auth(tok))
+        assert r.status_code == 400, r.get_data(as_text=True)
+        body = r.get_json()
+        assert body.get("weekly_cap_exceeded") is True
+        # 店長が判断できるよう、どの7日間が何時間になるのかを返すこと
+        assert body["detail"]["window_start"] <= "2026-08-13" <= body["detail"]["window_end"]
+        assert body["detail"]["minutes"] == 32 * 60
+
+    def test_post_allows_shift_within_28h(self, client):
+        shop_id, sid, tok = self._setup()
+        for d in ("2026-08-10", "2026-08-11"):
+            self._add_confirmed(shop_id, sid, d)   # 16h
+        r = client.post("/api/shop/shifts", json={
+            "staff_id": sid, "start_datetime": "2026-08-13T09:00:00",
+            "end_datetime": "2026-08-13T18:00:00",
+        }, headers=auth(tok))
+        assert r.status_code == 200, r.get_data(as_text=True)
+
+    def test_post_with_confirmation_saves_and_marks_ack(self, client):
+        """店長が承諾すれば保存でき、承諾した印が残ること。"""
+        from db import query_one
+        shop_id, sid, tok = self._setup()
+        for d in ("2026-08-10", "2026-08-11", "2026-08-12"):
+            self._add_confirmed(shop_id, sid, d)
+        r = client.post("/api/shop/shifts", json={
+            "staff_id": sid, "start_datetime": "2026-08-13T09:00:00",
+            "end_datetime": "2026-08-13T18:00:00",
+            "weekly_cap_confirmed": True,
+        }, headers=auth(tok))
+        assert r.status_code == 200, r.get_data(as_text=True)
+        row = query_one("SELECT weekly_cap_ack FROM shifts WHERE id=?", (r.get_json()["id"],))
+        assert row["weekly_cap_ack"] == 1, "承諾の印が残っていない"
+
+    def test_within_cap_does_not_mark_ack(self, client):
+        """上限内で保存したシフトに承諾の印が付かないこと（印の意味が薄まる）。"""
+        from db import query_one
+        shop_id, sid, tok = self._setup()
+        r = client.post("/api/shop/shifts", json={
+            "staff_id": sid, "start_datetime": "2026-08-13T09:00:00",
+            "end_datetime": "2026-08-13T18:00:00",
+            "weekly_cap_confirmed": True,
+        }, headers=auth(tok))
+        assert r.status_code == 200, r.get_data(as_text=True)
+        row = query_one("SELECT weekly_cap_ack FROM shifts WHERE id=?", (r.get_json()["id"],))
+        assert row["weekly_cap_ack"] == 0
+
+    def test_put_rejects_extending_over_28h(self, client):
+        """更新で長さを伸ばして超える場合も拒否されること。"""
+        shop_id, sid, tok = self._setup()
+        for d in ("2026-08-10", "2026-08-11", "2026-08-12"):
+            self._add_confirmed(shop_id, sid, d)
+        target = self._add_confirmed(shop_id, sid, "2026-08-13", "09:00", "12:00", brk=0)  # 3h
+        # 3h → 8h に伸ばすと窓が32hになる。
+        # allow_confirmed_edit は確定シフトを直接編集するためのフラグ（:2726）。
+        # これが無いと週上限より手前の locked チェックで 409 になり、
+        # 週28hの検査に到達しない。
+        r = client.put(f"/api/shop/shifts/{target}", json={
+            "start_datetime": "2026-08-13T09:00:00", "end_datetime": "2026-08-13T18:00:00",
+            "allow_confirmed_edit": True,
+        }, headers=auth(tok))
+        assert r.status_code == 400, r.get_data(as_text=True)
+        assert r.get_json().get("weekly_cap_exceeded") is True
+
+    def test_put_keeping_same_length_is_allowed(self, client):
+        """自分自身を二重に数えていたら、変更なしの更新すら弾かれてしまう。"""
+        shop_id, sid, tok = self._setup()
+        for d in ("2026-08-10", "2026-08-11", "2026-08-12"):
+            self._add_confirmed(shop_id, sid, d)   # 24h
+        target = self._add_confirmed(shop_id, sid, "2026-08-14", "09:00", "13:00", brk=0)  # 4h
+        r = client.put(f"/api/shop/shifts/{target}", json={
+            "start_datetime": "2026-08-14T09:00:00", "end_datetime": "2026-08-14T13:00:00",
+            "allow_confirmed_edit": True,
+        }, headers=auth(tok))
+        assert r.status_code == 200, r.get_data(as_text=True)
+
+    def test_other_roles_are_not_blocked(self, client):
+        """part_time は週28hで弾かれないこと。"""
+        shop_id = insert_shop(settings=SETTINGS)
+        sid = insert_staff(shop_id, "PT20", "パートB", "part_time", 1100, 0, 160)
+        tok = make_session("shop", shop_id, shop_id)
+        for d in ("2026-08-10", "2026-08-11", "2026-08-12"):
+            self._add_confirmed(shop_id, sid, d)
+        r = client.post("/api/shop/shifts", json={
+            "staff_id": sid, "start_datetime": "2026-08-13T09:00:00",
+            "end_datetime": "2026-08-13T18:00:00",
+        }, headers=auth(tok))
+        assert r.status_code == 200, r.get_data(as_text=True)

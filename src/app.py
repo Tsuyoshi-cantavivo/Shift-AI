@@ -12,7 +12,7 @@ import traceback
 import unicodedata
 import base64
 import binascii
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from flask import (Flask, request, jsonify, abort, Response, send_file, g)
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # src/ をモジ
 from db import query_all, query_one, execute, insert_row, init_schema
 from auth import hash_password, verify_password, gen_token, strip_password, dummy_verify
 from name_match import best_exact, match_staff
+from weekly_hours import WEEKLY_CAP_MINUTES, minutes_by_day, exceeds_weekly_cap
 from utils import (
     calc_next_period, jst_now, jst_today, minutes_between, compute_break_minutes,
     night_minutes, validate_password, parse_settings, build_ics, parse_iso, normalize_iso,
@@ -1168,6 +1169,54 @@ def _check_student_only_shift(shop_id, staff_id, start_iso, exclude_id=None):
     if not non_student_roles:
         return (True, "学生アルバイトのみで構成されるシフトは作成できません（社会人スタッフを少なくとも1名配置してください）")
     return (False, None)
+
+
+def _check_weekly_cap(shop_id, staff_id, start_iso, end_iso, break_minutes, exclude_id=None):
+    """外国籍アルバイトの週28時間上限に触れるかを判定する。
+
+    資格外活動許可で働く在留資格（留学・家族滞在）は入管法上、どの連続7日間も
+    28時間以内。超えると本人の在留資格だけでなく、雇用主も不法就労助長罪の
+    対象になる。判定そのものは src/weekly_hours.py の純関数に委ねる
+    （シフト自動生成と同じ関数を使い、生成と手入力で結果が食い違わないようにする）。
+
+    戻り値: (is_ng: bool, message: str or None, detail: dict or None)
+    """
+    target = query_one("SELECT role FROM staffs WHERE id=? AND shop_id=?", (staff_id, shop_id))
+    if not target or target["role"] != "foreign_worker":
+        return (False, None, None)
+    day = (start_iso or "")[:10]
+    if not day:
+        return (False, None, None)
+    try:
+        base = date.fromisoformat(day)
+    except ValueError:
+        return (False, None, None)
+    # その日を含む7日窓は day-6 〜 day+6 の範囲にしか広がらないので、
+    # この範囲の確定シフトだけを集めれば足りる。
+    lo = (base - timedelta(days=6)).isoformat()
+    hi = (base + timedelta(days=7)).isoformat()
+    rows = query_all(
+        "SELECT id, start_datetime, end_datetime, break_time_minutes FROM shifts "
+        "WHERE shop_id=? AND staff_id=? AND status='confirmed' "
+        "AND start_datetime>=? AND start_datetime<?",
+        (shop_id, staff_id, lo + "T00:00:00", hi + "T00:00:00"))
+    spans = []
+    for r in rows:
+        # 更新・移動のときは自分自身を除く。除かないと変更前と変更後を二重に数え、
+        # 長さを変えない更新すら弾かれる。
+        if exclude_id and str(r["id"]) == str(exclude_id):
+            continue
+        spans.append((r["start_datetime"], r["end_datetime"], r["break_time_minutes"] or 0))
+    spans.append((start_iso, end_iso, break_minutes or 0))
+    hit = exceeds_weekly_cap(minutes_by_day(spans), target_day=day)
+    if not hit:
+        return (False, None, None)
+    w_start, w_end, total = hit
+    detail = {"window_start": w_start, "window_end": w_end, "minutes": total,
+              "cap_minutes": WEEKLY_CAP_MINUTES}
+    msg = (f"{w_start}〜{w_end} の7日間で{total // 60}時間{total % 60}分になり、"
+           f"外国籍アルバイトの週28時間の上限を超えます。")
+    return (True, msg, detail)
 
 
 @app.get("/api/shop/dashboard")
@@ -2691,8 +2740,15 @@ def shop_shifts_post():
     if student_ng:
         print(f"[SHIFT POST] student_only: {student_msg} staff_id={staff_id} {start_dt}〜{end_dt}", flush=True)
         return jsonify({"error": student_msg, "student_only": True}), 400
-    meta = execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason, availability) VALUES (?,?,?,?,?,?,?,?)",
-                   (shop_id, staff_id, start_dt, end_dt, brk, body.get("status") or "confirmed", body.get("reason") or "手動追加", body.get("availability")))
+    # 週28h上限（外国籍アルバイト）。店長が承諾した場合のみ通す。
+    weekly_ng, weekly_msg, weekly_detail = _check_weekly_cap(shop_id, staff_id, start_dt, end_dt, brk)
+    weekly_ack = 1 if (weekly_ng and body.get("weekly_cap_confirmed")) else 0
+    if weekly_ng and not weekly_ack:
+        print(f"[SHIFT POST] weekly_cap: {weekly_msg} staff_id={staff_id} {start_dt}〜{end_dt}", flush=True)
+        return jsonify({"error": weekly_msg, "weekly_cap_exceeded": True,
+                        "detail": weekly_detail}), 400
+    meta = execute("INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, break_time_minutes, status, reason, availability, weekly_cap_ack) VALUES (?,?,?,?,?,?,?,?,?)",
+                   (shop_id, staff_id, start_dt, end_dt, brk, body.get("status") or "confirmed", body.get("reason") or "手動追加", body.get("availability"), weekly_ack))
     print(f"[SHIFT POST id={meta['last_row_id']}] OK: staff_id={staff_id} {start_dt}〜{end_dt}", flush=True)
     result = {"ok": True, "id": meta["last_row_id"]}
     if adjustments:
@@ -2763,8 +2819,17 @@ def shop_shifts_put(sid):
     if student_ng:
         print(f"[SHIFT PUT sid={sid}] student_only: {student_msg} staff_id={staff_id} {body['start_datetime']}〜{body['end_datetime']}", flush=True)
         return jsonify({"error": student_msg, "student_only": True}), 400
-    execute("UPDATE shifts SET start_datetime=?, end_datetime=?, break_time_minutes=?, status=?, reason=? WHERE id=? AND shop_id=?",
-            (body["start_datetime"], body["end_datetime"], brk, body.get("status") or "confirmed", body.get("reason") or "手動調整", sid, shop_id))
+    # 週28h上限（外国籍アルバイト）。自分自身は集計から除く（除かないと変更前と
+    # 変更後を二重に数え、長さを変えない更新すら弾かれる）。
+    weekly_ng, weekly_msg, weekly_detail = _check_weekly_cap(
+        shop_id, staff_id, body["start_datetime"], body["end_datetime"], brk, exclude_id=sid)
+    weekly_ack = 1 if (weekly_ng and body.get("weekly_cap_confirmed")) else 0
+    if weekly_ng and not weekly_ack:
+        print(f"[SHIFT PUT sid={sid}] weekly_cap: {weekly_msg} staff_id={staff_id} {body['start_datetime']}〜{body['end_datetime']}", flush=True)
+        return jsonify({"error": weekly_msg, "weekly_cap_exceeded": True,
+                        "detail": weekly_detail}), 400
+    execute("UPDATE shifts SET start_datetime=?, end_datetime=?, break_time_minutes=?, status=?, reason=?, weekly_cap_ack=? WHERE id=? AND shop_id=?",
+            (body["start_datetime"], body["end_datetime"], brk, body.get("status") or "confirmed", body.get("reason") or "手動調整", weekly_ack, sid, shop_id))
     print(f"[SHIFT PUT sid={sid}] OK: staff_id={staff_id} {body['start_datetime']}〜{body['end_datetime']} status={body.get('status')} auto_adjust={auto_adjust}", flush=True)
     result = {"ok": True}
     if adjustments:
@@ -2821,6 +2886,16 @@ def shop_shift_draft_time_patch(sid):
     )
     if student_ng:
         return jsonify({"error": student_msg, "student_only": True}), 409
+
+    # 週28h上限（外国籍アルバイト）。この経路はドラフトの時間調整なので、
+    # 承諾の印（weekly_cap_ack）は付けない（印は確定時の POST/PUT で立つ）。
+    # 既存の student_only / overlap に揃えて 409 を返す。
+    weekly_ng, weekly_msg, weekly_detail = _check_weekly_cap(
+        shop_id, draft["staff_id"], start_datetime, end_datetime,
+        compute_break_minutes(minutes_between(start_datetime, end_datetime)), exclude_id=sid)
+    if weekly_ng and not body.get("weekly_cap_confirmed"):
+        return jsonify({"error": weekly_msg, "weekly_cap_exceeded": True,
+                        "detail": weekly_detail}), 409
 
     next_updated_at = jst_now().strftime("%Y-%m-%dT%H:%M:%S.%f")
     execute(
