@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS staffs (
   password_hash         TEXT NOT NULL,
   name                  TEXT NOT NULL,
   role                  TEXT DEFAULT 'part_time'
-                          CHECK(role IN ('employee','part_time','manager','student')),
+                          CHECK(role IN ('employee','part_time','manager','student','foreign_worker')),
   hourly_wage           INTEGER DEFAULT 1000,
   min_hours_per_month   INTEGER DEFAULT 0,
   max_hours_per_month   INTEGER DEFAULT 160,
@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS shifts (
   reason              TEXT,
   availability        TEXT,   -- NULL(時間指定) / 'any'(いつでも可) / 'morning'(早番希望) / 'evening'(遅番希望)
   over_cap_flag       INTEGER DEFAULT 0,  -- 確定時に必要人数超過だった枠に重なる場合 1
+  weekly_cap_ack      INTEGER DEFAULT 0,  -- 週28h超過を店長が承諾して保存した場合 1
   note                TEXT,               -- 店長の自由メモ（店長画面のみ表示）
   created_at          TEXT DEFAULT (datetime('now')),
   updated_at          TEXT,

@@ -546,15 +546,15 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
     def admin_shop_staff_update_role(sid, staff_id):
         """システム管理者がスタッフのロールを変更。
 
-        body: {"role": "manager" | "employee" | "part_time" | "student"}
+        body: {"role": "manager" | "employee" | "part_time" | "student" | "foreign_worker"}
         ※ manager に変更すると、そのスタッフで店舗管理者ログインが可能に。
         ※ student に変更時は月80h上限を強制。
         """
         require_auth(["admin"])
         body = request.get_json(silent=True) or {}
         new_role = body.get("role")
-        if new_role not in ("manager", "employee", "part_time", "student"):
-            abort(400, description="role は manager / employee / part_time / student のいずれかを指定してください")
+        if new_role not in ("manager", "employee", "part_time", "student", "foreign_worker"):
+            abort(400, description="role は manager / employee / part_time / student / foreign_worker のいずれかを指定してください")
         # 存在チェック
         staff = query_one("SELECT id, role, shop_id FROM staffs WHERE id=? AND shop_id=?", (staff_id, sid))
         if not staff:
@@ -615,8 +615,8 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
         if body.get("name"):
             fields["name"] = body["name"]
         if "role" in body and body.get("role") is not None:
-            if body["role"] not in ("manager", "employee", "part_time", "student"):
-                abort(400, description="role は manager / employee / part_time / student のいずれかを指定してください")
+            if body["role"] not in ("manager", "employee", "part_time", "student", "foreign_worker"):
+                abort(400, description="role は manager / employee / part_time / student / foreign_worker のいずれかを指定してください")
             fields["role"] = body["role"]
         if "hourly_wage" in body:
             fields["hourly_wage"] = int(body["hourly_wage"] or 0)
@@ -741,6 +741,7 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
             "staffs_schema": schema,
             "role_distribution": role_stats,
             "supports_student_role": "student" in schema.lower(),
+            "supports_foreign_worker_role": "foreign_worker" in schema.lower(),
             "has_shop_holidays_table": has_holidays,
         })
 
@@ -786,7 +787,7 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
           - staff_code: 必須（任意の文字列）
           - name: 必須
           - password: 必須
-          - role: manager/employee/part_time/student（デフォルト part_time）
+          - role: manager/employee/part_time/student/foreign_worker（デフォルト part_time）
           - hourly_wage: 数値（デフォルト 1000）
         """
         require_auth(["admin"])
@@ -800,8 +801,8 @@ def register_admin_routes(app, *, require_auth, audit, summarize_shifts, csv_saf
         if err:
             abort(400, description=err)
         role = body.get("role") or "part_time"
-        if role not in ("manager", "employee", "part_time", "student"):
-            abort(400, description="role は manager / employee / part_time / student のいずれかを指定してください")
+        if role not in ("manager", "employee", "part_time", "student", "foreign_worker"):
+            abort(400, description="role は manager / employee / part_time / student / foreign_worker のいずれかを指定してください")
         # 店舗存在確認
         shop = query_one("SELECT id FROM shops WHERE id=?", (sid,))
         if not shop:

@@ -1801,10 +1801,11 @@ def shop_staffs_post():
     dup = query_one("SELECT id FROM staffs WHERE shop_id=? AND staff_code=?", (shop_id, body["staff_code"]))
     if dup:
         abort(400, description=f"コード '{body['staff_code']}' は既に存在します。別のコードを指定してください。")
-    # role のバリデーション（'employee' / 'part_time' / 'manager' / 'student' 以外は拒否）
+    # role のバリデーション（'employee' / 'part_time' / 'manager' / 'student' /
+    # 'foreign_worker' 以外は拒否）
     role = body.get("role") or "part_time"
-    if role not in ("employee", "part_time", "manager", "student"):
-        abort(400, description="ロールは employee / part_time / manager / student のいずれかを指定してください")
+    if role not in ("employee", "part_time", "manager", "student", "foreign_worker"):
+        abort(400, description="ロールは employee / part_time / manager / student / foreign_worker のいずれかを指定してください")
     # 数値フィールドの型検証（保存型XSS の入口封じ）。SQLite の INTEGER affinity は
     # 数値として解釈できない TEXT をそのまま保持するため、ここで弾かないと
     # `" onfocus="alert(1)" autofocus x="` のような値が時給として保存でき、
