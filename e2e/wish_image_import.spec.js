@@ -143,21 +143,77 @@ test.describe('希望画像取り込み（wish image import）', () => {
   // ==========================================================
   // ケース3: スタブしたレスポンスでステップ2（確認画面）へ進む
   // ==========================================================
-  test('画像経路でもスタブしたレスポンスでステップ2（確認画面）へ進む', async ({ page }) => {
+  test('画像経路でもスタブしたレスポンスでステップ2（確認画面）へ進み、送信前にJPEGへ再エンコードされている', async ({ page }) => {
     const errors = attachConsoleCollector(page);
     await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
     await openImportModal(page);
     await page.selectOption('#wtiMonth', '2026-08');
     await page.setInputFiles('#wtiImageInput', FIXTURE_PNG);
 
-    await stubParseImage(page, {
-      entries: [{ staff_id: null, staff_hint: null, dates: ['2026-08-10'], availability: 'rest', start: null, end: null, raw: '8/10は休みたいです', raw_verified: true }],
-      unparsed: [], source: 'llm', ocr_text: '8/10は休みたいです', name_candidates: {},
+    // レビュー指摘 I-1: reqImageResizeDims の「計算」を検証するテスト
+    // （tests/test_wish_image_resize.py）だけでは、_wtiParse が実際に
+    // reqImageResize を呼んで送信しているかは保証できない（呼び出し自体を
+    // 消しても純関数テストもE2Eも緑のままだった）。stubParseImage ヘルパは
+    // レスポンスを決め打ちするだけでリクエストボディを見ないため、ここでは
+    // 生の page.route で実際に送られた postData を捕まえる。フィクスチャは
+    // PNG（e2e/fixtures/wti-test.png）なので、images[0] が
+    // data:image/jpeg;base64,... で始まっていれば、canvasによる
+    // JPEG再エンコード（brief Step4）が実際に走った証拠になる。
+    let postedBody = null;
+    await page.route((url) => url.pathname.endsWith('/api/shop/wishes/parse-image'), (route) => {
+      postedBody = route.request().postDataJSON();
+      return route.fulfill({
+        json: {
+          entries: [{ staff_id: null, staff_hint: null, dates: ['2026-08-10'], availability: 'rest', start: null, end: null, raw: '8/10は休みたいです', raw_verified: true }],
+          unparsed: [], source: 'llm', ocr_text: '8/10は休みたいです', name_candidates: {},
+        },
+      });
     });
     await page.click('#wtiParseBtn');
     await page.waitForSelector('#wtiSubmitBtn', { timeout: 10000 });
     // 画像経路の目印: OCR全文の折りたたみが出ている（テキスト経路には無い要素）
     await expect(page.locator('.wti-ocr-details')).toBeVisible();
+
+    expect(postedBody).not.toBeNull();
+    expect(postedBody.images).toHaveLength(1);
+    expect(postedBody.images[0]).toMatch(/^data:image\/jpeg;base64,/);
+    expect(errors).toEqual([]);
+  });
+
+  // ==========================================================
+  // レビュー指摘 I-2: 画像経路の警告文言が、テキスト経路の断定文言に
+  // 退化していないこと（この Task で追加要件として出された主要件の回帰ガード）。
+  // 既存の e2e/wish_text_import.spec.js:886 相当のテストはテキスト経路しか
+  // 見ておらず、両経路が同じ文言に揃ってしまう退化を検知できなかった。
+  // ==========================================================
+  test('画像経路のraw_verified:false警告は、テキスト経路の断定文言に退化していない', async ({ page }) => {
+    const errors = attachConsoleCollector(page);
+    // カレンダーに表示させて詳細モーダルを開くだけなので、実在するスタッフである
+    // 必要はない（_wtiRenderCalendar/_wtiOpenDetail は state.staffs に無い
+    // staff_id も「不明#id」としてそのまま描く）。API呼び出しを増やさないため、
+    // 固定のダミーIDを使う（このファイルの他のテストが作るスタッフと衝突しない
+    // よう、実在しなさそうな大きい値にする）。
+    const dummyStaffId = 900000001;
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await openImportModal(page);
+    await page.selectOption('#wtiMonth', '2026-08');
+    await page.setInputFiles('#wtiImageInput', FIXTURE_PNG);
+    await stubParseImage(page, {
+      entries: [{ staff_id: dummyStaffId, staff_hint: null, dates: ['2026-08-14'], availability: 'rest', start: null, end: null, raw: 'このOCR全文には実在しない文', raw_verified: false }],
+      unparsed: [], source: 'llm', ocr_text: '無関係な読み取り結果', name_candidates: {},
+    });
+    await page.click('#wtiParseBtn');
+    await page.waitForSelector('#wtiSubmitBtn', { timeout: 10000 });
+
+    await page.click('.wish-cell[data-day="2026-08-14"]');
+    const detailText = await page.locator('.wti-detail-entry').textContent();
+    // 画像経路の弱い保証を伝える、確認を促す文言を含むこと
+    expect(detailText).toContain('元の画像と見比べて確認してください');
+    // 退化検知の本体: テキスト経路の断定文言（「AIが要約または創作した可能性が
+    // あります」）を含まないこと。片方だけの assert だと「両方混ざった」退化
+    // （テキストの文言はそのまま残しつつ画像側の文言も足す）を見逃すため、
+    // 含む/含まないの両方を見る。
+    expect(detailText).not.toContain('AIが要約または創作した可能性があります');
     expect(errors).toEqual([]);
   });
 
@@ -191,6 +247,54 @@ test.describe('希望画像取り込み（wish image import）', () => {
     await page.setInputFiles('#wtiImageInput', FIXTURE_PNG);
     await expect(page.locator('.toast')).toContainText('3枚', { timeout: 3000 });
     await expect(page.locator('.wti-image-thumb')).toHaveCount(3);
+    expect(errors).toEqual([]);
+  });
+
+  // ==========================================================
+  // レビュー指摘 I-3: #wtiText への貼り付けは画像を横取りしない。
+  // Excel/Slack/LINE 等はクリップボードに text/plain と image/png を同時に
+  // 載せることがある。貼り付けリスナは wrap（モーダル全体）に束縛している
+  // ため、対策が無いと #wtiText への貼り付けでも画像を拾ってしまい、以後の
+  // 「解析する」が貼ったテキストを無告知で無視して画像経路（保証の弱い経路）
+  // に切り替わる。生の paste イベントを組み立てて検証する（setInputFiles では
+  // 貼り付け経路を通せないため。Playwright の Locator API はクリックやフォーカス
+  // の競合を自己修復してしまい、貼り付け固有の分岐を素通りしうる）。
+  // ==========================================================
+  test('#wtiTextへの貼り付けは画像を拾わない（ドロップゾーンへの貼り付けは従来どおり拾う）', async ({ page }) => {
+    const errors = attachConsoleCollector(page);
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await openImportModal(page);
+
+    const pngBase64 = fs.readFileSync(FIXTURE_PNG).toString('base64');
+
+    // text/plain と image/png の両方を積んだ DataTransfer を作り、対象要素へ
+    // 生の paste イベントとして dispatch する（ClipboardEvent のコンストラクタに
+    // clipboardData を渡す方式はブラウザ間で挙動が割れるため、素の Event に
+    // Object.defineProperty で clipboardData を後付けする方式に統一する）。
+    const dispatchPaste = async (selector) => {
+      await page.locator(selector).evaluate((el, base64) => {
+        const byteStr = atob(base64);
+        const bytes = new Uint8Array(byteStr.length);
+        for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+        const file = new File([bytes], 'clip.png', { type: 'image/png' });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        dt.items.add('貼り付けたテキストです', 'text/plain');
+        const evt = new Event('paste', { bubbles: true, cancelable: true });
+        Object.defineProperty(evt, 'clipboardData', { value: dt });
+        el.dispatchEvent(evt);
+      }, pngBase64);
+    };
+
+    // #wtiText への貼り付け: 画像を拾わない（サムネイルが増えない）こと
+    await dispatchPaste('#wtiText');
+    await page.waitForTimeout(300); // _wtiHandleImageFiles は非同期（FileReader）なので確実に待つ
+    await expect(page.locator('.wti-image-thumb')).toHaveCount(0);
+
+    // 対照実験: 同じ paste をドロップゾーンへ送ると従来どおり画像を拾う
+    // （このテスト自体が「貼り付けを一律無効化した」壊れ方では通らないことの担保）
+    await dispatchPaste('#wtiImageDrop');
+    await expect(page.locator('.wti-image-thumb')).toHaveCount(1);
     expect(errors).toEqual([]);
   });
 

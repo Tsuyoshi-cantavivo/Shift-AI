@@ -3434,6 +3434,14 @@ function _wtiRenderStep1(wrap, state) {
   if (!wrap._wtiPasteBound) {
     wrap._wtiPasteBound = true;
     wrap.addEventListener('paste', async (e) => {
+      // レビュー指摘 I-3: Excel/Slack/LINE等はクリップボードに text/plain と
+      // image/png を同時に載せることがある。#wtiText へ貼り付けたつもりの
+      // テキストが、無告知で（テキストを無視したまま）保証の弱い画像経路に
+      // 切り替わってしまうのを防ぐため、テキストエリアへの貼り付けはここでは
+      // 画像を拾わない（e.preventDefault() もしないので、ブラウザ既定のテキスト
+      // 貼り付けはそのまま働く）。テキストエリア以外（ドロップゾーン・モーダル
+      // 本体など）への貼り付けは従来どおり画像として拾う。
+      if (e.target?.closest?.('#wtiText')) return;
       const items = e.clipboardData?.items;
       if (!items) return;
       const files = Array.from(items)
