@@ -13,13 +13,14 @@
   5. **休憩（検証F）**: compute_break_minutes で 6h超→45分 / 8h超→60分 を自動算出。
   6. **月間上限**: 各スタッフの max_hours_per_month を超える配置はスキップ（警告のみでなく配置抑制）。
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 from db import query_all
 from utils import (
     weekday_sun0, combine_dt, combine_dt_overnight, minutes_between, compute_break_minutes,
     add_days, max_consecutive_run, _hhmm_to_min, parse_iso,
     build_staff_tendency, score_shift_for_tendency,
 )
+from weekly_hours import minutes_by_day, exceeds_weekly_cap
 
 # スロット粒度(分)。1時間単位より細かくしておき、検証Aは時間単位で保証する。
 GRAN = 30
@@ -320,6 +321,28 @@ def auto_generate(shop_id, settings, start_date, end_date):
             cur = monthly_cap.get(sid) or 80
             monthly_cap[sid] = min(cur, 80)
 
+    # 【週28h上限】外国籍アルバイト（資格外活動許可）は入管法上、どの連続7日間も
+    # 28時間以内。月上限だけでは月前半に集中させる組み方が素通りするため、
+    # 日ごとの実働分を持ち回り、配置のたびに窓を検査する（判定は weekly_hours.py）。
+    foreign_ids = {sid for sid, role in staff_role.items() if role == "foreign_worker"}
+    weekly_minutes = {sid: {} for sid in foreign_ids}
+    if foreign_ids:
+        # 月初の週は前月末を含む窓を持つ。生成範囲の6日前からの確定シフトを
+        # 「既に働いた実績」として入れておかないと、月をまたいだ超過を見逃す。
+        lookback = (datetime.strptime(start_date, "%Y-%m-%d").date() - timedelta(days=6)).isoformat()
+        past_for_weekly = query_all(
+            "SELECT staff_id, start_datetime, end_datetime, break_time_minutes FROM shifts "
+            "WHERE shop_id=? AND status='confirmed' "
+            "AND start_datetime>=? AND start_datetime<?",
+            (shop_id, lookback + "T00:00:00", start_date + "T00:00:00"))
+        for row in past_for_weekly:
+            if row["staff_id"] not in foreign_ids:
+                continue
+            acc = weekly_minutes[row["staff_id"]]
+            for d, m in minutes_by_day([(row["start_datetime"], row["end_datetime"],
+                                         row["break_time_minutes"] or 0)]).items():
+                acc[d] = acc.get(d, 0) + m
+
     minutes_by_staff = {s["id"]: 0 for s in staffs}
     staff_days = {s["id"]: set() for s in staffs}
     confirmed = []
@@ -383,8 +406,11 @@ def auto_generate(shop_id, settings, start_date, end_date):
         work = minutes_between(start_iso, end_iso)
         is_pt = staff_role.get(staff_id) == "part_time"
         is_student = staff_role.get(staff_id) == "student"
+        is_foreign = staff_role.get(staff_id) == "foreign_worker"
         is_emp = staff_role.get(staff_id) in ("employee", "manager")
-        if (is_pt or is_student) and work < min_daily and not skip_min_daily:
+        # 外国籍アルバイトも非常勤なので、min_daily・1シフト上限は part_time と同じ扱い
+        # （このロール固有の制約は週28hだけ、という設計）。
+        if (is_pt or is_student or is_foreign) and work < min_daily and not skip_min_daily:
             return False, "min_daily"
         # 1シフト上限チェック（労基法遵守）
         role_max = max_employee_daily if is_emp else max_daily
@@ -401,6 +427,15 @@ def auto_generate(shop_id, settings, start_date, end_date):
         cap_h = monthly_cap.get(staff_id) or 0
         if cap_h and minutes_by_staff[staff_id] + work > cap_h * 60:
             return False, "monthly_cap"
+        # 【週28h上限】外国籍アルバイトのみ。このシフトを足したとき、それを含む
+        # どれかの連続7日間が28hを超えるなら配置しない（学生の月80hと同じ振る舞いで、
+        # 結果は人員不足として画面に出る）。
+        if staff_id in foreign_ids:
+            cand = dict(weekly_minutes[staff_id])
+            for d, m in minutes_by_day([(start_iso, end_iso, compute_break_minutes(work))]).items():
+                cand[d] = cand.get(d, 0) + m
+            if exceeds_weekly_cap(cand, target_day=day):
+                return False, "weekly_cap"
         if check_cap and not cap_ok(day, start_iso, end_iso):
             return False, "cap"
         return True, None
@@ -434,6 +469,11 @@ def auto_generate(shop_id, settings, start_date, end_date):
             "break": compute_break_minutes(work), "status": "confirmed", "reason": reason,
         })
         minutes_by_staff[staff_id] += work
+        # 週28h判定のための日別実働を更新する（can_place が次の配置で参照する）
+        if staff_id in foreign_ids:
+            acc = weekly_minutes[staff_id]
+            for d, m in minutes_by_day([(start_iso, end_iso, compute_break_minutes(work))]).items():
+                acc[d] = acc.get(d, 0) + m
         cov, sw = state(day)
         day_placed_roles.setdefault(day, set()).add(staff_role.get(staff_id, "part_time"))
         for sl in _shift_slots(start_iso, end_iso, GRAN):
@@ -857,6 +897,29 @@ def auto_generate(shop_id, settings, start_date, end_date):
             "message": (
                 f"以下の日は学生アルバイトのみの配置になりました（社会人スタッフが1名も配置されていません）: "
                 f"{', '.join(sorted(student_only_days))}。社会人スタッフの追加配置を推奨します。"
+            ),
+        })
+
+    # -----------------------------------------------------------
+    # 外国籍アルバイトの週28h検証（二重の安全弁）
+    # can_place で弾いているはずだが、固定シフト(fixed_shifts)など
+    # can_place を通らない経路があるため、結果に対しても検査する。
+    # 週28hの超過は本人の在留資格と雇用主の罰則に直結するので、
+    # 万一すり抜けたら店長に必ず見せる。
+    # -----------------------------------------------------------
+    for sid in foreign_ids:
+        hit = exceeds_weekly_cap(weekly_minutes[sid])
+        if not hit:
+            continue
+        w_start, w_end, total = hit
+        warnings.append({
+            "type": "weekly_cap_overflow",
+            "staff_id": sid,
+            "name": name_map.get(sid, ""),
+            "window_start": w_start, "window_end": w_end, "minutes": total,
+            "message": (
+                f"{name_map.get(sid, '')}さんは {w_start}〜{w_end} の7日間で "
+                f"{total // 60}時間{total % 60}分になり、週28時間の上限を超えています。"
             ),
         })
 
