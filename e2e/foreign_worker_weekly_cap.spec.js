@@ -92,6 +92,40 @@ test.describe('外国籍アルバイトの週28時間上限（手動追加）', 
   }
 
   // ==========================================================
+  // ケース0: 店長がスタッフ管理から「外国籍アルバイト」を登録できる。
+  // 管理コンソール（admin.js）側だけロールを足しても、店長が日常的に使う
+  // この画面に選択肢が無ければ機能そのものが使えない。
+  // ==========================================================
+  test('店長のスタッフ管理からロール「外国籍アルバイト」を選んで登録できる', async ({ page }) => {
+    const errors = attachConsoleCollector(page);
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await page.click('button[data-screen="staffs"]');
+    await page.waitForSelector('#addStaffBtn', { timeout: 10000 });
+    await page.click('#addStaffBtn');
+    await page.waitForSelector('#f_role', { timeout: 10000 });
+
+    // 選択肢として存在すること
+    const values = await page.locator('#f_role option').evaluateAll((els) => els.map((e) => e.value));
+    expect(values).toContain('foreign_worker');
+
+    // 選ぶと週28hの注意書きが出ること（店長が上限を知らずに登録しないため）
+    await page.selectOption('#f_role', 'foreign_worker');
+    const hint = page.locator('#f_role_hint');
+    await expect(hint).toBeVisible();
+    await expect(hint).toContainText('28');
+
+    // 実際に登録できること
+    const code = `FWUI_${RUN_ID}`;
+    await page.fill('#f_code', code);
+    await page.fill('#f_name', '外国籍ユーザ');
+    await page.fill('#f_pw', 'Fwk12345a');
+    await page.click('.modal-overlay [data-save]');
+    await page.waitForSelector('.modal-overlay', { state: 'detached', timeout: 10000 });
+    await expect(page.locator('#staffList')).toContainText('外国籍ユーザ');
+    expect(errors).toEqual([]);
+  });
+
+  // ==========================================================
   // ケース1: 承諾すると weekly_cap_confirmed を付けて再送される
   // ==========================================================
   test('週28h超過の確認を承諾すると、weekly_cap_confirmed を付けて再送される', async ({ page }) => {

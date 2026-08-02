@@ -318,6 +318,17 @@ function roleLabel(role) {
 /* 学生アルバイトの月間上限 */
 const STUDENT_MAX_HOURS = 80;
 
+/* 外国籍アルバイト（資格外活動許可）の週上限。入管法上、どの連続7日間も
+   28時間以内でなければならない。月ではなく週で効く点が学生ロールと違う。 */
+const FOREIGN_WEEKLY_MAX_HOURS = 28;
+
+/* スタッフ編集モーダルのロール注意書き。表示条件が初期描画と change の2箇所に
+   あるため、文言を1箇所に持つ。 */
+const STUDENT_ROLE_HINT_HTML =
+  `<i class="bi bi-info-circle"></i> 学生アルバイトは月間${STUDENT_MAX_HOURS}時間上限・学生のみのシフトは作成できません。`;
+const FOREIGN_ROLE_HINT_HTML =
+  `<i class="bi bi-info-circle"></i> 外国籍アルバイトは週${FOREIGN_WEEKLY_MAX_HOURS}時間上限（どの連続7日間で数えても${FOREIGN_WEEKLY_MAX_HOURS}時間以内）。資格外活動許可の条件で、超えると雇用主も罰則の対象になります。`;
+
 /* Modal */
 function openModal(title, bodyHtml, onSave, opts = {}) {
   const wrap = document.createElement('div');
@@ -2558,18 +2569,19 @@ async function loadStaffList() {
 function showStaffForm(s) {
   const isEdit = !!s;
   const isStudent = s && s.role === 'student';
+  const isForeign = s && s.role === 'foreign_worker';
   const wrap = openModal(`<i class="bi bi-person-plus"></i> ${isEdit ? 'スタッフ編集' : 'スタッフ追加'}`,
     `<div class="row">
       <div class="col-6"><label class="form-label" for="f_code">コード</label><input id="f_code" class="form-control" value="${s ? esc(s.staff_code) : ''}" ${isEdit ? 'disabled' : ''}></div>
       <div class="col-6"><label class="form-label" for="f_name">氏名</label><input id="f_name" class="form-control" value="${s ? esc(s.name) : ''}"></div>
     </div>
-    <label class="form-label mt-2">ロール</label><select id="f_role" class="form-select"><option value="part_time" ${s && s.role === 'part_time' ? 'selected' : ''}>アルバイト</option><option value="student" ${s && s.role === 'student' ? 'selected' : ''}>学生アルバイト（月${STUDENT_MAX_HOURS}h上限）</option><option value="employee" ${s && s.role === 'employee' ? 'selected' : ''}>社員</option><option value="manager" ${s && s.role === 'manager' ? 'selected' : ''}>店舗管理者（店舗権限）</option></select>
+    <label class="form-label mt-2">ロール</label><select id="f_role" class="form-select"><option value="part_time" ${s && s.role === 'part_time' ? 'selected' : ''}>アルバイト</option><option value="student" ${s && s.role === 'student' ? 'selected' : ''}>学生アルバイト（月${STUDENT_MAX_HOURS}h上限）</option><option value="foreign_worker" ${s && s.role === 'foreign_worker' ? 'selected' : ''}>外国籍アルバイト（週${FOREIGN_WEEKLY_MAX_HOURS}h上限）</option><option value="employee" ${s && s.role === 'employee' ? 'selected' : ''}>社員</option><option value="manager" ${s && s.role === 'manager' ? 'selected' : ''}>店舗管理者（店舗権限）</option></select>
     <div class="row mt-2">
       <div class="col-4"><label class="form-label" for="f_wage">時給</label><input id="f_wage" type="number" class="form-control" value="${esc(s ? s.hourly_wage : 1100)}"></div>
       <div class="col-4"><label class="form-label" for="f_min">最低h</label><input id="f_min" type="number" class="form-control" value="${esc(s ? s.min_hours_per_month : 0)}"></div>
       <div class="col-4"><label class="form-label" for="f_max">上限h ${isStudent ? `<span class="text-danger small">(学生は${STUDENT_MAX_HOURS})</span>` : ''}</label><input id="f_max" type="number" class="form-control" value="${esc(s ? s.max_hours_per_month : 160)}" ${isStudent ? 'max="' + STUDENT_MAX_HOURS + '"' : ''}></div>
     </div>
-    <div class="small text-secondary mt-1" id="f_role_hint" style="display:${isStudent ? 'block' : 'none'}"><i class="bi bi-info-circle"></i> 学生アルバイトは月間${STUDENT_MAX_HOURS}時間上限・学生のみのシフトは作成できません。</div>
+    <div class="small text-secondary mt-1" id="f_role_hint" style="display:${isStudent || isForeign ? 'block' : 'none'}">${isForeign ? FOREIGN_ROLE_HINT_HTML : STUDENT_ROLE_HINT_HTML}</div>
     <label class="form-label mt-2">ステータス</label><select id="f_resign" class="form-select"><option value="0" ${!s || !s.is_resigned ? 'selected' : ''}>在籍</option><option value="1" ${s && s.is_resigned ? 'selected' : ''}>退職</option></select>
     <label class="form-label mt-2">パスワード ${isEdit ? '（変更時のみ・8文字以上）' : '（8文字以上・英数字）'}</label>
     <input id="f_pw" type="password" class="form-control" placeholder="${isEdit ? '空欄で変更なし' : 'パスワード'}" autocomplete="new-password">
@@ -2624,7 +2636,14 @@ function showStaffForm(s) {
   const maxLabel = wrap.querySelector('label[for="f_max"]');
   function syncRoleUI() {
     const isStu = roleSel.value === 'student';
-    if (hintBox) hintBox.style.display = isStu ? 'block' : 'none';
+    const isFor = roleSel.value === 'foreign_worker';
+    // 外国籍アルバイトの上限は「週」なので月上限の入力は縛らない。
+    // 代わりに、店長が上限を知らないまま登録しないよう注意書きだけ出す。
+    if (hintBox) {
+      hintBox.style.display = (isStu || isFor) ? 'block' : 'none';
+      if (isFor) hintBox.innerHTML = FOREIGN_ROLE_HINT_HTML;
+      else if (isStu) hintBox.innerHTML = STUDENT_ROLE_HINT_HTML;
+    }
     if (isStu) {
       maxInput.max = String(STUDENT_MAX_HOURS);
       if (parseInt(maxInput.value, 10) > STUDENT_MAX_HOURS) maxInput.value = String(STUDENT_MAX_HOURS);
