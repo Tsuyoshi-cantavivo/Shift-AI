@@ -47,9 +47,33 @@ async function api(path, options = {}) {
   const data = text ? JSON.parse(text) : {};
   if (!res.ok) {
     if (res.status === 401) logoutLocal();
-    throw new Error(data.error || ('HTTP ' + res.status));
+    // サーバが返す構造化情報（weekly_cap_exceeded / detail 等）を捨てない。
+    // 従来は message だけを投げていたため、呼び出し側はエラー文言の部分一致で
+    // しか種別を判定できなかった（「必要人数」超過の確認がその形）。
+    const err = new Error(data.error || ('HTTP ' + res.status));
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
   return data;
+}
+
+/* 週28h上限（外国籍アルバイト）の確認付きシフト保存。
+   サーバが weekly_cap_exceeded を返したら、どの7日間が何時間になるのかを見せて
+   店長に確認し、承諾されたときだけ weekly_cap_confirmed を足して再送する。
+   在留資格の変更直後などアプリが把握していない事情がありうるため強行の道は
+   残すが、黙って通すと不法就労のシフトが気づかれないまま確定してしまう。
+   戻り値: 保存できたらサーバの応答、店長がキャンセルしたら null。 */
+async function saveShiftWithWeeklyCapConfirm(path, payload, method = 'POST') {
+  try {
+    return await api(path, { method, body: JSON.stringify(payload) });
+  } catch (e) {
+    if (!e.data || !e.data.weekly_cap_exceeded) throw e;
+    // 既存の「必要人数超過」確認と同じ confirm を使う（同種の確認が2つの
+    // 見た目で現れないように揃える）。
+    if (!confirm(e.message + '\n\nそれでも登録しますか？')) return null;
+    return await api(path, { method, body: JSON.stringify({ ...payload, weekly_cap_confirmed: true }) });
+  }
 }
 
 /* 現在画面が生きているか確認するガード関数。
@@ -1614,12 +1638,13 @@ function openDayTimeline(date, allShifts, editable, onChange) {
           const en = w2.querySelector('#mEnd').value;
           if (!st || !en) { toast('時間を入力してください', 'error'); return; }
           try {
-            const r = await api('/shop/shifts', { method: 'POST', body: JSON.stringify({
+            const r = await saveShiftWithWeeklyCapConfirm('/shop/shifts', {
               staff_id: staffId,
               start_datetime: `${sInfo.date}T${st}:00`,
               end_datetime: `${eInfo.date}T${en}:00`,
               auto_adjust: true,
-            })});
+            });
+            if (!r) return;  // 週28h超過の確認を店長がキャンセルした
             close();
             if (r.adjustments && r.adjustments.length) {
               toast(`追加しました（${r.adjustments.length}件自動調整）`, 'success');
@@ -1667,12 +1692,13 @@ function openDayTimeline(date, allShifts, editable, onChange) {
             const en = w2.querySelector('#qEnd').value;
             if (!st || !en) { toast('時間を入力してください', 'error'); return; }
             try {
-              const r = await api('/shop/shifts', { method: 'POST', body: JSON.stringify({
+              const r = await saveShiftWithWeeklyCapConfirm('/shop/shifts', {
                 staff_id: +staffId,
                 start_datetime: `${sInfo.date}T${st}:00`,
                 end_datetime: `${eInfo.date}T${en}:00`,
                 auto_adjust: true,
-              })});
+              });
+              if (!r) return;  // 週28h超過の確認を店長がキャンセルした
               close();
               if (r.adjustments && r.adjustments.length) {
                 toast(`追加しました（${r.adjustments.length}件自動調整）`, 'success');
@@ -1724,12 +1750,13 @@ function openDayTimeline(date, allShifts, editable, onChange) {
             const st = w2.querySelector('#gapStart').value;
             const en = w2.querySelector('#gapEnd').value;
             try {
-              const r = await api('/shop/shifts', { method: 'POST', body: JSON.stringify({
+              const r = await saveShiftWithWeeklyCapConfirm('/shop/shifts', {
                 staff_id: staffId,
                 start_datetime: `${sInfo.date}T${st}:00`,
                 end_datetime: `${eInfo.date}T${en}:00`,
                 auto_adjust: true,
-              })});
+              });
+              if (!r) return;  // 週28h超過の確認を店長がキャンセルした
               close();
               if (r.adjustments && r.adjustments.length) {
                 toast(`配置しました（${r.adjustments.length}件自動調整）`, 'success');
@@ -1800,7 +1827,8 @@ function showEditModal(s) {
         auto_adjust: true,
       };
       try {
-        const r = await api(`/shop/shifts/${s.id}`, { method: 'PUT', body: JSON.stringify(payload) });
+        const r = await saveShiftWithWeeklyCapConfirm(`/shop/shifts/${s.id}`, payload, 'PUT');
+        if (!r) return;  // 週28h超過の確認を店長がキャンセルした
         // 店長メモを保存（変更があった場合のみ）
         const noteVal = w2.querySelector('#mNote').value;
         if ((noteVal || '') !== (s.note || '')) {
@@ -2476,7 +2504,8 @@ function openAddShiftModal() {
         if (!startVal || !endVal) { toast('開始・終了を入力してください', 'error'); return; }
         const payload = { staff_id: +w.querySelector('#adStaff').value, start_datetime: startVal + ':00', end_datetime: endVal + ':00', status: w.querySelector('#adStatus').value };
         try {
-          await api('/shop/shifts', { method: 'POST', body: JSON.stringify(payload) });
+          const added = await saveShiftWithWeeklyCapConfirm('/shop/shifts', payload);
+          if (!added) return;  // 週28h超過の確認を店長がキャンセルした
           close(); toast('追加しました', 'success'); navigateTo('shifts');
         } catch (e) {
           if (e.message.includes('必要人数') && confirm(e.message + '\n\nそれでも配置しますか？')) {
