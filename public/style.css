@@ -37,6 +37,8 @@
   --role-part-time-ink:  #4A3A12;
   --role-student:        #F2DADD;  /* 桜・非常勤 */
   --role-student-ink:    #4A2A2E;
+  --role-foreign:        #EFD6C4;  /* 陶土・非常勤（外国籍アルバイト） */
+  --role-foreign-ink:    #4A3323;
 
   /* 意味色（面・文字の両方に使う。和色の系統に合わせて彩度を落とす）。
      --warning は #B8862B だと紙の上で 3.10:1 しか出ず、白抜き文字も 3.24:1 で
@@ -124,6 +126,8 @@ html[data-theme="dark"] {
   --role-part-time-ink:  #EDD89E;
   --role-student:        #4E373B;
   --role-student-ink:    #F0D5D9;
+  --role-foreign:        #4C3B2E;
+  --role-foreign-ink:    #EBD2BC;
 
   --success:     #7FB08D;
   --warning:     #D9B45E;
@@ -943,6 +947,7 @@ html[data-theme="light"] .chip.chip-pending { border-color: color-mix(in srgb, v
 .chip.role-employee,  .dot.role-employee,  .tl-bar.role-employee,  .tl-role-badge.role-employee  { background: var(--role-employee);  color: var(--role-employee-ink); }
 .chip.role-part-time, .dot.role-part-time, .tl-bar.role-part-time, .tl-role-badge.role-part-time { background: var(--role-part-time); color: var(--role-part-time-ink); }
 .chip.role-student,   .dot.role-student,   .tl-bar.role-student,   .tl-role-badge.role-student   { background: var(--role-student);   color: var(--role-student-ink); }
+.chip.role-foreign,   .dot.role-foreign,   .tl-bar.role-foreign,   .tl-role-badge.role-foreign   { background: var(--role-foreign);   color: var(--role-foreign-ink); }
 
 /* 配置帯の名前の下に出すロールバッジ。狭いスペースでもロールが判別できるように
    （印刷はロール色が淡いため、モノクロ印刷では文字だけが頼り）。
@@ -991,6 +996,7 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .tl-legend i.lg-role-employee  { background: var(--role-employee); }
 .tl-legend i.lg-role-part-time { background: var(--role-part-time); }
 .tl-legend i.lg-role-student   { background: var(--role-student); }
+.tl-legend i.lg-role-foreign   { background: var(--role-foreign); }
 .tl-legend i.lg-alert          { background: var(--alert-fill); border: 1px solid var(--alert); }
 .tl-legend-note { color: var(--ink-3); font-size: .62rem; }
 
@@ -1274,12 +1280,14 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
   .print-page .tl-bar.role-employee  { background: #C9DFE0 !important; color: #1D3D42 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .print-page .tl-bar.role-part-time { background: #F3DFA4 !important; color: #4A3A12 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .print-page .tl-bar.role-student   { background: #F2DADD !important; color: #4A2A2E !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .print-page .tl-bar.role-foreign   { background: #EFD6C4 !important; color: #4A3323 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   /* ロールバッジも同じ理由で生の16進数固定（.tl-role-badge の地色は var(--role-*) 依存のため
      Step2のトークン固定だけではダーク側の値が残ってしまう） */
   .print-page .tl-role-badge.role-manager   { background: #B9CBE2 !important; color: #22364F !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .print-page .tl-role-badge.role-employee  { background: #C9DFE0 !important; color: #1D3D42 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .print-page .tl-role-badge.role-part-time { background: #F3DFA4 !important; color: #4A3A12 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .print-page .tl-role-badge.role-student   { background: #F2DADD !important; color: #4A2A2E !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .print-page .tl-role-badge.role-foreign   { background: #EFD6C4 !important; color: #4A3323 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .print-page .tl-gap-bar { background: #B14A35 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; animation: none; top: 3px; height: 26px; font-size: 10px; }
   .print-page .tl-gap-row { border-top: 1px dashed #999; padding-top: 6px; margin-top: 6px; }
   .print-page .tl-gap-name { color: #B14A35 !important; font-size: 11px !important; font-weight: 700; }
@@ -1295,6 +1303,7 @@ html, body, .app-header, .side-nav, .bottom-nav, .card, .app-card,
   .print-page .tl-legend i.lg-role-employee  { background: #C9DFE0 !important; }
   .print-page .tl-legend i.lg-role-part-time { background: #F3DFA4 !important; }
   .print-page .tl-legend i.lg-role-student   { background: #F2DADD !important; }
+  .print-page .tl-legend i.lg-role-foreign   { background: #EFD6C4 !important; }
   /* --alert (#B14A35 = rgb(177,74,53)) と同じ色相で揃える。画面側 :root の --alert-fill と同値。 */
   .print-page .tl-legend i.lg-alert          { background: rgba(177,74,53,.18) !important; border-color: #B14A35 !important; }
 

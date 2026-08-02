@@ -616,6 +616,7 @@ function openAdminStaffEditModal(shopId, s, onDone) {
     { v: 'employee', label: '社員（employee）' },
     { v: 'part_time', label: 'アルバイト（part_time）' },
     { v: 'student', label: '学生アルバイト（student）' },
+    { v: 'foreign_worker', label: '外国籍アルバイト（foreign_worker）' },
   ];
   openModal(`<i class="bi bi-pencil"></i> スタッフ編集 — ${esc(s.name)}`,
     `<label class="form-label" for="aeName">氏名</label>
@@ -625,7 +626,7 @@ function openAdminStaffEditModal(shopId, s, onDone) {
      <label class="form-label" for="aeWage">時給</label>
      <input id="aeWage" type="number" class="form-control mb-2" value="${esc(s.hourly_wage != null ? s.hourly_wage : '')}">
      <div class="flex items-center gap-2 mb-1"><input id="aeResigned" type="checkbox" ${s.is_resigned ? 'checked' : ''}><label for="aeResigned" class="form-label mb-0">退職として扱う</label></div>
-     <div class="small text-secondary mb-2"><i class="bi bi-info-circle"></i> 学生アルバイトは月80h上限が自動適用されます。ロール変更でセッションは無効化されません（軽微編集用）。</div>
+     <div class="small text-secondary mb-2"><i class="bi bi-info-circle"></i> 学生アルバイトは月80h上限、外国籍アルバイトは週28h上限（任意の連続7日間）が自動適用されます。ロール変更でセッションは無効化されません（軽微編集用）。</div>
      <div class="form-error mt-1" id="aeErr"></div>`,
     async (w, close) => {
       const errBox = w.querySelector('#aeErr');
@@ -653,6 +654,7 @@ function openAdminRoleModal(shopId, staffId, staffName, currentRole, onDone) {
     { v: 'employee', label: '社員（employee）' },
     { v: 'part_time', label: 'アルバイト（part_time）' },
     { v: 'student', label: '学生アルバイト（student・月80h上限）' },
+    { v: 'foreign_worker', label: '外国籍アルバイト（foreign_worker・週28h上限）' },
   ];
   openModal(`<i class="bi bi-shield-lock"></i> ロール変更 — ${esc(staffName)}`,
     `<p class="small text-secondary mb-2">現在のロール: <strong>${roleLabel(currentRole)}</strong></p>
@@ -735,6 +737,7 @@ function openAdminAddStaffModal(shopId, onDone) {
        <option value="employee" selected>社員（employee）</option>
        <option value="part_time">アルバイト（part_time）</option>
        <option value="student">学生アルバイト（student・月80h上限）</option>
+       <option value="foreign_worker">外国籍アルバイト（foreign_worker・週28h上限）</option>
      </select>
      <label class="form-label mt-2">パスワード（8文字以上・英数字）</label>
      <input id="admStaffPw" type="password" class="form-control" autocomplete="new-password">

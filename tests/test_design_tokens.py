@@ -28,6 +28,7 @@ LIGHT_EXPECTED = {
     "role-employee": "#C9DFE0", "role-employee-ink": "#1D3D42",
     "role-part-time": "#F3DFA4", "role-part-time-ink": "#4A3A12",
     "role-student": "#F2DADD", "role-student-ink": "#4A2A2E",
+    "role-foreign": "#EFD6C4", "role-foreign-ink": "#4A3323",
     # 意味色。設計書 4.1 / 5.1 に追記した確定値
     "success": "#4A7C59", "success-ink": "#3F6652",
     "warning": "#8F6718", "warning-ink": "#6F5724",
@@ -43,6 +44,7 @@ DARK_EXPECTED = {
     "role-employee": "#2F4A4D", "role-employee-ink": "#BFDCDE",
     "role-part-time": "#514526", "role-part-time-ink": "#EDD89E",
     "role-student": "#4E373B", "role-student-ink": "#F0D5D9",
+    "role-foreign": "#4C3B2E", "role-foreign-ink": "#EBD2BC",
     "success": "#7FB08D", "success-ink": "#A2C4AA",
     "warning": "#D9B45E", "warning-ink": "#E1C78A",
     "danger": "#D97757", "danger-ink": "#E19C85",
@@ -228,6 +230,7 @@ class TestContrast:
         ("社員バー", "role-employee-ink", "role-employee"),
         ("パートバー", "role-part-time-ink", "role-part-time"),
         ("学生バー", "role-student-ink", "role-student"),
+        ("外国籍バー", "role-foreign-ink", "role-foreign"),
     ]
 
     @pytest.mark.parametrize("label,fg,bg", LIGHT_PAIRS)

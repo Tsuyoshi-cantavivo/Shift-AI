@@ -147,7 +147,7 @@ function cssVarAlpha(name, alpha) {
   return `rgba(${r},${g},${b},${alpha})`;
 }
 /** スタッフのロールから配置帯・チップの色クラスを決める。
- *  色は staffs.role を表す。寒色＝常勤（店長・社員）、暖色＝非常勤（パート・学生）。
+ *  色は staffs.role を表す。寒色＝常勤（店長・社員）、暖色＝非常勤（パート・学生・外国籍）。
  *  未知の値や欠損は社員扱いにフォールバックする（色が消えるより誤色のほうが害が小さい）。 */
 function roleClass(role) {
   switch (role) {
@@ -155,18 +155,20 @@ function roleClass(role) {
     case 'employee':  return 'role-employee';
     case 'part_time': return 'role-part-time';
     case 'student':   return 'role-student';
+    case 'foreign_worker': return 'role-foreign';
     default:          return 'role-employee';
   }
 }
 
 /** 配置帯のバッジ・凡例で使う短いロール名。狭いスペースに収めるため。
- *  ヘッダー等で使う正式名称は roleLabel() 側（店舗管理者/社員/アルバイト/学生アルバイト）。 */
+ *  ヘッダー等で使う正式名称は roleLabel() 側（店舗管理者/社員/アルバイト/学生アルバイト/外国籍アルバイト）。 */
 function roleBadgeLabel(role) {
   switch (role) {
     case 'manager':   return '店長';
     case 'employee':  return '社員';
     case 'part_time': return 'パート';
     case 'student':   return '学生';
+    case 'foreign_worker': return '外国籍';
     default:          return '';
   }
 }
@@ -280,11 +282,12 @@ function badge(text, variant = 'muted') {
   return `<span class="badge-soft ${variant}">${esc(text)}</span>`;
 }
 
-/* ロールコード → 日本語表示（manager/employee/part_time/student に対応） */
+/* ロールコード → 日本語表示（manager/employee/part_time/student/foreign_worker に対応） */
 function roleLabel(role) {
   return role === 'manager' ? '店舗管理者'
     : role === 'employee' ? '社員'
     : role === 'student' ? '学生アルバイト'
+    : role === 'foreign_worker' ? '外国籍アルバイト'
     : 'アルバイト';
 }
 
@@ -1145,7 +1148,7 @@ function buildStaticTimelineHtml(list, anchorDate) {
     <span><i class="lg-role-manager"></i>店長</span>
     <span><i class="lg-role-employee"></i>社員</span>
     <span><i class="lg-role-part-time"></i>パート</span>
-    <span><i class="lg-role-student"></i>学生</span>
+    <span><i class="lg-role-student"></i>学生</span><span><i class="lg-role-foreign"></i>外国籍</span>
     <span><i class="lg-alert"></i>不足</span>
     <span class="tl-legend-note">ベタ塗り＝確定／斜線＝変更中／薄い破線＝申請中</span>
   </div>`;
@@ -1562,7 +1565,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
   const body =
     `<div class="tl-wrap"><div class="tl-axis-row"><div class="tl-name"></div><div class="tl-axis">${hours.join('')}</div></div>${rows}${gapRow}</div>
      ${emptyNotice}
-     <div class="tl-legend"><span><i class="lg-role-manager"></i>店長</span><span><i class="lg-role-employee"></i>社員</span><span><i class="lg-role-part-time"></i>パート</span><span><i class="lg-role-student"></i>学生</span><span><i class="lg-alert"></i>不足</span>${editable ? '<span><i class="bi bi-hand-index" style="font-style:normal;font-size:.7rem"></i>空きをクリックで追加</span>' : ''}${editable && list.some(isAiDraftShift) ? '<span><i class="bi bi-arrows-move" style="font-style:normal;font-size:.7rem"></i>AIドラフトはドラッグで調整</span>' : ''}<span>バーをタップで${editable ? '編集' : '詳細'}</span></div>
+     <div class="tl-legend"><span><i class="lg-role-manager"></i>店長</span><span><i class="lg-role-employee"></i>社員</span><span><i class="lg-role-part-time"></i>パート</span><span><i class="lg-role-student"></i>学生</span><span><i class="lg-role-foreign"></i>外国籍</span><span><i class="lg-alert"></i>不足</span>${editable ? '<span><i class="bi bi-hand-index" style="font-style:normal;font-size:.7rem"></i>空きをクリックで追加</span>' : ''}${editable && list.some(isAiDraftShift) ? '<span><i class="bi bi-arrows-move" style="font-style:normal;font-size:.7rem"></i>AIドラフトはドラッグで調整</span>' : ''}<span>バーをタップで${editable ? '編集' : '詳細'}</span></div>
      <button class="btn btn-outline-secondary btn-sm mt-2" id="tlDraftUndo" hidden><i class="bi bi-arrow-counterclockwise"></i> 直前の調整を戻す</button>
      ${manualAddBtn}`;
   // PC版は広め(800px)、スマホは画面幅で横スクロール対応
