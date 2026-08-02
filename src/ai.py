@@ -433,6 +433,69 @@ def review_shift_balance(shifts):
 
 
 # ===========================================================
+# スタッフの働き方の変化に添える「声かけの例」
+# ===========================================================
+# 原因や状態を断定する語。プロンプトで禁じてもモデルは指示を外すことがあるため、
+# 画面に出る直前で機械的に弾く（店長に決めつけを渡さないための最後の関門）。
+_ATTENTION_FORBIDDEN = ("離職", "退職", "辞め", "メンタル", "うつ", "病気",
+                        "やる気", "不満", "怠", "サボ")
+
+ATTENTION_FALLBACK = {
+    "attendance_drop": "最近シフトが少なめですが、ご都合はいかがですか。"
+                       "入りたい曜日や時間が変わっていたら教えてください。",
+    "request_spike": "予定の変更が続いているようですが、無理のない範囲で組めていますか。"
+                     "組みにくい曜日があれば教えてください。",
+}
+_ATTENTION_DEFAULT = "最近の働き方に変化があるようです。困っていることがないか伺ってみてください。"
+
+
+def _attention_fallback(reasons):
+    for r in (reasons or []):
+        msg = ATTENTION_FALLBACK.get(r.get("type"))
+        if msg:
+            return msg
+    return _ATTENTION_DEFAULT
+
+
+def suggest_attention_message(name, reasons):
+    """勤務データの変化から、店長が本人に尋ねるときの声かけ例を返す。
+
+    戻り値: (message, source)。source は "llm" または "rule_based"。
+
+    原因は書かせない。分かっているのは「働き方が変わった」という事実だけで、
+    理由は本人にしか分からない（学業・家庭・本人の希望など）。断定した文面を
+    渡すと、店長が誤った前提で話を始めることになる。
+    """
+    fallback = _attention_fallback(reasons)
+    if not is_llm_available():
+        return fallback, "rule_based"
+    facts = []
+    for r in (reasons or []):
+        if r.get("type") == "attendance_drop":
+            facts.append(f"出勤日数が30日あたり{r.get('base')}日から直近30日で{r.get('recent')}日に減った")
+        elif r.get("type") == "request_spike":
+            facts.append(f"シフトの変更・取消の申請が直近30日で{r.get('recent')}件（以前は30日あたり{r.get('base')}件）")
+    if not facts:
+        return fallback, "rule_based"
+    system_prompt = (
+        "あなたは飲食・小売店の店長の相談相手です。スタッフの勤務データの変化を受けて、"
+        "店長が本人に事情を尋ねるときの声かけを1つだけ提案してください。\n"
+        "次を必ず守ってください。\n"
+        "- 変化の原因を断定しないこと（本人の希望・学業・家庭など理由は分かりません）\n"
+        "- 離職や体調、意欲についての推測を書かないこと\n"
+        "- 評価や叱責にならない、相手を気づかう言い方にすること\n"
+        "- 出力は声かけの文面のみ。前置きや解説を付けないこと。1〜2文。")
+    user_prompt = f"スタッフ: {name}\n勤務データの変化:\n" + "\n".join("・" + f for f in facts)
+    reply = call_llm(system_prompt, user_prompt, temperature=0.4)
+    if not reply:
+        return fallback, "rule_based"
+    reply = reply.strip()
+    if any(w in reply for w in _ATTENTION_FORBIDDEN):
+        return fallback, "rule_based"
+    return reply, "llm"
+
+
+# ===========================================================
 # 機能4: 会話型AIチャット（店長アシスタント / スタッフアシスタント）
 # ===========================================================
 def _summarize_context(ctx):
