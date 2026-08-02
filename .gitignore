@@ -44,3 +44,7 @@ shift_e2e.db
 
 # Superpowers ブレスト用の一時ファイル
 .superpowers/
+
+# 本番D1のエクスポート（パスワードハッシュを含む顧客データ。絶対にコミットしない）
+backups/
+*.sql.bak
