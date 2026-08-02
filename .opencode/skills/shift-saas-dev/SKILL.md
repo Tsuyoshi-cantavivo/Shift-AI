@@ -81,7 +81,7 @@ sqlite3 shift.db "UPDATE staffs SET password_hash='$(python3 -c 'import hashlib;
 
 - `localStorage` に `shift_token`/`shift_role`/`shift_user` を設定でログイン省略可能
 - `await page.evaluate(...)` でDOM直接操作（モーダルのダブルクリック等）
-- スクリーンショットは `<name>.png` で保存（プロジェクトルート）
+- スクリーンショットは `screenshots/<name>.png` に保存（プロジェクトルートには置かない・`.gitignore` 済み）
 
 ### 3. シフト生成のドライラン
 
