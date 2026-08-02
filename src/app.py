@@ -26,6 +26,7 @@ from db import query_all, query_one, execute, insert_row, init_schema
 from auth import hash_password, verify_password, gen_token, strip_password, dummy_verify
 from name_match import best_exact, match_staff
 from weekly_hours import WEEKLY_CAP_MINUTES, minutes_by_day, exceeds_weekly_cap
+from staff_attention import find_attention, RECENT_DAYS, BASE_DAYS
 from utils import (
     calc_next_period, jst_now, jst_today, minutes_between, compute_break_minutes,
     night_minutes, validate_password, parse_settings, build_ics, parse_iso, normalize_iso,
@@ -3050,6 +3051,54 @@ def shop_ai_review():
     shifts = query_all("SELECT sh.*, s.name as staff_name FROM shifts sh JOIN staffs s ON sh.staff_id=s.id WHERE sh.shop_id=? AND sh.status='confirmed' AND sh.start_datetime>=? AND sh.start_datetime<=?",
                        (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
     return jsonify(ai.review_shift_balance(shifts))
+
+
+@app.post("/api/shop/staff-attention")
+def shop_staff_attention():
+    """働き方に変化のあるスタッフと、声かけの例を返す。
+
+    出すのは「データがこう変わった」という事実と尋ね方の例だけで、原因や
+    状態（離職の意思・体調など）は判定しない。勤務データから分かるのは
+    働き方の変化だけであり、そこに解釈を足すと店長に決めつけを渡すことになる。
+    詳細は docs/superpowers/specs/2026-08-02-staff-attention-design.md。
+    """
+    shop, shop_id, _ = _shop_ctx()
+    today = jst_today().strftime("%Y-%m-%d")
+    since = (jst_today() - timedelta(days=RECENT_DAYS + BASE_DAYS)).strftime("%Y-%m-%d")
+    staffs = query_all("SELECT id, name, is_resigned FROM staffs WHERE shop_id=?", (shop_id,))
+    shifts = query_all(
+        "SELECT staff_id, start_datetime FROM shifts "
+        "WHERE shop_id=? AND status='confirmed' AND start_datetime>=?",
+        (shop_id, since + "T00:00:00"))
+    # created_at は datetime('now') 既定で "YYYY-MM-DD HH:MM:SS"（Tなし）。
+    # 文字列比較なので、シフト側の "T" とは区切り文字を変えて渡す。
+    reqs = query_all(
+        "SELECT staff_id, created_at FROM change_requests "
+        "WHERE shop_id=? AND created_at>=?",
+        (shop_id, since + " 00:00:00"))
+    found = find_attention(staffs, shifts, reqs, today)
+
+    headline = {"attendance_drop": "出勤が減っています",
+                "request_spike": "予定の変更が続いています"}
+    items = []
+    source = "rule_based"
+    for f in found:
+        details = []
+        for r in f["reasons"]:
+            if r["type"] == "attendance_drop":
+                details.append(f"以前は30日あたり{r['base']}日 → 直近30日は{r['recent']}日")
+            elif r["type"] == "request_spike":
+                details.append(f"直近30日で{r['recent']}件（以前は30日あたり{r['base']}件）")
+        msg, src = ai.suggest_attention_message(f["name"], f["reasons"])
+        if src == "llm":
+            source = "llm"
+        items.append({
+            "staff_id": f["staff_id"], "name": f["name"], "reasons": f["reasons"],
+            "headline": headline.get(f["reasons"][0]["type"], "働き方に変化があります"),
+            "detail": " / ".join(details),
+            "message": msg,
+        })
+    return jsonify({"items": items, "source": source})
 
 
 # --- AI 会話チャット（店長アシスタント） ---
