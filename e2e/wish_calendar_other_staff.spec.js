@@ -66,7 +66,7 @@ test.describe('確認画面カレンダー: 表示中でないスタッフの希
       data: { shop_code: SHOP.shopCode, user_code: SHOP.managerCode, password: SHOP.managerPassword },
     });
     shopHdr = { Authorization: `Bearer ${(await res.json()).token}` };
-    for (const [key, name] of Object.entries({ a: '田中太郎', b: '佐藤花子' })) {
+    for (const [key, name] of Object.entries({ a: '田中太郎', b: '佐藤花子', c: '鈴木一郎' })) {
       const r = await request.post('/api/shop/staffs', {
         data: { staff_code: `WCO${key}_${RUN_ID}`, name, password: 'Stf1234a', role: 'part_time' },
         headers: shopHdr,
@@ -95,9 +95,15 @@ test.describe('確認画面カレンダー: 表示中でないスタッフの希
   });
 
   // ==========================================================
-  // ケース2: その日を押すと、そのスタッフに切り替わって詳細が開く
+  // ケース2: 他スタッフの日を押しても、表示中のスタッフは勝手に変わらない
+  //
+  // 実測した不具合: 日付を押すと、選択中のスタッフが黙って別人に差し替わって
+  // いた。セルの見た目は通常の日とほぼ同じ（小さな人アイコンだけ）なので、
+  // 表示中の人の希望を直そうとして押したつもりが、カレンダーごと別人に
+  // 移動してしまう。誰の希望を触るかは店長が選ぶことであって、
+  // クリックの副作用で決まってよいものではない。
   // ==========================================================
-  test('他のスタッフの日を押すと、そのスタッフへ切り替わって詳細が開く', async ({ page }) => {
+  test('他のスタッフの日を押しても表示中スタッフは切り替わらない', async ({ page }) => {
     const errors = attachConsoleCollector(page);
     await openStep2(page);
 
@@ -105,11 +111,73 @@ test.describe('確認画面カレンダー: 表示中でないスタッフの希
     await page.locator('.wish-cell[data-day="2026-08-05"]').click();
     await page.waitForTimeout(500);
 
-    // 詳細モーダルが開き、佐藤の読み取り内容が出ていること
+    // 勝手に切り替わらない
+    await expect(page.locator('#wtiCalStaff')).toHaveValue(String(ids.a));
+    // 代わりに「この日は誰の希望か」を選ぶ画面が出て、名前と件数が分かる
+    const picker = page.locator('.modal-overlay').last();
+    await expect(picker).toContainText('佐藤花子');
+    expect(errors).toEqual([]);
+  });
+
+  // ==========================================================
+  // ケース2b: 選べば、その人の読み取りを（表示は変えずに）直せる
+  // ==========================================================
+  test('選んだ人の読み取りを、表示スタッフを変えずに開いて直せる', async ({ page }) => {
+    const errors = attachConsoleCollector(page);
+    await openStep2(page);
+
+    await page.locator('.wish-cell[data-day="2026-08-05"]').click();
+    await page.waitForTimeout(400);
+    await page.locator('[data-pick-staff]').first().click();
+    await page.waitForTimeout(400);
+
+    // 佐藤の読み取り内容が編集できる状態で出ている
     const detail = page.locator('.modal-overlay').last();
     await expect(detail).toContainText('8/5 佐藤 休み');
-    // 表示スタッフも切り替わっていること（閉じたあとに元の1人分へ戻らない）
-    await expect(page.locator('#wtiCalStaff')).toHaveValue(String(ids.b));
+    // 誰の希望を触っているかがモーダルに書かれている（取り違え防止）
+    await expect(detail).toContainText('佐藤花子');
+    // それでも表示中スタッフは田中のまま
+    await expect(page.locator('#wtiCalStaff')).toHaveValue(String(ids.a));
+    expect(errors).toEqual([]);
+  });
+
+  // ==========================================================
+  // ケース2c: 同じ日に複数人いても、全員に手が届く
+  //
+  // 従来は others[0] の1人だけを開いており、残りは名前が出るだけで
+  // 開く手段が無かった。
+  // ==========================================================
+  test('同じ日に複数人の希望があれば全員が選べる', async ({ page }) => {
+    const errors = attachConsoleCollector(page);
+    await page.route((url) => url.pathname.endsWith('/api/shop/wishes/parse-image'), (route) =>
+      route.fulfill({
+        json: {
+          entries: [
+            { staff_id: ids.a, staff_hint: '田中', dates: ['2026-08-03'], availability: 'rest', start: null, end: null, raw: '8/3 田中 休み', raw_verified: true },
+            { staff_id: ids.b, staff_hint: '佐藤', dates: ['2026-08-09'], availability: 'rest', start: null, end: null, raw: '8/9 佐藤 休み', raw_verified: true },
+            { staff_id: ids.c, staff_hint: '鈴木', dates: ['2026-08-09'], availability: 'any', start: null, end: null, raw: '8/9 鈴木 いつでも', raw_verified: true },
+          ],
+          unparsed: [], source: 'llm',
+          ocr_text: '8/3 田中 休み\n8/9 佐藤 休み\n8/9 鈴木 いつでも',
+          name_candidates: {},
+        },
+      }));
+    await loginAsManager(page, { shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword });
+    await page.click('button[data-screen="requests"]');
+    await page.waitForSelector('#reqImportBtn', { timeout: 10000 });
+    await page.click('#reqImportBtn');
+    await page.waitForSelector('#wtiImageDrop', { timeout: 10000 });
+    await page.selectOption('#wtiMonth', '2026-08');
+    await page.setInputFiles('#wtiImageInput', FIXTURE_PNG);
+    await page.click('#wtiParseBtn');
+    await page.waitForSelector('#wtiSubmitBtn', { timeout: 10000 });
+
+    await page.locator('.wish-cell[data-day="2026-08-09"]').click();
+    await page.waitForTimeout(400);
+    const picker = page.locator('.modal-overlay').last();
+    await expect(picker.locator('[data-pick-staff]')).toHaveCount(2);
+    await expect(picker).toContainText('佐藤花子');
+    await expect(picker).toContainText('鈴木一郎');
     expect(errors).toEqual([]);
   });
 

@@ -3924,7 +3924,7 @@ function _wtiRenderCalendar(wrap, state) {
   // 希望表を写真で撮ると複数人が1枚に写るため、店長からは「一部の日付しか変更
   // できない」ように見えてしまう。日ごとに「他の誰か」「未割り当て」を集めて、
   // 印を付けて押せるようにする。
-  const othersByDate = {};    // date -> [{staffId, name}]（表示中スタッフ以外）
+  const othersByDate = {};    // date -> [{staffId, name, count}]（表示中スタッフ以外）
   const unassignedByDate = {}; // date -> 件数（staffId が未確定のもの）
   state.items.forEach((it) => {
     if (!it.staffId) {
@@ -3933,10 +3933,10 @@ function _wtiRenderCalendar(wrap, state) {
     }
     if (it.staffId === state.calStaffId) return;
     const list = othersByDate[it.date] = othersByDate[it.date] || [];
-    if (!list.some((o) => o.staffId === it.staffId)) {
-      const s = state.staffs.find((x) => x.id === it.staffId);
-      list.push({ staffId: it.staffId, name: s ? s.name : ('不明#' + it.staffId) });
-    }
+    const found = list.find((o) => o.staffId === it.staffId);
+    if (found) { found.count++; return; }
+    const s = state.staffs.find((x) => x.id === it.staffId);
+    list.push({ staffId: it.staffId, name: s ? s.name : ('不明#' + it.staffId), count: 1 });
   });
   let cells = '';
   for (let i = 0; i < startWd; i++) cells += '<div class="wish-cell empty"></div>';
@@ -3989,31 +3989,18 @@ function _wtiRenderCalendar(wrap, state) {
       const day = c.dataset.day;
       const has = state.items.some((it) => it.staffId === state.calStaffId && it.date === day);
       if (has) { _wtiOpenDetail(wrap, state, day); return; }
-      // 表示中スタッフの希望が無い日でも、他のスタッフの希望があるなら
-      // そのスタッフへ切り替えて開く（押しても何も起きない日を作らない）。
+      // 表示中スタッフの希望が無い日でも、他のスタッフの希望があるなら開けるように
+      // する（押しても何も起きない日を作らない）。ただし表示中のスタッフは変えない。
+      // 以前はここで state.calStaffId を差し替えていたが、セルの見た目は通常の日と
+      // ほぼ同じ（小さな人アイコンだけ）なので、表示中の人を直すつもりの
+      // クリックがカレンダーごと別人へ移動してしまっていた。誰の希望を触るかは
+      // 店長が選ぶことであって、クリックの副作用で決まってよいものではない。
       const others = othersByDate[day] || [];
-      if (others.length) {
-        state.calStaffId = others[0].staffId;
-        _wtiRenderStep2(wrap, state);
-        _wtiOpenDetail(wrap, state, day);
-        if (others.length > 1) {
-          toast(`${others[0].name}さんの希望を開きました（この日は他に${others.length - 1}名分あります）`, 'info');
-        } else {
-          toast(`${others[0].name}さんの希望に切り替えました`, 'info');
-        }
-        return;
-      }
+      const unassignedCnt = unassignedByDate[day] || 0;
+      if (others.length) { _wtiOpenDayPicker(wrap, state, day, others, unassignedCnt); return; }
       // 未割り当てしか無い日は、まず誰の希望かを決める必要がある。
       // カレンダー上では直せないので、操作すべき場所（未割り当て欄）へ導く。
-      if ((unassignedByDate[day] || 0) > 0) {
-        const box = wrap.querySelector('#wtiUnassigned');
-        if (box) {
-          box.classList.add('wti-highlight');
-          box.scrollIntoView({ block: 'center', behavior: 'smooth' });
-          setTimeout(() => box.classList.remove('wti-highlight'), 2000);
-        }
-        toast('この日の読み取りは、まだ誰の希望か決まっていません。下の未割り当てから選んでください。', 'info');
-      }
+      if (unassignedCnt > 0) _wtiFocusUnassigned(wrap);
     });
   });
 }
@@ -4022,11 +4009,55 @@ function _wtiRenderCalendar(wrap, state) {
    既存希望がある日は「上書きする」チェックを出す（既定オフ＝スキップ側）。
    C-1: 同日に複数の読み取りが残っている場合は全件を列挙し、個別に編集・削除
    できるようにする（1件だけ見せて他方を隠すとプレビューと送信内容がずれる）。 */
-function _wtiOpenDetail(wrap, state, date) {
+/* 未割り当て欄へ導く（カレンダー上では直せないため）。 */
+function _wtiFocusUnassigned(wrap) {
+  const box = wrap.querySelector('#wtiUnassigned');
+  if (box) {
+    box.classList.add('wti-highlight');
+    box.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    setTimeout(() => box.classList.remove('wti-highlight'), 2000);
+  }
+  toast('この日の読み取りは、まだ誰の希望か決まっていません。下の未割り当てから選んでください。', 'info');
+}
+
+/* 表示中スタッフの希望が無い日を押したときに出す「この日は誰の希望か」の一覧。
+   選んだ人の詳細をその場で開くが、カレンダーの表示スタッフ（state.calStaffId）は
+   変えない。同じ日に複数人いても全員に手が届く（以前は先頭の1人だけだった）。 */
+function _wtiOpenDayPicker(wrap, state, date, others, unassignedCnt) {
+  const rows = others.map((o) => `
+    <button type="button" class="btn btn-light w-full mb-2 flex items-center justify-between" data-pick-staff="${o.staffId}">
+      <span><i class="bi bi-person"></i> ${esc(o.name)}</span>
+      <span class="small text-secondary">読み取り ${o.count}件</span>
+    </button>`).join('');
+  const unassignedRow = unassignedCnt
+    ? `<button type="button" class="btn btn-light w-full flex items-center justify-between" data-pick-unassigned>
+         <span><i class="bi bi-person-dash"></i> まだ誰の希望か決まっていない</span>
+         <span class="small text-secondary">${unassignedCnt}件</span>
+       </button>` : '';
+  const m = openModal(`<i class="bi bi-people"></i> ${esc(date)}の読み取り`,
+    `<div class="small text-secondary mb-2">この日は、いま表示している方の読み取りがありません。誰の希望を開きますか。</div>
+     ${rows}${unassignedRow}`, null);
+  m.querySelectorAll('[data-pick-staff]').forEach((b) => b?.addEventListener('click', () => {
+    const sid = +b.dataset.pickStaff;
+    m.remove();
+    _wtiOpenDetail(wrap, state, date, sid);
+  }));
+  m.querySelector('[data-pick-unassigned]')?.addEventListener('click', () => {
+    m.remove();
+    _wtiFocusUnassigned(wrap);
+  });
+}
+
+/* staffId 省略時は表示中スタッフ。日付ピッカーから開くときだけ明示的に渡す
+   （表示スタッフを変えずに他人の読み取りを直せるようにするため）。 */
+function _wtiOpenDetail(wrap, state, date, staffId) {
+  const targetStaffId = staffId != null ? staffId : state.calStaffId;
   const idxs = [];
-  state.items.forEach((it, i) => { if (it.staffId === state.calStaffId && it.date === date) idxs.push(i); });
+  state.items.forEach((it, i) => { if (it.staffId === targetStaffId && it.date === date) idxs.push(i); });
   if (!idxs.length) return;
-  const existingList = _wtiExistingFor(state, state.calStaffId, date);
+  const targetStaff = state.staffs.find((x) => x.id === targetStaffId);
+  const targetName = targetStaff ? targetStaff.name : ('不明#' + targetStaffId);
+  const existingList = _wtiExistingFor(state, targetStaffId, date);
   const hasExisting = existingList.length > 0;
   const availLabelMap = { rest: '休み希望', any: '終日OK', morning: '早番希望', evening: '遅番希望', time: '時間指定' };
   const overwriteChecked = idxs.some((i) => state.items[i].overwriteConfirmed);
@@ -4071,8 +4102,10 @@ function _wtiOpenDetail(wrap, state, date) {
   // (staff_id, date) の行は全件消える（複数行あっても全部）ため、中身を列挙する。
   const existingListHtml = hasExisting
     ? `<div class="small mt-1">現在の登録: ${existingList.map((w) => esc(_wtiExistingLabel(w))).join(' / ')}（${existingList.length}件）</div>` : '';
+  // 誰の希望を触っているかを必ず書く。ピッカー経由だと表示中スタッフと
+  // 別人になりうるので、これが無いと取り違えたまま保存できてしまう。
   const body = `
-    <div class="mb-2"><strong class="num">${esc(date)}</strong>（${wdName(date)}）</div>
+    <div class="mb-2"><strong class="num">${esc(date)}</strong>（${wdName(date)}）・<strong>${esc(targetName)}</strong>さん</div>
     <div id="wtiDetailErr"></div>
     ${entryBlocks}
     ${hasExisting ? `<div class="alert alert-warning py-2 mt-2 mb-1"><i class="bi bi-exclamation-triangle"></i> この日は既に希望が登録されています。${existingListHtml}<label class="flex items-center gap-2 mt-1" style="font-weight:400"><input type="checkbox" id="wtiDetailOverwrite"${overwriteChecked ? ' checked' : ''}> 既存を上書きして登録する（上記${existingList.length}件を削除して置き換えます）</label></div>` : ''}`;
