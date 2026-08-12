@@ -9,7 +9,7 @@
  * 実行: npx playwright test e2e/print_view.spec.js
  */
 const { test, expect } = require('@playwright/test');
-const { ensureShop, loginAsManager } = require('./helpers');
+const { ensureShop, loginAsManager, openShiftMoreActions } = require('./helpers');
 
 const SHOP = {
   shopCode: 'PRINT1',
@@ -73,7 +73,8 @@ test.beforeEach(async ({ page, request }) => {
     password: SHOP.managerPassword,
   });
   await page.click('.side-item[data-screen="shifts"]');
-  await page.waitForSelector('#printBtn');
+  // 印刷・用紙の向きは工程バー化で「その他の操作」に畳んだので、開いてから触る。
+  await openShiftMoreActions(page);
 });
 
 async function openPrint(page) {
@@ -236,7 +237,7 @@ test('選んだ向きは再読み込み後も保たれる', async ({ page }) => 
   await page.reload();
   await page.waitForSelector('#appView:not(.d-none)');
   await page.click('.side-item[data-screen="shifts"]');
-  await page.waitForSelector('#printOrientBtn');
+  await openShiftMoreActions(page);
 
   await expect(page.locator('#printOrientLabel')).toHaveText('縦');
 });
@@ -254,7 +255,7 @@ test('localStorage に保存できない環境でも向きを切り替えられ�
   await page.reload();
   await page.waitForSelector('#appView:not(.d-none)');
   await page.click('.side-item[data-screen="shifts"]');
-  await page.waitForSelector('#printOrientBtn');
+  await openShiftMoreActions(page);
 
   await expect(page.locator('#printOrientLabel')).toHaveText('横');
   await page.click('#printOrientBtn');

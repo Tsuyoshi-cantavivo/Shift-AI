@@ -229,13 +229,25 @@
 
 ## テスト
 
-### 既存テストの修正（3ファイル）
+### 既存テストの修正
+
+設計時に見えていたのは3ファイルだったが、実装して全E2Eを回したところ6ファイルだった。
+増えた3ファイルはいずれも**印刷ボタンを「その他の操作」に畳んだ副作用**で、
+設計時に見落としていた依存である。
 
 - `e2e/fast_navigation.spec.js:53` — 項目リストから `'aiGenerate'` を外す
 - `e2e/capture_mobile.spec.js:167` — `goScreen(page, 'aiGenerate')` を削除し、
   シフト画面の工程バーのキャプチャに差し替える
-- `tests/test_settings_xss.py:130, 138, 197, 606` — 検査対象のテンプレートを
-  プレビューモーダル内の新しい位置に付け替える。**エスケープの保証は落とさない**
+- `tests/test_settings_xss.py` — `#genStart` を守るテストは対象ごと消えたので削除する
+  （期間の日付入力は `#sStart` の2件が守る）。「AIに考慮させる条件」の
+  エスケープ検査は `genConditionsHtml()` に残るのでそのまま通る。**保証は落とさない**
+- `tests/test_draft_timeline_assets.py` — 公開経路が1本だけという不変は保つが、
+  ボタン文言が「確定」に短くなったので、通知を伝える責任を負う confirm の文面で固定する
+- `e2e/print_view.spec.js` / `e2e/timeline_visual.spec.js` — `#printBtn` は
+  `<details>` の中で非表示になったため、押す前に開く。`e2e/helpers.js` に
+  `openShiftMoreActions(page)` を足して共有する
+- `e2e/staff_attention.spec.js` — 右カラムの描画完了を待つ目印を
+  「AIからの提案」から「AIアシスタント」へ移す
 
 ### 追加するテスト
 

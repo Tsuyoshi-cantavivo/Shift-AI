@@ -114,6 +114,23 @@ function attachConsoleCollector(page) {
   return errors;
 }
 
+/**
+ * シフト画面の「その他の操作」（details.step-more）を開く。
+ *
+ * 工程バー化でコピー・印刷・用紙の向きはこの折りたたみの中へ移した。
+ * 閉じている間 #printBtn 等は非表示なので、Playwright の click は
+ * 「要素はあるが見えない」で失敗する。押す前に必ずこれを呼ぶこと。
+ * 既に開いていれば何もしない（冪等）。
+ */
+async function openShiftMoreActions(page) {
+  const details = page.locator('details.step-more');
+  await details.waitFor({ state: 'attached', timeout: 10000 });
+  if (!(await details.evaluate((d) => d.open))) {
+    await details.locator('summary').click();
+  }
+  await page.locator('#printBtn').waitFor({ state: 'visible', timeout: 5000 });
+}
+
 module.exports = {
   ensureAdmin,
   ensureShop,
@@ -121,4 +138,5 @@ module.exports = {
   loginAsManager,
   loginAsStaffApi,
   attachConsoleCollector,
+  openShiftMoreActions,
 };

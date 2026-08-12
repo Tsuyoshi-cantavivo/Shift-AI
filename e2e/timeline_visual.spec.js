@@ -2,7 +2,7 @@
  * e2e/timeline_visual.spec.js — タイムライン表示と印刷画面の時間表示をじっくり確認
  */
 const { test, expect } = require('@playwright/test');
-const { ensureShop, loginAsManager, attachConsoleCollector } = require('./helpers');
+const { ensureShop, loginAsManager, attachConsoleCollector, openShiftMoreActions } = require('./helpers');
 
 const RUN_ID = Date.now().toString(36);
 const SHOP = {
@@ -137,7 +137,10 @@ test.describe('タイムライン & 印刷画面の時間表示', () => {
     await page.dispatchEvent('#sEnd', 'change');
     await page.waitForTimeout(2000);
 
-    // 印刷ボタンをクリック
+    // 印刷ボタンをクリック。工程バー化で「その他の操作」に畳んだので先に開く。
+    // （開かずに click すると「要素はあるが見えない」で失敗し、下の .catch に
+    //  握り潰されて printBars=0 になる＝バグと区別が付かない）
+    await openShiftMoreActions(page);
     const printBtn = page.locator('#printBtn');
     if (await printBtn.count() > 0) {
       await printBtn.click().catch(() => {});
