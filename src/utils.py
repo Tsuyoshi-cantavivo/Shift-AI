@@ -86,6 +86,128 @@ def combine_dt_overnight(date_s, start_time_s, end_time_s):
     return f"{date_s}T{ns}:00", f"{date_s}T{ne}:00"
 
 
+# ============================================================
+# 営業日（business day）— 日をまたぐ営業への対応
+# ============================================================
+# 04:00〜翌02:00 の店では、8/17 の営業は 8/18 02:00 まで続く。
+# つまり 8/18 00:00〜02:00 の勤務は「8/17 のシフト」であり、
+# カレンダー日と営業日は一致しない。
+#
+# ここでは営業日を「その日の営業開始から、翌日側の営業終了まで」と定義し、
+# 翌日側に食い込む長さを cutoff（分）と呼ぶ。04:00〜翌02:00 なら cutoff=120。
+# 実 datetime の時刻が cutoff より前なら、それは前日の営業日に属する。
+#
+# 日をまたがない店（09:00-22:00）は cutoff=0 で、営業日＝カレンダー日。
+# 既存の combine_dt_overnight と挙動が完全に一致するため、後方互換が保たれる。
+
+def min_to_iso(date_s, m):
+    """拡張分（date_s の 0:00 起点。1440 以上は翌日以降）を実 ISO datetime にする。
+
+    例: min_to_iso("2026-08-17", 1560) → "2026-08-18T02:00:00"
+    2880 以上（翌々日）も正しく進める。1日ぶんしか足さない実装だと
+    "24:00" のような存在しない時刻を組み立ててしまう。
+    """
+    m = int(m)
+    day_offset, rem = divmod(m, 1440)
+    base = add_days(date_s, day_offset) if day_offset else date_s
+    return f"{base}T{rem // 60:02d}:{rem % 60:02d}:00"
+
+
+def day_cutoff_min(start_time_s, end_time_s):
+    """営業時間から「翌日側に食い込む分」を返す。日をまたがなければ 0。
+
+    例: ("04:00", "02:00") → 120 ／ ("09:00", "22:00") → 0
+    開始＝終了は24時間営業とみなして 0 を返す（深夜帯を前日に寄せると
+    当日の 00:00〜開始時刻が丸ごと前日に移り、1日が消えるため）。
+    """
+    if not start_time_s or not end_time_s:
+        return 0
+    ps = _hhmm_to_min(norm_hhmm(start_time_s))
+    pe = _hhmm_to_min(norm_hhmm(end_time_s))
+    if pe >= ps:
+        return 0
+    return pe
+
+
+def shop_day_cutoff(shift_hours=None, patterns=None):
+    """店舗設定から営業日の cutoff（翌日側に食い込む分）を求める。日中営業なら 0。
+
+    根拠の優先順位:
+      1. シフト時間設定（shops.settings.shift_hours）。一括設定なら bulk、
+         曜日別なら定休日を除く各曜日の最大値を採る。
+      2. shift_patterns の拡張終了時刻。「04:00-07:00」と「19:00-02:00」のように
+         分割登録され shift_hours が未設定の店でも日またぎを取りこぼさないため。
+
+    src/app.py（API）と src/shift_engine.py（AI生成）の双方から呼ぶ。
+    値が食い違うと、生成した固定シフトの日付と画面の表示日がずれる。
+    """
+    sh = shift_hours if isinstance(shift_hours, dict) else {}
+    bulk = sh.get("bulk") if isinstance(sh.get("bulk"), dict) else {}
+    spans = []
+    if sh.get("bulk_mode", True) and bulk.get("start_time") and bulk.get("end_time"):
+        spans.append((bulk["start_time"], bulk["end_time"]))
+    else:
+        days = sh.get("days") if isinstance(sh.get("days"), dict) else {}
+        for d in days.values():
+            if not isinstance(d, dict) or d.get("is_closed"):
+                continue
+            if d.get("start_time") and d.get("end_time"):
+                spans.append((d["start_time"], d["end_time"]))
+    cutoff = 0
+    for s, e in spans:
+        cutoff = max(cutoff, day_cutoff_min(s, e))
+    if cutoff:
+        return cutoff
+    max_end = 0
+    for p in patterns or []:
+        ps = _hhmm_to_min(norm_hhmm(p.get("start_time")))
+        pe = _hhmm_to_min(norm_hhmm(p.get("end_time")))
+        if pe <= ps:
+            pe += 1440
+        if pe > max_end:
+            max_end = pe
+    return max_end - 1440 if max_end > 1440 else 0
+
+
+def business_day_of(iso, cutoff_min):
+    """実 ISO datetime が属する営業日 "YYYY-MM-DD" を返す。
+
+    cutoff_min より前の時刻（例 04:00〜翌02:00 の店の 00:00〜02:00）は前日扱い。
+    """
+    if not iso or len(iso) < 10:
+        return iso
+    day = iso[:10]
+    if not cutoff_min or cutoff_min <= 0 or len(iso) < 16:
+        return day
+    return add_days(day, -1) if _hhmm_to_min(iso[11:16]) < cutoff_min else day
+
+
+def combine_dt_business(date_s, start_time_s, end_time_s, cutoff_min=0):
+    """営業日 date_s の start〜end を実 ISO datetime のペアにする。
+
+    combine_dt_overnight の一般化。cutoff_min=0 のときの結果は
+    combine_dt_overnight と完全に同一（tests/test_business_day.py で固定）。
+
+    例（cutoff_min=120 の店）:
+      ("2026-08-17", "00:00", "02:00") → ("2026-08-18T00:00:00", "2026-08-18T02:00:00")
+      ("2026-08-17", "22:00", "02:00") → ("2026-08-17T22:00:00", "2026-08-18T02:00:00")
+
+    "24:00" "26:00" のような拡張時刻表記も受け付ける（希望取り込みで LLM が
+    返しうるため）。norm_hhmm は 24 以上の時をゼロ埋めするだけで潰さない。
+    """
+    ps = _hhmm_to_min(norm_hhmm(start_time_s))
+    pe = _hhmm_to_min(norm_hhmm(end_time_s))
+    if cutoff_min and cutoff_min > 0:
+        # 深夜帯（営業終了より前）の時刻は、その営業日の「翌日側」を指している
+        if ps < cutoff_min:
+            ps += 1440
+        if pe < cutoff_min:
+            pe += 1440
+    if pe <= ps:
+        pe += 1440
+    return min_to_iso(date_s, ps), min_to_iso(date_s, pe)
+
+
 def parse_iso(s):
     """ISO日時をパース。秒なし(YYYY-MM-DDTHH:MM) と秒あり(YYYY-MM-DDTHH:MM:SS) の両方を許容。"""
     if not s:

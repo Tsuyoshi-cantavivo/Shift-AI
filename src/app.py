@@ -33,7 +33,8 @@ from utils import (
     norm_hhmm, norm_dt_iso, add_days, build_staff_tendency, combine_dt_overnight,
     sanitize_login_code, LOGIN_CODE_MAX, validate_known_settings_values,
     validate_numeric_field, validate_date_field, operation_mode_of,
-    is_engine_pending_reason,
+    is_engine_pending_reason, _hhmm_to_min,
+    day_cutoff_min, shop_day_cutoff, business_day_of, combine_dt_business,
 )
 import shift_engine
 import ai
@@ -1138,6 +1139,93 @@ def _get_shop_shift_start_time(shop_id):
     return "09:00"
 
 
+def _shop_day_cutoff(shop_id):
+    """店舗の「営業日が翌日側に食い込む分」を返す。日をまたがない店は 0。
+
+    04:00〜翌02:00 の店なら 120。この分より前の時刻（00:00〜02:00）の勤務は
+    前日の営業日に属する（utils.business_day_of / combine_dt_business）。
+
+    判定は utils.shop_day_cutoff に集約する（AI生成側 shift_engine も同じ関数を
+    呼ぶ。値が食い違うと固定シフトの配置日と画面の表示日がずれる）。
+    クライアント（public/app.js）は GET /api/shop/patterns の day_cutoff_min で
+    同じ値を受け取り、表示・入力の日付解釈をサーバと揃える。
+    """
+    try:
+        shop = query_one("SELECT settings FROM shops WHERE id=?", (shop_id,))
+        shift_hours = (parse_settings(shop["settings"]) if shop else {}).get("shift_hours")
+    except Exception:
+        shift_hours = None
+    try:
+        patterns = query_all("SELECT start_time, end_time FROM shift_patterns WHERE shop_id=?",
+                             (shop_id,))
+    except Exception:
+        patterns = []
+    return shop_day_cutoff(shift_hours, patterns)
+
+
+def _flex_wish_end(start_dt, shop_end):
+    """「いつでも/早番/遅番」希望の終了日時を、営業終了時刻から組み立てる。
+
+    営業終了が翌日側（"02:00" 等）の店では {開始日}T02:00 が開始より前になり、
+    長さが負の希望が保存されていた。開始より後になるまで日付を1日進める。
+    """
+    day = start_dt[:10]
+    end_dt = f"{day}T{norm_hhmm(shop_end)}:00"
+    if minutes_between(start_dt, end_dt) <= 0:
+        end_dt = f"{add_days(day, 1)}T{norm_hhmm(shop_end)}:00"
+    return end_dt
+
+
+def _assert_shift_span(start_dt, end_dt):
+    """シフトの開始・終了が「時系列として成立している」ことを保証する。
+
+    【なぜ必要か】22:00〜02:00 のような日またぎシフトを、終了日を当日のまま
+    （2026-08-17T22:00 〜 2026-08-17T02:00）保存できてしまっていた。
+    長さが -20時間になるため休憩は0分、シフト表のバーは長さ0に潰れて
+    「1時間の棒」に化け、労働時間の集計にも負の値が入る。
+    画面側（手動追加・空き枠クリック）でも終了日を計算し直すが、
+    保存の入口でも必ず弾く（片方だけでは過去に入った経路が残る）。
+    """
+    for label, value in (("開始", start_dt), ("終了", end_dt)):
+        if not value or not isinstance(value, str):
+            abort(400, description=f"{label}日時が指定されていません")
+        try:
+            parse_iso(normalize_iso(value))
+        except (ValueError, TypeError):
+            abort(400, description=f"{label}日時の形式が不正です: {value}")
+    if minutes_between(normalize_iso(start_dt), normalize_iso(end_dt)) <= 0:
+        abort(400, description=(
+            "終了は開始より後にしてください。"
+            "日をまたぐシフト（例 22:00〜翌02:00）は終了の日付を翌日にしてください。"))
+
+
+def _business_range(cutoff, start_d, end_d=None):
+    """営業日 [start_d, end_d] を start_datetime の範囲 [lo, hi) に変換する。
+
+    営業日 D は「D の cutoff 時刻から D+1 の cutoff 時刻まで」。04:00〜翌02:00 の
+    店（cutoff=120）なら、8/17 の営業日は 8/17 02:00 〜 8/18 02:00 に始まるシフト。
+    hi は排他。cutoff=0 なら [start T00:00, end+1 T00:00) で従来と同じ範囲になる。
+
+    これを使わずに「その日の 00:00〜23:59」で引くと、シフト表が17日の欄に出して
+    いる 18日0時のシフトを、確定ボタンもリセットも見つけられない。
+    """
+    end_d = end_d or start_d
+    at = f"{cutoff // 60:02d}:{cutoff % 60:02d}:00"
+    return f"{start_d}T{at}", f"{add_days(end_d, 1)}T{at}"
+
+
+def _attach_business_date(rows, cutoff, *, key="start_datetime"):
+    """行（dict）に business_date（属する営業日）を付けて返す。
+
+    画面側はこれを見て「その日のシフト表」に並べる。cutoff=0 の店では
+    start_datetime の日付と必ず一致するので、既存の見え方は変わらない。
+    """
+    for r in rows or []:
+        iso = r.get(key) or ""
+        r["business_date"] = business_day_of(iso, cutoff) if iso else ""
+    return rows
+
+
 def _check_student_only_shift(shop_id, staff_id, start_iso, exclude_id=None):
     """学生アルバイトのみで構成されるシフトになるかをチェック。
 
@@ -1283,12 +1371,14 @@ def shop_dashboard():
 
     # 不足計算
     overrides = shift_engine.load_weekday_overrides(shop_id)
-    shortage = shift_engine.compute_shortage(month_shifts, patterns, month_start, month_end, overrides)
+    day_cutoff = _shop_day_cutoff(shop_id)
+    shortage = shift_engine.compute_shortage(month_shifts, patterns, month_start, month_end,
+                                             overrides, day_cutoff)
     # ★【重なりパターン補正】複数パターンが時間帯を重ねる場合、パターン別集計だと
     # 「同じ時間帯がN回カウントされる」過大表示になる（インシデント）。
     # 時間帯別の一意不足で「今日の不足枠数」「月間不足枠数」を算出する。
     unique_shortage = shift_engine.compute_shortage_unique_hours(
-        month_shifts, patterns, month_start, month_end, overrides)
+        month_shifts, patterns, month_start, month_end, overrides, day_cutoff)
     today_unique = [s for s in unique_shortage if s["date"] == today]
 
     return jsonify({
@@ -1437,7 +1527,7 @@ def shop_my_requests_post():
         elif avail:
             # 「いつでも/早番/遅番」: 終了時刻が未指定なら店舗のシフト時間設定から取得
             shop_end = _get_shop_shift_end_time(staff["shop_id"])
-            end_dt = normalize_iso(sh.get("end_datetime")) or (start_dt[:10] + f"T{shop_end}:00")
+            end_dt = normalize_iso(sh.get("end_datetime")) or _flex_wish_end(start_dt, shop_end)
         else:
             end_dt = normalize_iso(sh["end_datetime"])
         # 重複チェック（自身の confirmed + 既存希望）。ただし rest 希望は重複OK
@@ -1552,7 +1642,7 @@ def shop_my_shifts():
         params.append(end_d + "T23:59:59")
     sql += " ORDER BY start_datetime"
     rows = query_all(sql, tuple(params))
-    return jsonify({"shifts": rows})
+    return jsonify({"shifts": _attach_business_date(rows, _shop_day_cutoff(staff["shop_id"]))})
 
 
 # ===========================================================
@@ -1966,7 +2056,10 @@ def shop_patterns():
             if v is not None:
                 wd[str(w)] = v
         pat["weekday_required"] = wd
-    return jsonify({"patterns": patterns})
+    # day_cutoff_min: 日をまたぐ営業で「営業日が翌カレンダー日に食い込む分」。
+    # 画面はこれを使って深夜帯シフトの所属日と入力時の日付を決める
+    # （public/app.js の ensureBusinessHours / businessDayOf）。
+    return jsonify({"patterns": patterns, "day_cutoff_min": _shop_day_cutoff(shop_id)})
 
 
 def _validate_pattern_hours(start_time, end_time):
@@ -2173,13 +2266,37 @@ def _assert_fixed_shift_in_shop(fid, shop_id):
         abort(404, description="固定シフトが見つかりません")
 
 
+def _fixed_shift_fields(body):
+    """固定シフトの weekday / start_time / end_time を検証して返す。
+
+    入力欄が自由入力のため「7時」「9-18」のような値がそのまま保存でき、
+    utils.norm_hhmm が黙って "00:00" に潰した結果、AI生成が 00:00 開始の
+    シフトを作っていた。入口で弾く。時は 0〜29 まで許す（「24:00」＝深夜0時の
+    現場表記。combine_dt_business が営業日基準で翌カレンダー日に落とす）。
+    """
+    try:
+        weekday = int(body.get("weekday"))
+    except (TypeError, ValueError):
+        abort(400, description="曜日が不正です")
+    if not 0 <= weekday <= 6:
+        abort(400, description="曜日が不正です")
+    times = []
+    for label, key in (("開始", "start_time"), ("終了", "end_time")):
+        v = _validate_hhmm(body.get(key), None)
+        if v is None or _hhmm_to_min(v) > 29 * 60 + 59:
+            abort(400, description=f"{label}時刻は HH:MM 形式で入力してください（例 09:00）")
+        times.append(v)
+    return weekday, times[0], times[1]
+
+
 @app.post("/api/shop/fixed-shifts")
 def shop_fixed_post():
     shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
     _assert_staff_in_shop(body["staff_id"], shop_id)
+    weekday, start_time, end_time = _fixed_shift_fields(body)
     meta = execute("INSERT INTO fixed_shifts (staff_id, weekday, start_time, end_time) VALUES (?,?,?,?)",
-                   (body["staff_id"], body["weekday"], body["start_time"], body["end_time"]))
+                   (body["staff_id"], weekday, start_time, end_time))
     return jsonify({"ok": True, "id": meta["last_row_id"]})
 
 
@@ -2188,8 +2305,9 @@ def shop_fixed_put(fid):
     shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
     _assert_fixed_shift_in_shop(fid, shop_id)
+    weekday, start_time, end_time = _fixed_shift_fields(body)
     execute("UPDATE fixed_shifts SET weekday=?, start_time=?, end_time=? WHERE id=?",
-            (body["weekday"], body["start_time"], body["end_time"], fid))
+            (weekday, start_time, end_time, fid))
     return jsonify({"ok": True})
 
 
@@ -2382,11 +2500,14 @@ def shop_shifts_finalize():
         abort(400, description="start_date, end_date が必要です")
     # 期間内の requested を取得（AIドラフト + スタッフ希望）。
     # エンジンの調整待ちはここで除く（確定してよいものだけを対象にする）。
+    # 営業日の境目で引く。日をまたぐ営業では最終日の深夜帯（翌カレンダー日 0時台）が
+    # ここから漏れ、シフト表には出ているのに確定ボタンで確定されない枠が残る。
+    lo, hi = _business_range(_shop_day_cutoff(shop_id), start_d, end_d)
     all_requested = query_all(
         "SELECT id, staff_id, start_datetime, end_datetime, reason FROM shifts "
         "WHERE shop_id=? AND status='requested' "
-        "AND start_datetime>=? AND start_datetime<=?",
-        (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
+        "AND start_datetime>=? AND start_datetime<?",
+        (shop_id, lo, hi))
     targets = [t for t in all_requested if not is_engine_pending_reason(t["reason"])]
     skipped_pending = len(all_requested) - len(targets)
     if not targets:
@@ -2647,9 +2768,13 @@ def shop_shifts_list():
     start_d, end_d = request.args.get("start"), request.args.get("end")
     if not start_d or not end_d:
         abort(400, description="start, end クエリが必要")
-    rows = query_all("SELECT sh.*, s.name as staff_name, s.role as staff_role FROM shifts sh JOIN staffs s ON sh.staff_id=s.id WHERE sh.shop_id=? AND sh.start_datetime>=? AND sh.start_datetime<=? ORDER BY sh.start_datetime",
-                     (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
-    return jsonify({"shifts": rows})
+    cutoff = _shop_day_cutoff(shop_id)
+    # 日をまたぐ営業では end_d の営業日が翌カレンダー日の深夜まで続く。
+    # 営業日の境目で引かないと、最終日の深夜帯が欠け、初日には前日の深夜帯が混じる。
+    lo, hi = _business_range(cutoff, start_d, end_d)
+    rows = query_all("SELECT sh.*, s.name as staff_name, s.role as staff_role FROM shifts sh JOIN staffs s ON sh.staff_id=s.id WHERE sh.shop_id=? AND sh.start_datetime>=? AND sh.start_datetime<? ORDER BY sh.start_datetime",
+                     (shop_id, lo, hi))
+    return jsonify({"shifts": _attach_business_date(rows, cutoff), "day_cutoff_min": cutoff})
 
 
 @app.post("/api/shop/shifts")
@@ -2663,6 +2788,7 @@ def shop_shifts_post():
     _assert_staff_in_shop(staff_id, shop_id)
     start_dt = body["start_datetime"]
     end_dt = body["end_datetime"]
+    _assert_shift_span(start_dt, end_dt)
     # 隣接する同一スタッフの confirmed があれば自動的に統合（17-18 + 18-22 → 17-22）
     merged, merged_id = _try_merge_adjacent(shop_id, staff_id, start_dt, end_dt)
     if merged:
@@ -2802,6 +2928,7 @@ def shop_shifts_put(sid):
     # /api/shop/wishes/bulk (src/app.py:3711-3720 付近) と同じ防御。
     if body.get("staff_id") is not None:
         _assert_staff_in_shop(body.get("staff_id"), shop_id)
+    _assert_shift_span(body.get("start_datetime"), body.get("end_datetime"))
     # 確定シフトのロック：確定済みシフトの時間・担当変更は直接編集できない。
     # 変更はスタッフの「変更申請」を承認して反映する（時刻・担当が変わらない再保存や
     # requested/modifying からの確定は許可）。UI もメモ以外を編集不可にしている。
@@ -2962,9 +3089,11 @@ def shop_shifts_day_summary():
     date = validate_date_field(request.args.get("date"), "date")
     if not date:
         abort(400, description="date が必要です")
+    # 日別シフト表が「その日」として見せている範囲＝営業日で数える
+    lo, hi = _business_range(_shop_day_cutoff(shop_id), date)
     rows = query_all(
-        "SELECT status, reason FROM shifts WHERE shop_id=? AND start_datetime>=? AND start_datetime<=?",
-        (shop_id, date + "T00:00:00", date + "T23:59:59"))
+        "SELECT status, reason FROM shifts WHERE shop_id=? AND start_datetime>=? AND start_datetime<?",
+        (shop_id, lo, hi))
     return jsonify({"date": date, "total": len(rows), **_classify_day_shifts(rows)})
 
 
@@ -3004,14 +3133,17 @@ def shop_shifts_reset_day():
     date = validate_date_field(body.get("date"), "date")
     if not date:
         abort(400, description="date が必要です")
+    # day-summary で見せた内訳と同じ範囲を消す（営業日）。ここがズレると
+    # 「消えると言われた枠が残る」「見せていない枠が消える」のどちらかになる。
+    lo, hi = _business_range(_shop_day_cutoff(shop_id), date)
     rows = query_all(
-        "SELECT status, reason FROM shifts WHERE shop_id=? AND start_datetime>=? AND start_datetime<=?",
-        (shop_id, date + "T00:00:00", date + "T23:59:59"))
+        "SELECT status, reason FROM shifts WHERE shop_id=? AND start_datetime>=? AND start_datetime<?",
+        (shop_id, lo, hi))
     if not rows:
         return jsonify({"ok": True, "deleted": 0, "message": f"{date} に消すシフトはありませんでした。"})
     breakdown = _classify_day_shifts(rows)
-    execute("DELETE FROM shifts WHERE shop_id=? AND start_datetime>=? AND start_datetime<=?",
-            (shop_id, date + "T00:00:00", date + "T23:59:59"))
+    execute("DELETE FROM shifts WHERE shop_id=? AND start_datetime>=? AND start_datetime<?",
+            (shop_id, lo, hi))
     audit("shift.reset_day", target_type="shop", target_id=shop_id, shop_id=shop_id,
           detail=f"{date} deleted={len(rows)} " +
                  " ".join(f"{k}={v}" for k, v in breakdown.items()))
@@ -3038,12 +3170,18 @@ def shop_shortage():
     start_d, end_d = request.args.get("start"), request.args.get("end")
     if not start_d or not end_d:
         abort(400, description="start, end が必要")
-    shifts = query_all("SELECT * FROM shifts WHERE shop_id=? AND start_datetime>=? AND start_datetime<=?", (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
+    day_cutoff = _shop_day_cutoff(shop_id)
+    # 営業日の境目で引く。最終日の深夜帯（翌カレンダー日 0時台）を落とすと、
+    # 埋まっている枠が「不足」として残り続ける。
+    lo, hi = _business_range(day_cutoff, start_d, end_d)
+    shifts = query_all("SELECT * FROM shifts WHERE shop_id=? AND start_datetime>=? AND start_datetime<?", (shop_id, lo, hi))
     pats = query_all("SELECT * FROM shift_patterns WHERE shop_id=?", (shop_id,))
     overrides = shift_engine.load_weekday_overrides(shop_id)
     # ★ パターン別（詳細表示用）と時間帯別一意（カウント用）の両方を返す
-    shortage_by_pattern = shift_engine.compute_shortage(shifts, pats, start_d, end_d, overrides)
-    shortage_unique = shift_engine.compute_shortage_unique_hours(shifts, pats, start_d, end_d, overrides)
+    shortage_by_pattern = shift_engine.compute_shortage(shifts, pats, start_d, end_d,
+                                                        overrides, day_cutoff)
+    shortage_unique = shift_engine.compute_shortage_unique_hours(shifts, pats, start_d, end_d,
+                                                                 overrides, day_cutoff)
     return jsonify({
         "shortage": shortage_by_pattern,
         "shortage_unique": shortage_unique,
@@ -3232,9 +3370,11 @@ def shop_ai_chat():
         total_hours += work / 60
         staff_hours[sh["staff_name"]] = staff_hours.get(sh["staff_name"], 0) + work / 60
     # 不足状況（パターン別詳細＋時間帯別一意カウント）
-    shortage = shift_engine.compute_shortage(month_shifts, patterns, month_start, month_end, overrides)
+    day_cutoff = _shop_day_cutoff(shop_id)
+    shortage = shift_engine.compute_shortage(month_shifts, patterns, month_start, month_end,
+                                             overrides, day_cutoff)
     unique_shortage = shift_engine.compute_shortage_unique_hours(
-        month_shifts, patterns, month_start, month_end, overrides)
+        month_shifts, patterns, month_start, month_end, overrides, day_cutoff)
     # 今日の出勤
     today_shifts = [s for s in month_shifts if s["start_datetime"][:10] == today]
     today_names = [s["staff_name"] for s in today_shifts]
@@ -3311,7 +3451,8 @@ def staff_shifts():
         "ORDER BY sh.start_datetime"
     )
     all_params = [staff["shop_id"]] + date_params + [staff["id"]]
-    return jsonify({"shifts": query_all(sql, tuple(all_params))})
+    rows = query_all(sql, tuple(all_params))
+    return jsonify({"shifts": _attach_business_date(rows, _shop_day_cutoff(staff["shop_id"]))})
 
 
 @app.get("/api/staff/notifications")
@@ -3371,7 +3512,7 @@ def staff_requests_post():
         elif avail:
             # 店舗のシフト時間設定から終了時刻デフォルトを取得
             shop_end = _get_shop_shift_end_time(staff["shop_id"])
-            end_dt = normalize_iso(sh.get("end_datetime")) or (start_dt[:10] + f"T{shop_end}:00")
+            end_dt = normalize_iso(sh.get("end_datetime")) or _flex_wish_end(start_dt, shop_end)
         else:
             end_dt = normalize_iso(sh["end_datetime"])
         # 同一スタッフの同日内で、確定シフト OR 既に出している希望と時間帯が重なる場合はスキップ（重複防止）。
@@ -3508,7 +3649,7 @@ def shop_wishes():
         rows = query_all(sql, tuple(params))
     except Exception:
         rows = []
-    return jsonify({"wishes": rows})
+    return jsonify({"wishes": _attach_business_date(rows, _shop_day_cutoff(shop_id))})
 
 
 _YEAR_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -3798,21 +3939,27 @@ def shop_wishes_parse_image():
     return jsonify(result)
 
 
-def _wish_times(date, availability, start, end, shop_end):
+def _wish_times(date, availability, start, end, shop_end, cutoff_min=0):
     """希望の availability から start_datetime/end_datetime を決める（設計書 §3 の表）。
 
-    - rest        : {date}T00:00:00 〜 {date}T23:59:59（終日休み）
-    - any/morning/evening : {date}T09:00:00 〜 {date}T{shop_end}:00
+    date は「営業日」。日をまたぐ営業（04:00〜翌02:00 等）の店では、営業終了より
+    前の時刻（cutoff_min 未満）は翌カレンダー日を指す。17日の「24時〜ラスト」を
+    17日 00:00〜02:00 として受け取り、18日 00:00〜02:00 に落とすのがこの変換。
+
+    - rest        : {date}T00:00:00 〜 {date}T23:59:59（終日休み。営業日変換しない）
+    - any/morning/evening : 09:00 〜 shop_end
       （3種とも時刻は同じ。既存の /api/staff/requests と同じ挙動で、区別は
       availability の値そのものが担う。ここを変えると既存データとの整合が崩れる）
     - time        : 指定された start〜end。end<=start なら翌日扱い
-      （combine_dt_overnight は shift_patterns/fixed_shifts と同じ日またぎ判定を使う）
+      （combine_dt_business は shift_patterns/fixed_shifts と同じ日またぎ判定を使う）
     """
     if availability == "rest":
         return f"{date}T00:00:00", f"{date}T23:59:59"
     if availability == "time":
-        return combine_dt_overnight(date, start, end)
-    return f"{date}T09:00:00", f"{date}T{shop_end}:00"
+        return combine_dt_business(date, start, end, cutoff_min)
+    # 営業終了が翌日側（"02:00" 等）だと、素朴に {date}T{shop_end} を組むと
+    # 終了が開始より前になる。combine_dt_business が翌日へ送る。
+    return combine_dt_business(date, "09:00", shop_end, cutoff_min)
 
 
 # 希望表管理画面の .wmark が理解する語彙のみを許可する（設計書 §3）。
@@ -3820,10 +3967,12 @@ def _wish_times(date, availability, start, end, shop_end):
 # 明示的にスキップする（未知トークンによる画面表示崩れを防ぐ）。
 _WISH_AVAILABILITY_VALUES = ("rest", "any", "morning", "evening", "time")
 
-# availability='time' の start/end はこの形式のみ受け付ける（00:00〜23:59）。
+# availability='time' の start/end はこの形式のみ受け付ける（00:00〜29:59）。
 # 検証しないと utils.norm_hhmm が "17時" を黙って "00:00" に潰し、24時間の希望
-# として保存される。"25:00" は不正な datetime を組み立てて後続処理を例外にする。
-_WISH_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
+# として保存される。"30:00" は不正な datetime を組み立てて後続処理を例外にする。
+# 24〜29時を許すのは、深夜営業の現場表記（「24-L」＝24時からラストまで）を
+# そのまま受けるため。combine_dt_business が営業日基準で翌日に落とす。
+_WISH_TIME_RE = re.compile(r"^([01]?\d|2\d):[0-5]\d$")
 _WISH_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -3886,6 +4035,7 @@ def shop_wishes_bulk():
     if not wishes:
         abort(400, description="wishes が必要です")
     shop_end = _get_shop_shift_end_time(shop_id)
+    cutoff = _shop_day_cutoff(shop_id)
     created = 0
     detail = {"duplicate": 0, "invalid": 0, "rollback": 0}
     for w in wishes:
@@ -3924,7 +4074,8 @@ def shop_wishes_bulk():
             detail["invalid"] += 1
             continue
         try:
-            start_dt, end_dt = _wish_times(date, avail, w.get("start"), w.get("end"), shop_end)
+            start_dt, end_dt = _wish_times(date, avail, w.get("start"), w.get("end"),
+                                           shop_end, cutoff)
         except Exception as e:
             detail["invalid"] += 1
             print(f"[wishes/bulk] 日時の組み立てに失敗 staff_id={staff_id} date={date}: {e}", flush=True)

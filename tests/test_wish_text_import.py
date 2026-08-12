@@ -626,16 +626,18 @@ class TestLlmTimeValidation:
 
     "17時" は utils.norm_hhmm が黙って "00:00" に潰すため、17-22 のつもりの
     希望が 00:00〜翌00:00 の **24時間** として保存されていた。
-    "25:00" は不正な datetime を組み立てる別の破壊経路に直結する。
+
+    なお 24:00〜29:59 は「深夜帯の拡張表記」として意図的に受け付ける
+    （「24-L」＝24時からラスト）。utils.combine_dt_business が営業日基準で
+    翌カレンダー日に落とすため、不正な datetime にはならない。
     """
 
     @pytest.mark.parametrize("start,end", [
         ("17時", "22時"),
-        ("25:00", "26:00"),
+        ("30:00", "31:00"),
         ("17", "22"),
         ("17:60", "22:00"),
         ("午後5時", "午後10時"),
-        ("24:00", "25:00"),
     ])
     def test_invalid_times_do_not_become_time_entries(self, monkeypatch, start, end):
         _use_llm(monkeypatch, _llm_json({
@@ -647,6 +649,18 @@ class TestLlmTimeValidation:
         assert r["entries"] == []
         # 黙って捨てず、必ず人に渡すこと
         assert "9/1は17時から22時まで" in r["unparsed"]
+
+    @pytest.mark.parametrize("start,end", [("24:00", "26:00"), ("25:00", "29:30")])
+    def test_extended_hour_times_are_kept(self, monkeypatch, start, end):
+        """深夜帯の拡張表記はそのまま entry に残す（日付は繰り上げない）。"""
+        _use_llm(monkeypatch, _llm_json({
+            "entries": [{"dates": ["2026-09-01"], "availability": "time",
+                         "start": start, "end": end, "raw": "9/1は24-L"}],
+            "unparsed": []}))
+        r = ai.parse_wish_text("9/1は24-L", "2026-09")
+        assert len(r["entries"]) == 1
+        assert r["entries"][0]["dates"] == ["2026-09-01"]
+        assert (r["entries"][0]["start"], r["entries"][0]["end"]) == (start, end)
 
     def test_missing_both_times_on_time_availability_goes_to_unparsed(self, monkeypatch):
         """availability=time なのに時刻が両方 null なら、どの時間帯か決められない。"""
@@ -1643,7 +1657,7 @@ class TestWishBulkIntegrity:
     # ---------------- I-1: start/end の形式検証 ----------------
 
     def test_malformed_time_is_skipped_as_invalid(self, client):
-        """"17時" / "25:00" のような不正な時刻は invalid としてスキップすること。
+        """"17時" / "30:00" のような不正な時刻は invalid としてスキップすること。
 
         norm_hhmm は "17時" を黙って "00:00" に潰すため、検証しないと
         00:00〜24:00（=24時間）の希望として保存される。
@@ -1656,7 +1670,7 @@ class TestWishBulkIntegrity:
             {"staff_id": staff_id, "date": "2026-09-01", "availability": "time",
              "start": "17時", "end": "22時", "raw": "17時から22時"},
             {"staff_id": staff_id, "date": "2026-09-02", "availability": "time",
-             "start": "25:00", "end": "26:00", "raw": "25時から"},
+             "start": "30:00", "end": "31:00", "raw": "30時から"},
         ])
 
         assert r.status_code == 200, r.get_json()
@@ -1666,6 +1680,29 @@ class TestWishBulkIntegrity:
         assert body["skipped_detail"]["invalid"] == 2
         assert self._shifts_requested_count(shop_id) == 0
         assert self._wish_history_count(shop_id) == 0
+
+    def test_extended_hour_notation_is_accepted_as_next_day(self, client):
+        """「25:00-26:00」のような深夜表記は翌日の時刻として取り込むこと。
+
+        現場は「24-L」「25時上がり」のように24時を超える表記で希望を書く。
+        これを不正として捨てると、深夜営業の店では希望が丸ごと落ちる。
+        """
+        shop_id = insert_shop()
+        staff_id = insert_staff(shop_id, "E1", "小久保")
+        token = make_session("shop", shop_id, shop_id)
+
+        r = self._post_bulk(client, token, [
+            {"staff_id": staff_id, "date": "2026-09-02", "availability": "time",
+             "start": "25:00", "end": "26:00", "raw": "25時から26時"},
+        ])
+
+        assert r.status_code == 200, r.get_json()
+        assert r.get_json()["created"] == 1
+        row = dbmod.query_one(
+            "SELECT start_datetime, end_datetime FROM wish_history WHERE staff_id=?",
+            (staff_id,))
+        assert row["start_datetime"] == "2026-09-03T01:00:00"
+        assert row["end_datetime"] == "2026-09-03T02:00:00"
 
     def test_malformed_date_is_skipped_as_invalid(self, client):
         """不正な date も invalid としてスキップし、例外でバッチを落とさないこと。"""

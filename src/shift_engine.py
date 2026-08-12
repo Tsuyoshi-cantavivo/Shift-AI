@@ -19,6 +19,7 @@ from utils import (
     weekday_sun0, combine_dt, combine_dt_overnight, minutes_between, compute_break_minutes,
     add_days, max_consecutive_run, _hhmm_to_min, parse_iso,
     build_staff_tendency, score_shift_for_tendency,
+    combine_dt_business, shop_day_cutoff, business_day_of,
 )
 from weekly_hours import minutes_by_day, exceeds_weekly_cap
 
@@ -104,12 +105,18 @@ def load_weekday_overrides(shop_id):
     return {(r["pattern_id"], r["weekday"]): r["required_staff"] for r in rows}
 
 
-def _shift_slots(start_iso, end_iso, gran=GRAN):
+def _shift_slots(start_iso, end_iso, gran=GRAN, anchor_day=None):
     """シフト [start, end) が覆盖するスロット(分)のリスト。
 
     【日またぎ対応】ISO datetime を基準に経過分で計算するため、start と end が
     異なる日でも正しいスロットが得られる。例えば start="D T22:00" / end="D+1 T05:00"
     は [1320, 1380, ..., 1740) を返す（翌日分は +1440 の拡張スロット）。
+
+    【営業日対応】anchor_day を渡すと、その日の 0:00 を原点にスロットを数える。
+    04:00〜翌02:00 の店では「D の営業日」のシフトが D+1 00:00 に始まりうる
+    （固定シフト「月曜 00:00〜02:00」＝火曜 0時）。原点を開始日のままにすると
+    そのシフトがスロット 0〜120 に落ち、営業日 D の要件（拡張スロット
+    1440〜1560）とかみ合わずに上限人数の判定が壊れる。
     """
     try:
         s_dt = parse_iso(start_iso)
@@ -119,6 +126,12 @@ def _shift_slots(start_iso, end_iso, gran=GRAN):
     if e_dt <= s_dt:
         return []
     s_min = _hhmm_to_min(start_iso[11:16])
+    if anchor_day and start_iso[:10] != anchor_day:
+        try:
+            s_min += (parse_iso(start_iso[:10] + "T00:00:00")
+                      - parse_iso(anchor_day + "T00:00:00")).days * 1440
+        except Exception:
+            pass
     total_min = int((e_dt - s_dt).total_seconds() // 60)
     e_min = s_min + total_min
     slots = []
@@ -273,6 +286,11 @@ def auto_generate(shop_id, settings, start_date, end_date):
         "SELECT fs.*, s.role FROM fixed_shifts fs JOIN staffs s ON fs.staff_id=s.id "
         "WHERE s.shop_id=? AND s.is_resigned=0",
         (shop_id,))
+    # 営業日の cutoff（04:00〜翌02:00 の店なら 120分）。固定シフトの曜日は
+    # 「営業日の曜日」なので、月曜 00:00〜02:00 は月曜の営業日の深夜帯＝
+    # 火曜 00:00〜02:00 に置く。API 側（src/app.py の _shop_day_cutoff）と
+    # 同じ utils.shop_day_cutoff を使い、判定を1つに保つ。
+    day_cutoff = shop_day_cutoff(settings.get("shift_hours"), patterns)
 
     # ★【AI学習】スタッフ勤務傾向を過去90日分の確定シフト + 希望から構築。
     # 配置時のタイブレーカーとして使用（希望や必須制約より優先度は低い）。
@@ -364,7 +382,7 @@ def auto_generate(shop_id, settings, start_date, end_date):
         """このシフトを追加すると required を超えるスロットがあるか（検証Aの要）。"""
         cov, _ = state(day)
         req_map = req_map_for(day)
-        for sl in _shift_slots(start_iso, end_iso, GRAN):
+        for sl in _shift_slots(start_iso, end_iso, GRAN, anchor_day=day):
             required = req_map.get(sl)
             if required is None:
                 continue  # パターンが1つも被っていないスロットは上限なし
@@ -476,7 +494,7 @@ def auto_generate(shop_id, settings, start_date, end_date):
                 acc[d] = acc.get(d, 0) + m
         cov, sw = state(day)
         day_placed_roles.setdefault(day, set()).add(staff_role.get(staff_id, "part_time"))
-        for sl in _shift_slots(start_iso, end_iso, GRAN):
+        for sl in _shift_slots(start_iso, end_iso, GRAN, anchor_day=day):
             cov[sl] = cov.get(sl, 0) + 1
         s_min = _hhmm_to_min(start_iso[11:16])
         end_date = end_iso[:10]
@@ -704,8 +722,11 @@ def auto_generate(shop_id, settings, start_date, end_date):
             _, sw = state(cur)
             if f["staff_id"] in sw:
                 continue  # 既に配置済（他の処理で）
-            # 【日またぎ対応】固定シフトが overnight の場合、終了時刻は翌日
-            s_iso, e_iso = combine_dt_overnight(cur, f["start_time"], f["end_time"])
+            # 【営業日対応】固定シフトの曜日は「営業日」の曜日。日をまたぐ営業では
+            # 営業終了より前の時刻（月曜 00:00〜02:00 等）はその営業日の深夜帯を
+            # 指すので、実日付は翌カレンダー日（火曜 00:00〜02:00）になる。
+            # overnight（22:00〜02:00）の終了が翌日になる従来の扱いも含む。
+            s_iso, e_iso = combine_dt_business(cur, f["start_time"], f["end_time"], day_cutoff)
             if minutes_between(s_iso, e_iso) <= 0:
                 continue
             # cap 内なら固定時間をそのまま配置（候補として採用）
@@ -830,7 +851,7 @@ def auto_generate(shop_id, settings, start_date, end_date):
         for c in confirmed
     ]
     shortage_unique = compute_shortage_unique_hours(
-        _shifts_for_count, patterns, start_date, end_date, weekday_overrides)
+        _shifts_for_count, patterns, start_date, end_date, weekday_overrides, day_cutoff)
 
     # -----------------------------------------------------------
     # 警告（連勤・月間超過・固定シフト上限超過）
@@ -1066,12 +1087,13 @@ def _build_explanations(confirmed, pending, shortage, warnings, minutes_by_staff
 # ===========================================================
 # 外部API: 不足集計（shifts は start_datetime/end_datetime または start/end を許容）
 # ===========================================================
-def compute_shortage(shifts, patterns, start_date, end_date, weekday_overrides=None):
-    """確定シフト一覧から日次パターン不足を再計算。
+def _coverage_by_day(shifts, day_cutoff=0):
+    """確定シフトを「営業日 → {スロット: 人数}」に畳む。
 
-    auto_generate の出力(start/end) と DB の行(start_datetime/end_datetime) の
-    両方のキーを受け付ける（旧 BUG#3 の修正）。
-    weekday_overrides: {(pattern_id, weekday): required_staff} を渡すと曜日別必要人数を適用。
+    day_cutoff>0（日をまたぐ営業）では、8/18 00:00 開始のシフトは 8/17 の営業日に
+    属し、8/17 のスロット空間では 1440〜（拡張スロット）を埋める。カレンダー日で
+    数えると、深夜帯を埋めたはずのシフトがどの日の要件にも当たらず、
+    シフト表では埋まっているのに「不足」と表示され続ける。
     """
     coverage = {}
     for s in shifts:
@@ -1081,10 +1103,23 @@ def compute_shortage(shifts, patterns, start_date, end_date, weekday_overrides=N
         ed = s.get("end_datetime") or s.get("end")
         if not sd or not ed or len(sd) < 16:
             continue
-        day = sd[:10]
+        day = business_day_of(sd, day_cutoff) if day_cutoff else sd[:10]
         cov = coverage.setdefault(day, {})
-        for sl in _shift_slots(sd, ed, GRAN):
+        for sl in _shift_slots(sd, ed, GRAN, anchor_day=day):
             cov[sl] = cov.get(sl, 0) + 1
+    return coverage
+
+
+def compute_shortage(shifts, patterns, start_date, end_date, weekday_overrides=None,
+                     day_cutoff=0):
+    """確定シフト一覧から日次パターン不足を再計算。
+
+    auto_generate の出力(start/end) と DB の行(start_datetime/end_datetime) の
+    両方のキーを受け付ける（旧 BUG#3 の修正）。
+    weekday_overrides: {(pattern_id, weekday): required_staff} を渡すと曜日別必要人数を適用。
+    day_cutoff: 営業日の cutoff（分）。日をまたぐ営業で深夜帯を前日に寄せる。
+    """
+    coverage = _coverage_by_day(shifts, day_cutoff)
 
     def patterns_for_weekday(wd):
         out = []
@@ -1118,7 +1153,8 @@ def compute_shortage(shifts, patterns, start_date, end_date, weekday_overrides=N
     return shortage
 
 
-def compute_shortage_unique_hours(shifts, patterns, start_date, end_date, weekday_overrides=None):
+def compute_shortage_unique_hours(shifts, patterns, start_date, end_date,
+                                  weekday_overrides=None, day_cutoff=0):
     """時間帯(スロット)単位で「一意の不足」を集計して返す。
 
     compute_shortage はパターン別に不足を列出しするが、複数パターンが
@@ -1136,18 +1172,7 @@ def compute_shortage_unique_hours(shifts, patterns, start_date, end_date, weekda
       start_min/end_min は当日基準の拡張分(0-2880)。overnight は +1440。
       gap はその区間内での最大不足人数。
     """
-    coverage = {}
-    for s in shifts:
-        if (s.get("status") or "confirmed") != "confirmed":
-            continue
-        sd = s.get("start_datetime") or s.get("start")
-        ed = s.get("end_datetime") or s.get("end")
-        if not sd or not ed or len(sd) < 16:
-            continue
-        day = sd[:10]
-        cov = coverage.setdefault(day, {})
-        for sl in _shift_slots(sd, ed, GRAN):
-            cov[sl] = cov.get(sl, 0) + 1
+    coverage = _coverage_by_day(shifts, day_cutoff)
 
     result = []
     cur = start_date

@@ -854,6 +854,62 @@ function _parseTimeParts(t) {
   return [+m[1], +m[2]];
 }
 
+/* ============================================================
+   営業日（business day）— サーバの utils.py と同じ考え方
+   04:00〜翌02:00 の店では、8/17 の営業は 8/18 02:00 まで続く。つまり
+   8/18 00:00〜02:00 の勤務は「8/17 のシフト」。cutoffMin はその
+   「翌日側に食い込む分」（この例なら 120）。GET /shop/patterns の
+   day_cutoff_min で受け取る。日中営業の店は 0 で、営業日＝カレンダー日。
+   ============================================================ */
+function dayCutoffMin() {
+  const bh = appState.businessHours;
+  return (bh && bh.cutoffMin) || 0;
+}
+
+/* 実 datetime → その勤務が属する営業日 "YYYY-MM-DD"。 */
+function businessDayOf(iso) {
+  const day = String(iso || '').slice(0, 10);
+  const cutoff = dayCutoffMin();
+  if (!cutoff || !day) return day;
+  const [h, m] = _parseTimeParts(String(iso || '').slice(11));
+  if (isNaN(h) || h * 60 + m >= cutoff) return day;
+  const d = new Date(day + 'T00:00:00');
+  d.setDate(d.getDate() - 1);
+  return _localDateStr(d);
+}
+
+/* シフト/希望1件が属する営業日。サーバが business_date を付けていればそれを優先
+   （判定の正が1つになる）。付いていない古いレスポンスでも画面が壊れないよう、
+   同じ規則をここでも持つ。 */
+function shiftDay(s) {
+  return (s && s.business_date) || businessDayOf(s && s.start_datetime);
+}
+
+/* 営業日 day の "HH:MM"〜"HH:MM" を実 datetime のペアにする。
+   utils.combine_dt_business と同じ規則:
+     - 営業終了より前の時刻（深夜帯）は翌カレンダー日
+     - それでも終了 <= 開始 なら終了をさらに翌日へ（22:00〜02:00）
+   手動追加・空き枠クリック・不足枠クリックはこれを通して保存する。
+   通さないと「22:00〜02:00」が同じ日付で保存され、長さが負のシフトになる。 */
+function businessTimesToIso(day, startTime, endTime) {
+  const cutoff = dayCutoffMin();
+  const [sh, sm] = _parseTimeParts(startTime);
+  const [eh, em] = _parseTimeParts(endTime);
+  if (isNaN(sh) || isNaN(eh)) return null;
+  let ps = sh * 60 + sm;
+  let pe = eh * 60 + em;
+  if (cutoff > 0) {
+    if (ps < cutoff) ps += 1440;
+    if (pe < cutoff) pe += 1440;
+  }
+  if (pe <= ps) pe += 1440;
+  const iso = (min) => {
+    const info = _extHourToIsoTime(Math.floor(min / 60), min % 60, day);
+    return `${info.date}T${info.time}:00`;
+  };
+  return { start: iso(ps), end: iso(pe) };
+}
+
 /* 店舗の営業時間をパターン（shift_patterns）の最小開始/最大終了から算出してキャッシュ。
    タイムライン表示で「日によって時間軸が変わる」のを防ぎ、営業時間全体を固定表示する。
    【日またぎ対応】end_time <= start_time の overnight パターンは end に +24 する。
@@ -873,7 +929,14 @@ async function ensureBusinessHours() {
     const d = await api('/shop/patterns');
     const pats = d.patterns || [];
     appState.patterns = pats;
-    if (!pats.length) { appState.businessHours = fallback; return fallback; }
+    // 営業日の cutoff はサーバが決める（シフト時間設定 → パターンの順で判定）。
+    // 画面側で patterns だけから推測すると、シフト時間設定を根拠にする
+    // サーバ（固定シフトの配置日・希望の保存日）と食い違う。
+    const cutoffMin = Number(d.day_cutoff_min) || 0;
+    if (!pats.length) {
+      appState.businessHours = { ...fallback, cutoffMin };
+      return appState.businessHours;
+    }
     let start = 48, end = 0;
     pats.forEach((p) => {
       const [sh] = _parseTimeParts(p.start_time);
@@ -885,8 +948,11 @@ async function ensureBusinessHours() {
       start = Math.min(start, sh);
       end = Math.max(end, peH);
     });
-    if (start >= end || isNaN(start) || isNaN(end)) { appState.businessHours = fallback; return fallback; }
-    appState.businessHours = { start, end };
+    if (start >= end || isNaN(start) || isNaN(end)) {
+      appState.businessHours = { ...fallback, cutoffMin };
+      return appState.businessHours;
+    }
+    appState.businessHours = { start, end, cutoffMin };
     return appState.businessHours;
   } catch { return fallback; }
 }
@@ -1000,7 +1066,8 @@ function createCalendar(mountEl, opts) {
 
   function byDay() {
     const m = {};
-    state.shifts.forEach((s) => { const d = s.start_datetime.slice(0, 10); (m[d] = m[d] || []).push(s); });
+    // 営業日でまとめる。04:00〜翌02:00 の店では 18日0時のシフトは 17日のマスに出る
+    state.shifts.forEach((s) => { const d = shiftDay(s); if (d) (m[d] = m[d] || []).push(s); });
     return m;
   }
 
@@ -1119,7 +1186,7 @@ function _tlTimeMin(iso) {
  *  印刷ビュー（openPrintView）とダッシュボード（今日の配置帯）の両方から呼ばれる。
  *  list: 表示対象のシフト群。anchorDate: 拡張時間の基準日（"YYYY-MM-DD"）。指定時は翌日またぎを正しく扱う。 */
 function buildStaticTimelineHtml(list, anchorDate) {
-  const day = anchorDate || (list.length ? list[0].start_datetime.slice(0, 10) : '');
+  const day = anchorDate || (list.length ? shiftDay(list[0]) : '');
   const order = []; const staffMap = {};
   list.forEach((s) => {
     if (!staffMap[s.staff_id]) {
@@ -1292,7 +1359,7 @@ async function openPrintView(start, end) {
       .sort((a, b) => (a.start_datetime || '').localeCompare(b.start_datetime || ''));
     const byDay = {};
     shifts.forEach((s) => {
-      const day = (s.start_datetime || '').slice(0, 10);
+      const day = shiftDay(s);
       if (!day) return;
       (byDay[day] = byDay[day] || []).push(s);
     });
@@ -1352,6 +1419,31 @@ async function openPrintView(start, end) {
 
 function isAiDraftShift(shift) {
   return shift?.status === 'requested' && String(shift.reason || '').startsWith('AIドラフト');
+}
+
+/* 追加モーダルの時刻入力に「実際に保存される日付」を出し続ける。
+   時刻欄は営業日（モーダルの見出しの日）に対する時刻で、22:00〜02:00 と
+   入れれば終了は翌日になる。以前は既定値の日付を固定で表示・保存しており、
+   時刻を直しても日付が追従せず、終了が開始より前のシフトが作れてしまった。 */
+function installSpanNote(modal, day, startSel, endSel, noteSel) {
+  const startEl = modal.querySelector(startSel);
+  const endEl = modal.querySelector(endSel);
+  const noteEl = modal.querySelector(noteSel);
+  if (!startEl || !endEl || !noteEl) return;
+  const render = () => {
+    const span = businessTimesToIso(day, startEl.value, endEl.value);
+    if (!span) { noteEl.textContent = ''; return; }
+    const sDay = span.start.slice(0, 10);
+    const eDay = span.end.slice(0, 10);
+    const mins = (new Date(span.end) - new Date(span.start)) / 60000;
+    const len = `${Math.floor(mins / 60)}時間${mins % 60 ? (mins % 60) + '分' : ''}`;
+    noteEl.textContent = (sDay === eDay)
+      ? `${sDay} ${span.start.slice(11, 16)}〜${span.end.slice(11, 16)}（${len}）`
+      : `${sDay} ${span.start.slice(11, 16)} 〜 ${eDay} ${span.end.slice(11, 16)}（${len}・翌日またぎ）`;
+  };
+  startEl.addEventListener('input', render);
+  endEl.addEventListener('input', render);
+  render();
 }
 
 function installDraftTimelineDrag(modal, { date, list, editable, rangeMin, rangeLen }) {
@@ -1523,12 +1615,14 @@ function installDraftTimelineDrag(modal, { date, list, editable, rangeMin, range
 
 function openDayTimeline(date, allShifts, editable, onChange) {
   buzz(12);
-  // date を anchor として表示。当日タイムラインには「date で始まるシフト」のみ表示。
+  // date を anchor として表示。当日タイムラインには「date の営業日に属するシフト」を表示。
   // 【理由】営業日は pattern.start_time（例: 6:00）に始まるので、
   //   前日の overnight シフト（前日6:00〜当日5:00）は前日のタイムラインで見れば十分。
   //   当日のタイムラインに混ぜると左に突き抜けて名前カラムに被る問題があった。
   //   前日シフトは前日詳細画面で確認する設計。
-  const list = (allShifts || []).filter((s) => s.start_datetime.slice(0, 10) === date)
+  // 【営業日】04:00〜翌02:00 の店では 8/18 00:00〜02:00 は 8/17 の営業日のシフト。
+  //   カレンダー日で絞ると、17日の欄から消えて18日の欄の左端（軸外）に飛ぶ。
+  const list = (allShifts || []).filter((s) => shiftDay(s) === date)
     .sort((a, b) => a.start_datetime.localeCompare(b.start_datetime));
   const order = []; const staffMap = {};
   // role も保持する。設計書 §3「色だけに依存しない」に従い、名前の下にロールバッジを併記するため。
@@ -1540,8 +1634,8 @@ function openDayTimeline(date, allShifts, editable, onChange) {
   //   全バーが消えるインシデントの再発防止）。
   const bh = appState.businessHours || { start: 9, end: 22 };
   let minH = bh.start, maxH = bh.end;
-  // date で始まるシフトで範囲拡張を判定
-  list.filter((s) => s.start_datetime.slice(0, 10) === date).forEach((s) => {
+  // その営業日のシフトで範囲拡張を判定（list は既にその営業日だけ）
+  list.forEach((s) => {
     const sMin = _extMinFromIso(s.start_datetime, date);
     const eMin = _extMinFromIso(s.end_datetime, date);
     if (isNaN(sMin) || isNaN(eMin)) return;  // 不正時刻は集計から除外
@@ -1703,25 +1797,28 @@ function openDayTimeline(date, allShifts, editable, onChange) {
       const eExt = Math.min(bh.end, sExt + 4);
       const sInfo = _extHourToIsoTime(sExt, 0, date);
       const eInfo = _extHourToIsoTime(eExt, 0, date);
-      const isOvernight = sInfo.date !== date || eInfo.date !== date;
       const addW = openModal(`<i class="bi bi-plus-lg"></i> シフト追加 — ${date}`,
         `<label class="form-label" for="mStaff">スタッフ</label>
          <select id="mStaff" class="form-select mb-2">${opts}</select>
          <div class="row">
-           <div class="col-6"><label class="form-label" for="mStart">開始 (${sInfo.date})</label><input type="time" id="mStart" class="form-control" value="${sInfo.time}"></div>
-           <div class="col-6"><label class="form-label" for="mEnd">終了 (${eInfo.date})</label><input type="time" id="mEnd" class="form-control" value="${eInfo.time}"></div>
+           <div class="col-6"><label class="form-label" for="mStart">開始</label><input type="time" id="mStart" class="form-control" value="${sInfo.time}"></div>
+           <div class="col-6"><label class="form-label" for="mEnd">終了</label><input type="time" id="mEnd" class="form-control" value="${eInfo.time}"></div>
          </div>
-         <div class="small text-secondary mt-2">${isOvernight ? '※翌日またぎのシフトです。' : ''}上限人数を超える場合は自動調整されます。</div>`,
+         <div class="small text-secondary mt-2" id="mSpanNote"></div>`,
         async (w2, close) => {
           const staffId = +w2.querySelector('#mStaff').value;
           const st = w2.querySelector('#mStart').value;
           const en = w2.querySelector('#mEnd').value;
           if (!st || !en) { toast('時間を入力してください', 'error'); return; }
+          // 日付は入力された時刻から決め直す。既定値の日付を固定で使うと
+          // 22:00〜02:00 が同じ日付で保存され、長さが負のシフトになる。
+          const span = businessTimesToIso(date, st, en);
+          if (!span) { toast('時間の形式が不正です', 'error'); return; }
           try {
             const r = await saveShiftWithWeeklyCapConfirm('/shop/shifts', {
               staff_id: staffId,
-              start_datetime: `${sInfo.date}T${st}:00`,
-              end_datetime: `${eInfo.date}T${en}:00`,
+              start_datetime: span.start,
+              end_datetime: span.end,
               auto_adjust: true,
             });
             if (!r) return;  // 週28h超過の確認を店長がキャンセルした
@@ -1740,6 +1837,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
           } catch (err) { toast(err.message, 'error'); }
         });
       addW.querySelector('[data-save]').textContent = '追加';
+      installSpanNote(addW, date, '#mStart', '#mEnd', '#mSpanNote');
     });
   }
   // 空き部分クリック → そのスタッフ＋クリック位置の時間帯で追加
@@ -1758,24 +1856,25 @@ function openDayTimeline(date, allShifts, editable, onChange) {
         // 拡張時間 → { date, time }。翌日またぎは date に1日加算
         const sInfo = _extHourToIsoTime(startHour, 0, date);
         const eInfo = _extHourToIsoTime(endHour, 0, date);
-        const isOvernight = sInfo.date !== date || eInfo.date !== date;
-        const datePrefix = isOvernight ? `${sInfo.date} ` : '';
         buzz(10);
-        const addW = openModal(`<i class="bi bi-plus-lg"></i> シフト追加 — ${esc(staffName)} ${sInfo.date}`,
+        const addW = openModal(`<i class="bi bi-plus-lg"></i> シフト追加 — ${esc(staffName)} ${date}`,
           `<div class="row">
              <div class="col-6"><label class="form-label" for="qStart">開始</label><input type="time" id="qStart" class="form-control" value="${sInfo.time}"></div>
              <div class="col-6"><label class="form-label" for="qEnd">終了</label><input type="time" id="qEnd" class="form-control" value="${eInfo.time}"></div>
            </div>
-           <div class="small text-secondary mt-2">${isOvernight ? `※翌日またぎのシフトです（開始: ${sInfo.date} / 終了: ${eInfo.date}）。` : ''}時間を調整して「保存」を押してください。上限人数を超える場合は自動調整します。</div>`,
+           <div class="small text-secondary mt-2" id="qSpanNote"></div>
+           <div class="small text-secondary">時間を調整して「保存」を押してください。上限人数を超える場合は自動調整します。</div>`,
           async (w2, close) => {
             const st = w2.querySelector('#qStart').value;
             const en = w2.querySelector('#qEnd').value;
             if (!st || !en) { toast('時間を入力してください', 'error'); return; }
+            const span = businessTimesToIso(date, st, en);
+            if (!span) { toast('時間の形式が不正です', 'error'); return; }
             try {
               const r = await saveShiftWithWeeklyCapConfirm('/shop/shifts', {
                 staff_id: +staffId,
-                start_datetime: `${sInfo.date}T${st}:00`,
-                end_datetime: `${eInfo.date}T${en}:00`,
+                start_datetime: span.start,
+                end_datetime: span.end,
                 auto_adjust: true,
               });
               if (!r) return;  // 週28h超過の確認を店長がキャンセルした
@@ -1793,6 +1892,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
             } catch (err) { toast(err.message, 'error'); }
           });
         addW.querySelector('[data-save]').textContent = '保存';
+        installSpanNote(addW, date, '#qStart', '#qEnd', '#qSpanNote');
       });
     });
   }
@@ -1807,7 +1907,6 @@ function openDayTimeline(date, allShifts, editable, onChange) {
         // 拡張時間 → 実際の {date, time}
         const sInfo = _extHourToIsoTime(startH, 0, date);
         const eInfo = _extHourToIsoTime(endH, 0, date);
-        const isOvernight = sInfo.date !== date || eInfo.date !== date;
         buzz(10);
         // スタッフリストを取得
         let opts = '';
@@ -1816,24 +1915,28 @@ function openDayTimeline(date, allShifts, editable, onChange) {
           const active = (sd.staffs || []).filter((s) => !s.is_resigned);
           opts = active.map((s) => `<option value="${s.id}">${esc(s.name)}（${roleLabel(s.role)}）</option>`).join('');
         } catch (err) { toast('スタッフ一覧の取得に失敗', 'error'); return; }
-        const addW = openModal(`<i class="bi bi-person-plus"></i> 不足枠に配置 — ${sInfo.date} ${sInfo.time}〜${eInfo.date === sInfo.date ? '' : eInfo.date + ' '}${eInfo.time}`,
+        const addW = openModal(`<i class="bi bi-person-plus"></i> 不足枠に配置 — ${date} ${sInfo.time}〜${eInfo.time}`,
           `<div class="alert alert-warning py-2 mb-3"><i class="bi bi-exclamation-triangle"></i> この時間帯は<strong>${gap}名</strong>不足中。1名ずつ追加できます。</div>
            <label class="form-label" for="gapStaff">スタッフを選択</label>
            <select id="gapStaff" class="form-select mb-2">${opts}</select>
            <div class="row">
-             <div class="col-6"><label class="form-label" for="gapStart">開始 (${sInfo.date})</label><input type="time" id="gapStart" class="form-control" value="${sInfo.time}"></div>
-             <div class="col-6"><label class="form-label" for="gapEnd">終了 (${eInfo.date})</label><input type="time" id="gapEnd" class="form-control" value="${eInfo.time}"></div>
+             <div class="col-6"><label class="form-label" for="gapStart">開始</label><input type="time" id="gapStart" class="form-control" value="${sInfo.time}"></div>
+             <div class="col-6"><label class="form-label" for="gapEnd">終了</label><input type="time" id="gapEnd" class="form-control" value="${eInfo.time}"></div>
            </div>
-           <div class="small text-secondary mt-2">${isOvernight ? '※翌日またぎのシフトです。' : ''}残り${gap - 1}名の不足がある場合は、追加後に再度クリックしてください。</div>`,
+           <div class="small text-secondary mt-2" id="gapSpanNote"></div>
+           <div class="small text-secondary">残り${gap - 1}名の不足がある場合は、追加後に再度クリックしてください。</div>`,
           async (w2, close) => {
             const staffId = +w2.querySelector('#gapStaff').value;
             const st = w2.querySelector('#gapStart').value;
             const en = w2.querySelector('#gapEnd').value;
+            if (!st || !en) { toast('時間を入力してください', 'error'); return; }
+            const span = businessTimesToIso(date, st, en);
+            if (!span) { toast('時間の形式が不正です', 'error'); return; }
             try {
               const r = await saveShiftWithWeeklyCapConfirm('/shop/shifts', {
                 staff_id: staffId,
-                start_datetime: `${sInfo.date}T${st}:00`,
-                end_datetime: `${eInfo.date}T${en}:00`,
+                start_datetime: span.start,
+                end_datetime: span.end,
                 auto_adjust: true,
               });
               if (!r) return;  // 週28h超過の確認を店長がキャンセルした
@@ -1853,6 +1956,7 @@ function openDayTimeline(date, allShifts, editable, onChange) {
             } catch (err) { toast(err.message, 'error'); }
           });
         addW.querySelector('[data-save]').textContent = '配置';
+        installSpanNote(addW, date, '#gapStart', '#gapEnd', '#gapSpanNote');
       });
     });
   }
@@ -1996,7 +2100,8 @@ async function loadShortage(box, start, end) {
     const allShifts = sd.shifts || [];
     const byDay = {};
     allShifts.forEach((s) => {
-      const day = s.start_datetime.slice(0, 10);
+      const day = shiftDay(s);
+      if (!day) return;
       (byDay[day] = byDay[day] || []).push(s);
     });
     const chips = [];
@@ -2867,7 +2972,18 @@ function confirmDeleteStaff(staffId, staffName) {
     { saveLabel: '削除する', btnClass: 'btn-danger' });
 }
 function showFixedShiftModal(staffId, staffName) {
-  api('/shop/fixed-shifts').then((d) => {
+  api('/shop/fixed-shifts').then(async (d) => {
+    // 日をまたぐ営業（04:00〜翌02:00 等）では、曜日は「営業日」の曜日。
+    // 「月曜 00:00〜02:00」は月曜の営業日の深夜帯＝実際には火曜0時に置かれる。
+    // これを書かないと、店長は火曜に置きたくて火曜を選び、結果は水曜0時になる。
+    await ensureBusinessHours();
+    const cutoff = dayCutoffMin();
+    const hint = cutoff
+      ? `<div class="info-box small mt-2"><i class="bi bi-info-circle"></i> この店は日をまたぐ営業です。
+         <strong>${_extHourLabel(0)}:00〜${String(Math.floor(cutoff / 60)).padStart(2, '0')}:${String(cutoff % 60).padStart(2, '0')}</strong>
+         を指定すると「その曜日の営業日の深夜帯」＝<strong>翌日の同時刻</strong>に配置されます
+         （例: 月曜 00:00〜02:00 → 火曜 0時〜2時）。</div>`
+      : '';
     let mine = d.fixed_shifts.filter((f) => f.staff_id === staffId);
     const render = (w) => {
       w.querySelector('#fxList').innerHTML = mine.length ? mine.map((f) => `
@@ -2893,7 +3009,8 @@ function showFixedShiftModal(staffId, staffName) {
       `<div id="fxList" class="mb-3"></div>
        <div class="row"><div class="col-4"><label class="form-label" for="fxWd">曜日</label><select id="fxWd" class="form-select">${WD.map((n, i) => `<option value="${i}">${n}曜</option>`).join('')}</select></div>
        <div class="col-4"><label class="form-label" for="fxSt">開始</label><input id="fxSt" class="form-control" value="09:00"></div>
-       <div class="col-4"><label class="form-label" for="fxEt">終了</label><input id="fxEt" class="form-control" value="18:00"></div></div>`,
+       <div class="col-4"><label class="form-label" for="fxEt">終了</label><input id="fxEt" class="form-control" value="18:00"></div></div>
+       ${hint}`,
       async (w2, close) => {
         try { const r = await api('/shop/fixed-shifts', { method: 'POST', body: JSON.stringify({ staff_id: staffId, weekday: +w2.querySelector('#fxWd').value, start_time: w2.querySelector('#fxSt').value, end_time: w2.querySelector('#fxEt').value }) });
           mine.push({ id: r.id, staff_id: staffId, weekday: +w2.querySelector('#fxWd').value, start_time: w2.querySelector('#fxSt').value, end_time: w2.querySelector('#fxEt').value });
@@ -2970,7 +3087,7 @@ SCREENS.myshift = async function (el) {
         safeSetHTML(shiftsBox, '<div class="text-secondary small">確定シフトはありません</div>');
       } else {
         safeSetHTML(shiftsBox, `<div class="table-wrap"><table class="data-table"><thead><tr><th>日付</th><th>曜日</th><th>時間</th><th>状態</th><th>休憩</th></tr></thead><tbody>${list.map((s) => {
-          const d = s.start_datetime.slice(0, 10);
+          const d = shiftDay(s);  // 営業日で出す（深夜帯は前日の欄）
           const isDraft = s.status === 'requested';
           const stateBadge = isDraft ? badge('ドラフト', 'warning') : badge('確定', 'success');
           return `<tr><td class="num">${esc(d)}</td><td>${wdName(d)}</td><td class="num">${hm(s.start_datetime)} - ${hm(s.end_datetime)}</td><td>${stateBadge}</td><td class="num">${(s.break_time_minutes || 0)}分</td></tr>`;
@@ -3169,7 +3286,7 @@ SCREENS.requests = async function (el) {
       const confirmedKey = new Set();
       (shiftsD.shifts || []).forEach((s) => {
         if (s.status === 'confirmed') {
-          confirmedKey.add(`${s.staff_id}|${(s.start_datetime || '').slice(0, 10)}`);
+          confirmedKey.add(`${s.staff_id}|${shiftDay(s)}`);
         }
       });
       // staff_id ごとにグループ化。各希望に confirmed フラグを付与
@@ -3178,7 +3295,7 @@ SCREENS.requests = async function (el) {
         const sid = r.staff_id;
         if (!byStaff[sid]) byStaff[sid] = [];
         // この希望が確定済みシフトに対応しているか（同スタッフ・同日のconfirmed）
-        r._confirmed = confirmedKey.has(`${sid}|${(r.start_datetime || '').slice(0, 10)}`);
+        r._confirmed = confirmedKey.has(`${sid}|${shiftDay(r)}`);
         byStaff[sid].push(r);
       });
       // 表示用配列（希望数降順）
@@ -3260,7 +3377,7 @@ function renderStaffReqCard({ staff, list }) {
 function openStaffReqDetailModal({ staff, list }) {
   // カレンダー風リスト表示
   const rows = list.map((r) => {
-    const day = (r.start_datetime || '').slice(0, 10);
+    const day = shiftDay(r);  // 営業日（深夜帯の希望は前日の欄に出す）
     const st = (r.start_datetime || '').slice(11, 16);
     const et = (r.end_datetime || '').slice(11, 16);
     let badgeHtml = '';
@@ -3424,7 +3541,9 @@ async function _wtiEnsureExistingLoaded(state, staffIds) {
   try {
     const d = await api(`/shop/wishes?start=${start}&end=${end}${staffQS}`);
     (d.wishes || []).forEach((w) => {
-      const key = `${w.staff_id}|${(w.start_datetime || '').slice(0, 10)}`;
+      // 取り込みプレビューの日付は「営業日」。深夜帯の既存希望を実カレンダー日で
+      // 引くと、同じ日に既存があるのに「既存なし」と見えて二重登録になる。
+      const key = `${w.staff_id}|${shiftDay(w)}`;
       (state.existing[key] = state.existing[key] || []).push(w);
     });
   } catch (e) {
