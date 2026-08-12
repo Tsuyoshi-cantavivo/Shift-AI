@@ -2250,7 +2250,9 @@ function renderShopChat(container, opts) {
         ? `<div class="chat-bubble chat-bubble-user">${esc(m.content)}</div>`
         : `<div class="chat-bubble chat-bubble-ai"><div class="chat-ai-avatar"><i class="bi bi-stars"></i></div><div class="chat-ai-text">${esc(m.content)}</div></div>`;
     }).join('');
-    box.scrollTop = box.scrollHeight;
+    // 会話が始まっていれば最新の発言まで送る。1通目（review の助言）しか
+    // 無いうちに下端へ送ると、長い助言の途中から表示されて頭が読めない。
+    box.scrollTop = window._shopChat.length > 1 ? box.scrollHeight : 0;
   };
   // ダッシュボードのカードに同居するようになったので、送信中に別画面へ
   // 移られても落ちないよう DOM 参照はすべて null ガードする。
@@ -2476,7 +2478,7 @@ SCREENS.shifts = function (el) {
   document.getElementById('stepImportBtn')?.addEventListener('click', () => openWishImportModal(() => {
     refreshAll();
     try { window._shiftCalCtrl?.refresh?.(); } catch {}
-  }));
+  }, { yearMonth: (cur().start || '').slice(0, 7) }));
   // STEP2 AI生成ボタン: 入力期間で直接プレビュー→ドラフト保存（遷移しない）
   // ※ 各ボタンは ?. で保護（HTML描画不良時にアプリ全体が停止するのを防ぐ）
   document.getElementById('autoGen')?.addEventListener('click', () => runShiftGenInline(cur, refreshAll));
@@ -3319,12 +3321,19 @@ function _wtiFlatten(entries) {
   return items;
 }
 
-async function openWishImportModal(onImported) {
+/* opts.yearMonth: 対象月の初期値（'YYYY-MM'）。シフト画面のSTEP1から開くときは
+   画面で選んでいる期間の月を渡す。既定の「今月」のままだと、9月のシフトを
+   組んでいるのに8月として解析され、取り込んだ希望が別の月に入ってしまう。
+   _wtiMonthOptions() が出す範囲（先月〜再来月）の外なら今月に丸める。 */
+async function openWishImportModal(onImported, opts) {
   let staffs = [];
   try {
     const sd = await api('/shop/staffs');
     staffs = (sd.staffs || []).filter((s) => !s.is_resigned);
   } catch (e) { toast('スタッフ一覧の取得に失敗しました', 'error'); return; }
+  const wantedYm = opts && opts.yearMonth;
+  const initialYm = _wtiMonthOptions().some((o) => o.value === wantedYm)
+    ? wantedYm : todayStr().slice(0, 7);
   const state = {
     staffs, items: [], unparsed: [], source: null, periods: [],
     // I-4: staff_id|date → 既存希望（配列。中身の availability/時刻を保持する。
@@ -3333,7 +3342,7 @@ async function openWishImportModal(onImported) {
     // I-7: どのスタッフ分の既存希望を取得済みか（差分取得のため）。
     existingFetchedStaffIds: new Set(),
     existingRange: null,
-    yearMonth: todayStr().slice(0, 7), explicitStaffId: null, rawText: '',
+    yearMonth: initialYm, explicitStaffId: null, rawText: '',
     calStaffId: null, calMonth: null, onImported,
     // I-2: どのスタッフのカレンダーを一度でも表示したかを記録し、
     // 未確認のまま登録しようとした店長に注意を出すために使う。
@@ -5521,12 +5530,14 @@ function renderShopTab(body) {
             night_premium_rate: +body.querySelector('#setNightRate').value, transport_per_day: +body.querySelector('#setTransport').value,
             period_mode: body.querySelector('#setPeriodMode').value, operation_mode: opMode } }) });
         toast('保存しました', 'success'); currentUser.shop_name = body.querySelector('#setShopName').value;
-        // 運用モードを変えたらナビの項目数が変わる。保存直後に反映する
-        // （再ログインしないと切り替わらない、という分かりにくさを避ける）。
+        // 運用モードを変えたらナビの項目数と設定のタブ構成（募集期間）が変わる。
+        // 保存直後に両方へ反映する（再ログインするまで古い画面が残る、という
+        // 分かりにくさを避ける）。settingsTab は 'shop' のままなので、
+        // 描き直しても今見ているタブから動かない。
         if (appState.operationMode !== opMode) {
           appState.operationMode = opMode;
           renderNav();
-          setActiveNav();
+          navigateTo('settings');
         }
       } catch (e) { toast(e.message, 'error'); }
     });

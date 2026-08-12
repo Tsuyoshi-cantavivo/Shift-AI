@@ -1105,6 +1105,13 @@ html[data-theme="dark"] .tl-bar.tl-st-modifying {
 .step-stat { font-size: .78rem; color: var(--ink-2); min-height: 2.4em; line-height: 1.45; }
 .step-stat b { font-family: var(--font-num); color: var(--ink); }
 .step-btn { margin-top: auto; width: 100%; }
+/* 色の強調は「いまの工程」だけが持つ。STEP2 の AI生成 と STEP4 の 確定 が
+   同時にベタ塗りで光ると、どちらが今なのか分からなくなる（実機で確認）。
+   押せなくするのではなく、目立たせないだけ——手順は飛ばせる。 */
+.step-cell:not(.now) .step-btn {
+  background: var(--surface); color: var(--ink-2); border: 1px solid var(--rule);
+}
+.step-cell:not(.now) .step-btn:hover { background: var(--paper); color: var(--ink); }
 
 .step-more { margin-top: 12px; border-top: 1px solid var(--rule); padding-top: 10px; }
 .step-more > summary { cursor: pointer; font-size: .8rem; color: var(--ink-2); list-style: none; }
