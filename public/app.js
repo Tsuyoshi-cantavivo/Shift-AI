@@ -2540,7 +2540,10 @@ SCREENS.shifts = function (el) {
       const r = await api('/shop/shifts/finalize', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end }) });
       setLoading(false);
       const extra = r.over_cap ? `（必要人数超過 ${r.over_cap} 件。⚠️のシフトを確認してください）` : '';
-      toast((r.message || `${r.finalized}件を確定しました`) + extra, r.over_cap ? 'warning' : 'success');
+      // 調整待ちを飛ばしたときは成功の緑で流さない。確定したつもりの枠が
+      // 残っていることに気づけないと、当日になって穴が開く。
+      const needsAttention = !!r.over_cap || !!r.skipped_pending;
+      toast((r.message || `${r.finalized}件を確定しました`) + extra, needsAttention ? 'warning' : 'success');
       refreshAll();
       try { window._shiftCalCtrl?.refresh?.(); } catch {}
     } catch (e) { setLoading(false); toast(e.message, 'error'); }

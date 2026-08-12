@@ -33,6 +33,7 @@ from utils import (
     norm_hhmm, norm_dt_iso, add_days, build_staff_tendency, combine_dt_overnight,
     sanitize_login_code, LOGIN_CODE_MAX, validate_known_settings_values,
     validate_numeric_field, validate_date_field, operation_mode_of,
+    is_engine_pending_reason,
 )
 import shift_engine
 import ai
@@ -2356,9 +2357,16 @@ def shop_shifts_finalize():
     また、期間内のスタッフ希望（status='requested'）も confirmed に変換する。
     これにより「確定」ボタンを押すと希望表カードが消える（シフトが完全確定）。
 
+    ただし、エンジンが「置けなかった」ものとして書き出した調整待ちの行
+    （utils.is_engine_pending_reason）は確定しない。実データで、
+    1日最低勤務時間（3時間）を下回る 04:00-06:00 の枠が
+    reason='最低勤務時間未満のため調整待ち' のまま confirmed になり、
+    スタッフに確定通知まで飛んでいた。エンジン自身が「人の調整が要る」と
+    判断したものを、確定ボタン1つで公開してはいけない。
+
     body:
       - start_date, end_date: 期間指定
-    戻り値: {ok, finalized, notified_staff, message}
+    戻り値: {ok, finalized, notified_staff, skipped_pending, message}
     """
     shop, shop_id, _ = _shop_ctx()
     body = request.get_json(silent=True) or {}
@@ -2366,15 +2374,22 @@ def shop_shifts_finalize():
     end_d = body.get("end_date")
     if not start_d or not end_d:
         abort(400, description="start_date, end_date が必要です")
-    # 期間内の全 requested を取得（AIドラフト + スタッフ希望 両方）
-    targets = query_all(
+    # 期間内の requested を取得（AIドラフト + スタッフ希望）。
+    # エンジンの調整待ちはここで除く（確定してよいものだけを対象にする）。
+    all_requested = query_all(
         "SELECT id, staff_id, start_datetime, end_datetime, reason FROM shifts "
         "WHERE shop_id=? AND status='requested' "
         "AND start_datetime>=? AND start_datetime<=?",
         (shop_id, start_d + "T00:00:00", end_d + "T23:59:59"))
+    targets = [t for t in all_requested if not is_engine_pending_reason(t["reason"])]
+    skipped_pending = len(all_requested) - len(targets)
     if not targets:
+        msg = ("確定対象のシフトがありません。AI生成（ドラフト保存）を実行してください。"
+               if not skipped_pending
+               else f"確定できるシフトがありません。{skipped_pending}件は調整待ちのため、"
+                    "先に日別シフト表で時間を直してください。")
         return jsonify({"ok": True, "finalized": 0, "notified_staff": 0, "over_cap": 0,
-                        "message": "確定対象のシフトがありません。AI生成（ドラフト保存）を実行してください。"})
+                        "skipped_pending": skipped_pending, "message": msg})
     # 全て confirmed に変換
     finalized_staff = set()
     finalized_count = 0
@@ -2402,8 +2417,11 @@ def shop_shifts_finalize():
     msg = f"{finalized_count} 件のシフトを確定し、{len(finalized_staff)} 名のスタッフに通知しました。"
     if over_cap:
         msg += f"（うち {over_cap} 件が必要人数超過です）"
+    if skipped_pending:
+        msg += f" {skipped_pending} 件は調整待ちのため確定していません。"
     return jsonify({"ok": True, "finalized": finalized_count,
                     "notified_staff": len(finalized_staff), "over_cap": over_cap,
+                    "skipped_pending": skipped_pending,
                     "message": msg})
 
 

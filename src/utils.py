@@ -410,6 +410,26 @@ def sanitize_login_code(value):
     return value.replace("\r", "").replace("\n", "").strip()
 
 
+# エンジンが「置けなかった」希望を書き出すときの理由の末尾。
+# shift_engine の pending.append 2箇所（最低勤務時間未満／配置可能な不足枠なし）が
+# この語尾で終わる理由を付ける。これは「人が調整しないと使えない」印であって
+# シフトではないため、POST /api/shop/shifts/finalize は確定対象から外す。
+#
+# 【なぜ文言で判定するのか】pending も status='requested' で保存される。
+# status を分けると（例: 'modifying'）スタッフ向けAPI（src/app.py:515,528）が
+# これを実シフトとして返してしまい、置けなかったはずの枠がスタッフの
+# マイシフトに出る。画面側も requested を「調整待ち」として点線表示する作りに
+# なっている（public/app.js:1023-1030）ので、status ではなく理由で見分ける。
+# 文言だけ変わって判定が外れる壊れ方は
+# tests/test_finalize_skips_pending.py が両者を突き合わせて止める。
+ENGINE_PENDING_REASON_SUFFIX = "調整待ち"
+
+
+def is_engine_pending_reason(reason):
+    """エンジンが「調整待ち」として書き出した行の理由か。"""
+    return isinstance(reason, str) and reason.endswith(ENGINE_PENDING_REASON_SUFFIX)
+
+
 def parse_settings(s):
     try:
         return json.loads(s or "{}")

@@ -226,3 +226,67 @@ class TestDefaultEndFromShiftHours:
             (staff_id,))
         # shift_patterns の最遅 = "23:00" が使われる
         assert row["end_datetime"].endswith("T23:00:00")
+
+
+class TestDraftLeavesNothingConfirmed:
+    """ドラフト保存は、AIが作った行を1件も確定にしない。
+
+    店長からの指摘「ドラフト保存なのに確定シフトがある」を受けた回帰テスト。
+    実測では AI の出力（confirmed リスト・pending リスト）はすべて
+    status='requested' で保存されており、確定として残るのは店長が手で入れた
+    シフト（reason が MANUAL_REASONS）だけだった。この2つの不変を固定する。
+    """
+
+    def _setup(self):
+        shop_id = insert_shop(settings=SETTINGS)
+        insert_pattern(shop_id, "通", "09:00", "18:00", 1)
+        emp = insert_staff(shop_id, "E1", "社員", "employee", 2000)
+        pt = insert_staff(shop_id, "P1", "パート", "part_time", 1100)
+        insert_wish(shop_id, emp, MON, "09:00", "18:00")
+        # 同日重複で置けない希望 → pending（調整待ち）に回る
+        insert_wish(shop_id, pt, MON, "09:00", "13:00")
+        insert_wish(shop_id, pt, MON, "14:00", "18:00")
+        return shop_id, emp, pt
+
+    def test_draft_creates_zero_confirmed(self, client):
+        """手動シフトが無ければ、ドラフト保存後の確定は0件。"""
+        shop_id, _, _ = self._setup()
+        tok = make_session("shop", shop_id, shop_id)
+        r = client.post("/api/shop/shifts/auto", json={
+            "start_date": MON, "end_date": MON, "draft": True,
+        }, headers=auth(tok))
+        assert r.status_code == 200, r.get_json()
+        confirmed = dbmod.query_all(
+            "SELECT id, reason FROM shifts WHERE shop_id=? AND status='confirmed'", (shop_id,))
+        assert confirmed == [], f"ドラフト保存なのに確定が残っている: {confirmed}"
+
+    def test_draft_marks_pending_as_requested_too(self, client):
+        """調整待ち（置けなかった希望）も requested。確定にはしない。"""
+        shop_id, _, _ = self._setup()
+        tok = make_session("shop", shop_id, shop_id)
+        client.post("/api/shop/shifts/auto", json={
+            "start_date": MON, "end_date": MON, "draft": True,
+        }, headers=auth(tok))
+        pend = dbmod.query_all(
+            "SELECT status FROM shifts WHERE shop_id=? AND reason LIKE '%調整待ち'", (shop_id,))
+        assert pend, "この条件では調整待ちが出るはず（テストの前提が壊れている）"
+        assert all(p["status"] == "requested" for p in pend)
+
+    def test_draft_keeps_manually_added_shift_confirmed(self, client):
+        """店長が手で入れた確定シフトだけは、生成し直しても確定のまま残る。
+
+        ここを確定でなくすと、店長が自分で組んだ枠が生成のたびに消える。
+        「ドラフト保存後の確定は0件」を字義どおり適用してはいけない唯一の例外。
+        """
+        shop_id, emp, _ = self._setup()
+        dbmod.execute(
+            "INSERT INTO shifts (shop_id, staff_id, start_datetime, end_datetime, status, reason) "
+            "VALUES (?,?,?,?,?,?)",
+            (shop_id, emp, f"{MON}T20:00:00", f"{MON}T22:00:00", "confirmed", "手動追加"))
+        tok = make_session("shop", shop_id, shop_id)
+        client.post("/api/shop/shifts/auto", json={
+            "start_date": MON, "end_date": MON, "draft": True,
+        }, headers=auth(tok))
+        confirmed = dbmod.query_all(
+            "SELECT reason FROM shifts WHERE shop_id=? AND status='confirmed'", (shop_id,))
+        assert [c["reason"] for c in confirmed] == ["手動追加"]
