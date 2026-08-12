@@ -903,7 +903,10 @@ class TestWorkflow_ReasonCoverage:
     """
 
     def test_manual_reasons_is_complete_whitelist(self):
-        """MANUAL_REASONS は「本当に手動」の reason のみを含むこと。
+        """MANUAL_SHIFT_REASONS は「本当に手動」の reason のみを含むこと。
+
+        （日別リセットからも同じ定義を使うようになったため、
+        関数内ローカルの MANUAL_REASONS からモジュール定数へ移した）
 
         新しい自動生成 reason が追加されても、このリストに入っていなければ
         自動的に再生成対象（DELETE → INSERT）になる。メンテ不要。
@@ -911,8 +914,8 @@ class TestWorkflow_ReasonCoverage:
         import re
         with open("src/app.py", "r", encoding="utf-8") as f:
             src = f.read()
-        m = re.search(r"MANUAL_REASONS\s*=\s*\(([^)]+)\)", src, re.DOTALL)
-        assert m, "MANUAL_REASONS 定義が見つからない"
+        m = re.search(r"MANUAL_SHIFT_REASONS\s*=\s*\(([^)]+)\)", src, re.DOTALL)
+        assert m, "MANUAL_SHIFT_REASONS 定義が見つからない"
         defined = set(re.findall(r"'([^']*)'", m.group(1)))
 
         # 手動 reason の完全リスト
@@ -922,22 +925,22 @@ class TestWorkflow_ReasonCoverage:
             'コピー',
         }
         assert defined == expected_manual, (
-            f"MANUAL_REASONS が想定外: defined={defined} expected={expected_manual}"
+            f"MANUAL_SHIFT_REASONS が想定外: defined={defined} expected={expected_manual}"
         )
 
     def test_all_engine_reasons_are_not_manual(self):
-        """エンジン/自動生成パスの reason は MANUAL_REASONS に含まれないこと。
+        """エンジン/自動生成パスの reason は MANUAL_SHIFT_REASONS に含まれないこと。
 
         これにより、新しい reason が追加されても自動的に再生成対象になる。
         """
         import re
         with open("src/app.py", "r", encoding="utf-8") as f:
             src = f.read()
-        m = re.search(r"MANUAL_REASONS\s*=\s*\(([^)]+)\)", src, re.DOTALL)
+        m = re.search(r"MANUAL_SHIFT_REASONS\s*=\s*\(([^)]+)\)", src, re.DOTALL)
         assert m
         manual = set(re.findall(r"'([^']*)'", m.group(1)))
 
-        # エンジンが生成する reason（MANUAL_REASONS に入ってはいけない）
+        # エンジンが生成する reason（MANUAL_SHIFT_REASONS に入ってはいけない）
         engine_reasons = {
             '固定シフト', '固定シフト（候補）',
             '不足補填（社員自動配置）',

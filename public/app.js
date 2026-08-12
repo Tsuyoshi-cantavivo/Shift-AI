@@ -1631,8 +1631,13 @@ function openDayTimeline(date, allShifts, editable, onChange) {
     ? `<div class="alert alert-info py-2 mb-2 small"><i class="bi bi-info-circle"></i> この日はまだシフトがありません。赤い不足バーをクリックするか、下部の「手動追加」ボタンから登録してください。</div>`
     : '';
   // 編集モードではフッター相当の手動追加ボタンをタイムライン下に置く
+  // 「この日をやり直す」。AI生成は期間単位でしかやり直せないため、1日だけ
+  // 組み直したいときに期間ごと作り直すと他の日の調整まで巻き戻る。
   const manualAddBtn = editable
-    ? `<button class="btn btn-outline-primary btn-sm mt-2" id="tlManualAdd"><i class="bi bi-plus-lg"></i> 手動追加</button>`
+    ? `<div class="flex gap-2 mt-2 flex-wrap">
+         <button class="btn btn-outline-primary btn-sm" id="tlManualAdd"><i class="bi bi-plus-lg"></i> 手動追加</button>
+         <button class="btn btn-outline-danger btn-sm" id="tlDayReset"><i class="bi bi-arrow-counterclockwise"></i> この日をやり直す</button>
+       </div>`
     : '';
   const body =
     `<div class="tl-wrap"><div class="tl-axis-row"><div class="tl-name"></div><div class="tl-axis">${hours.join('')}</div></div>${rows}${gapRow}</div>
@@ -1654,6 +1659,33 @@ function openDayTimeline(date, allShifts, editable, onChange) {
     else if (onChange && s) onChange(s);
   }));
   installDraftTimelineDrag(w, { date, list, editable, rangeMin, rangeLen });
+  // 「この日をやり直す」→ その日のシフトを全部消す。手で入れた確定も消えるので、
+  // 何がいくつ消えるかを先に見せてから確認する（件数だけでは判断できない）。
+  w.querySelector('#tlDayReset')?.addEventListener('click', async () => {
+    let sum;
+    try {
+      sum = await api(`/shop/shifts/day-summary?date=${date}`);
+    } catch (e) { toast(e.message, 'error'); return; }
+    if (!sum.total) { toast('この日に消すシフトはありません', 'info'); return; }
+    const lines = [
+      sum.manual ? `・店長が手で入れた確定シフト ${sum.manual}件` : '',
+      sum.drafts ? `・AIドラフト ${sum.drafts}件` : '',
+      sum.pending ? `・調整待ち ${sum.pending}件` : '',
+      sum.other ? `・その他（スタッフ希望など） ${sum.other}件` : '',
+    ].filter(Boolean).join('\n');
+    const warn = sum.manual ? '\n\n※手で入れた確定シフトも消えます。' : '';
+    if (!confirm(`${date} のシフト ${sum.total}件を削除してやり直しますか？\n\n${lines}${warn}\n\nスタッフが出した希望そのものは残るので、AI生成でまた組めます。`)) return;
+    setLoading(true, 'この日をやり直しています...');
+    try {
+      const r = await api('/shop/shifts/reset-day', { method: 'POST', body: JSON.stringify({ date }) });
+      setLoading(false);
+      w.remove();
+      toast(r.message || `${date} をやり直せる状態にしました`, 'success');
+      // 工程バー・不足コマ・集計・カレンダーをまとめて引き直す。
+      // シフト編集/削除の既存経路（showEditModal）と同じ作法に揃える。
+      navigateTo('shifts');
+    } catch (e) { setLoading(false); toast(e.message, 'error'); }
+  });
   // 手動追加ボタン → スタッフを選んで時間自由入力で新規シフト
   if (editable) {
     w.querySelector('#tlManualAdd')?.addEventListener('click', async () => {

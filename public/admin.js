@@ -476,6 +476,7 @@ function renderShopDangerTab(body, shop) {
 
 const AUDIT_ACTION_LABELS = {
   'shift.finalize': 'シフト確定',
+  'shift.reset_day': '1日分をやり直し',
   'creq.approve': '変更申請 承認',
   'creq.reject': '変更申請 却下',
   'staff.role_change': 'ロール変更',

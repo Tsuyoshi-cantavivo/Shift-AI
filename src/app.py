@@ -1060,6 +1060,17 @@ def me():
 # ===========================================================
 # 店舗
 # ===========================================================
+# 店長が自分の手で入れた確定シフトの理由。AI生成はこれらを消さずに残し
+# （生成し直しても手作業が巻き戻らないようにするため）、
+# 日別リセットは逆にこれらも消す（手で組んだものごとやり直すための逃げ道）。
+# 2箇所で同じ定義を持つと片方だけ増えて食い違うので、ここに1つだけ置く。
+MANUAL_SHIFT_REASONS = (
+    '手動追加', '手動調整',
+    '変更申請承認', '追加申請承認',
+    'コピー',
+)
+
+
 def _shop_ctx():
     require_auth(["shop"])
     return g.user, g.user["id"], parse_settings(g.user.get("settings"))
@@ -2289,16 +2300,11 @@ def shop_shifts_auto():
     #    なる（過去3回発生：'自動調整(統合)'漏れ、'固定シフト（社員・候補）'漏れ等）。
     #    ブラックリスト方式に転換：明示的に「手動」の reason のみ保持し、
     #    それ以外（エンジン/自動調整/社員候補/希望/wish等）はすべて再生成対象。
-    MANUAL_REASONS = (
-        '手動追加', '手動調整',
-        '変更申請承認', '追加申請承認',
-        'コピー',
-    )
     manual_confirmed = query_all(
         "SELECT staff_id, start_datetime, end_datetime, break_time_minutes, reason FROM shifts "
         "WHERE shop_id=? AND status='confirmed' AND start_datetime>=? AND start_datetime<=? "
-        "AND reason IN ({})".format(",".join(["?"] * len(MANUAL_REASONS))),
-        (shop_id, start_d + "T00:00:00", end_d + "T23:59:59", *MANUAL_REASONS))
+        "AND reason IN ({})".format(",".join(["?"] * len(MANUAL_SHIFT_REASONS))),
+        (shop_id, start_d + "T00:00:00", end_d + "T23:59:59", *MANUAL_SHIFT_REASONS))
     # ★【生成前クリア】ドラフト・即確定いずれも、期間内の confirmed(手動除く)/
     # modifying/requested を全削除してから配置し直す。
     #
@@ -2941,6 +2947,76 @@ def shop_shifts_del(sid):
     shop, shop_id, _ = _shop_ctx()
     execute("DELETE FROM shifts WHERE id=? AND shop_id=?", (sid, shop_id))
     return jsonify({"ok": True})
+
+
+@app.get("/api/shop/shifts/day-summary")
+def shop_shifts_day_summary():
+    """1日分のシフトの内訳を返す。リセット前に「何が消えるか」を見せるために使う。
+
+    確定・AIドラフト・調整待ち・スタッフ希望を数え分ける。件数だけ出しても
+    店長は自分が手で組んだ枠が消えるのか判断できないため、種類ごとに返す。
+    """
+    shop, shop_id, _ = _shop_ctx()
+    # validate_date_field は未指定を素通しして default(None) を返すので、
+    # 必須であることは呼び出し側で明示する（None のまま SQL に渡すと 500 になる）。
+    date = validate_date_field(request.args.get("date"), "date")
+    if not date:
+        abort(400, description="date が必要です")
+    rows = query_all(
+        "SELECT status, reason FROM shifts WHERE shop_id=? AND start_datetime>=? AND start_datetime<=?",
+        (shop_id, date + "T00:00:00", date + "T23:59:59"))
+    return jsonify({"date": date, "total": len(rows), **_classify_day_shifts(rows)})
+
+
+def _classify_day_shifts(rows):
+    """1日分のシフト行を、店長が判断できる4種類に数え分ける。"""
+    manual = drafts = pending = other = 0
+    for r in rows:
+        reason = r["reason"] or ""
+        if r["status"] == "confirmed" and reason in MANUAL_SHIFT_REASONS:
+            manual += 1
+        elif reason.startswith("AIドラフト"):
+            drafts += 1
+        elif is_engine_pending_reason(reason):
+            pending += 1
+        else:
+            other += 1
+    return {"manual": manual, "drafts": drafts, "pending": pending, "other": other}
+
+
+@app.post("/api/shop/shifts/reset-day")
+def shop_shifts_reset_day():
+    """指定した1日のシフトを全部消して、その日をやり直せるようにする。
+
+    【なぜ日単位か】AI生成は期間単位でしかやり直せず、1日だけ組み直したいときに
+    期間ごと作り直すと、他の日で手を入れた調整まで巻き戻る。
+
+    【何を消すか】その日に始まるシフトを全部（確定・AIドラフト・調整待ち・
+    スタッフ希望）。店長が手で入れた確定シフトも消す——このボタンは
+    「手で組んだものも含めてやり直す」ための逃げ道であり、それを残すと
+    やり直しにならない。消える内訳は day-summary で事前に見せる。
+
+    【スタッフの希望は失われない】希望は wish_history（永久履歴）に残るので、
+    shifts 側を消しても希望表管理からは消えないし、再生成の入力にも使われる。
+    """
+    shop, shop_id, _ = _shop_ctx()
+    body = request.get_json(silent=True) or {}
+    date = validate_date_field(body.get("date"), "date")
+    if not date:
+        abort(400, description="date が必要です")
+    rows = query_all(
+        "SELECT status, reason FROM shifts WHERE shop_id=? AND start_datetime>=? AND start_datetime<=?",
+        (shop_id, date + "T00:00:00", date + "T23:59:59"))
+    if not rows:
+        return jsonify({"ok": True, "deleted": 0, "message": f"{date} に消すシフトはありませんでした。"})
+    breakdown = _classify_day_shifts(rows)
+    execute("DELETE FROM shifts WHERE shop_id=? AND start_datetime>=? AND start_datetime<=?",
+            (shop_id, date + "T00:00:00", date + "T23:59:59"))
+    audit("shift.reset_day", target_type="shop", target_id=shop_id, shop_id=shop_id,
+          detail=f"{date} deleted={len(rows)} " +
+                 " ".join(f"{k}={v}" for k, v in breakdown.items()))
+    return jsonify({"ok": True, "deleted": len(rows), **breakdown,
+                    "message": f"{date} のシフト {len(rows)}件を削除しました。"})
 
 
 # --- 集計 / 不足 / CSV ---
