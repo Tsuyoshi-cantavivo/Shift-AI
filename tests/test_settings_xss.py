@@ -9,7 +9,7 @@
 
 再レビューで、代理閲覧（admin セッションが店舗スコープの GET に対して
 role="shop" に化ける）経由で同じ問題が public/app.js 側の2箇所
-（AIシフト作成の条件表示・一般店舗ユーザー向け設定画面）にも実在することが
+（AI生成プレビューの条件表示・一般店舗ユーザー向け設定画面）にも実在することが
 実証された。管理者が対象店舗を代理閲覧するだけで発火するため、これも同じ
 権限境界越え。両ファイルとも修正・回帰テストの対象にしている。
 
@@ -127,7 +127,8 @@ class TestSettingsTabRenderEscaping:
 
 
 # ---- 再レビュー指摘: public/app.js 側の2箇所（代理閲覧経由で権限境界を跨ぐ） ----
-# app.js:1939 相当（AIシフト作成画面の「AIに考慮させる条件」表示・テキストコンテキスト）
+# genConditionsHtml()（AI生成プレビュー内「AIが見た条件」・テキストコンテキスト）
+#   旧「AIシフト作成」画面から移設。画面は廃止したが描画そのものは残っている。
 # app.js:4165 相当（renderShopTab、一般店舗ユーザー向け設定画面・属性値コンテキスト）
 # いずれも代理閲覧中に管理者のブラウザで別テナントの settings を描画するため、
 # 「新規保存はサーバ側で型を締めた」だけでは防げない（既存の汚染データが残っている限り）。
@@ -135,7 +136,7 @@ def _extract_gen_condition_night_rate_template():
     m = re.search(
         r'<div class="gen-condition"><span class="gen-condition-label">深夜割増率</span>.*?</div>',
         APP_JS)
-    assert m, "AIシフト作成の深夜割増率テンプレートが見つかりません（app.js の構造が変わった？）"
+    assert m, "AIが見た条件の深夜割増率テンプレートが見つかりません（app.js の構造が変わった？）"
     tpl = m.group(0)
     assert "s.night_premium_rate" in tpl, "テンプレートの形が想定と異なります"
     return tpl
@@ -194,7 +195,8 @@ process.stdout.write(html);
 
 
 class TestGenConditionsRenderEscaping:
-    """public/app.js の AIシフト作成画面「AIに考慮させる条件」表示（テキストコンテキスト）。
+    """public/app.js の genConditionsHtml()「AIが見た条件」表示（テキストコンテキスト）。
+    AI生成プレビューのモーダル内に折りたたみで出る（旧「AIシフト作成」画面から移設）。
     代理閲覧中に管理者のブラウザで顧客settingsを描画する箇所の1つ。"""
 
     def test_malicious_string_value_is_escaped_in_rendered_html(self):
@@ -602,10 +604,9 @@ class TestPatternRequiredStaffRenderEscaping:
 
 
 class TestPeriodDateRenderEscaping:
-    def test_generate_tab_start_date_is_escaped(self):
-        tpl = _grab(APP_JS, r'<input type="date"  id="genStart"[^>]*>', "app.js AI作成の開始日")
-        html = _render(tpl, {"p": {"start_date": ATTR_ESCAPE_PAYLOAD}})
-        _assert_attribute_is_not_escapable(html)
+    # 旧「AIシフト作成」画面の #genStart を守るテストがここにあったが、同画面は
+    # シフト画面の AI生成と同じ処理をページで焼き直していただけなので廃止した。
+    # 期間の日付入力はシフト画面の #sStart 一箇所だけになり、下の2件が守る。
 
     def test_shifts_tab_start_date_is_escaped(self):
         tpl = _grab(APP_JS, r'<input type="date" id="sStart"[^>]*>', "app.js シフト管理の開始日")

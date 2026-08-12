@@ -40,10 +40,19 @@ def test_inline_ai_generation_saves_draft_for_timeline_adjustment():
 
 
 def test_shift_generation_flow_has_one_explicit_publish_action():
+    """スタッフに公開する経路は finalizeDraftBtn の1本だけ、という不変。
+
+    ボタンの文字は工程バー化で「ドラフトを確定・通知」→「確定」（STEP 4）に
+    短くなったが、通知が飛ぶことを店長に伝える責任は confirm の文面が負う。
+    店長のみ運用ではそこから通知の話が落ちるので、スタッフ運用側の文面で
+    「1本しかない公開経路」を固定する。
+    id 属性は SHIFT_STEPS から組み立てるようになったので、定義と参照の両方を見る。
+    """
     source = (ROOT / "public" / "app.js").read_text(encoding="utf-8")
 
-    assert 'id="finalizeDraftBtn"' in source
-    assert "ドラフトを確定・通知" in source
+    assert "btnId: 'finalizeDraftBtn'" in source
+    assert "document.getElementById('finalizeDraftBtn')" in source
+    assert "全スタッフに通知しますか" in source
     assert 'id="autoConfirmBtn"' not in source
     assert "document.getElementById('autoConfirmBtn')" not in source
     assert "今すぐ確定・通知" not in source

@@ -42,9 +42,11 @@ async function openDashboard(page) {
   await loginAsManager(page, {
     shopCode: SHOP.shopCode, managerCode: SHOP.managerCode, password: SHOP.managerPassword,
   });
-  // ログイン直後がダッシュボード。右カラムの描画完了を「AIからの提案」で待つ。
+  // ログイン直後がダッシュボード。右カラムの描画完了を待つ。
+  // 旧「AIからの提案」カードは「AIアシスタント」に統合され、review の助言は
+  // チャットの1通目になった。目印もそちらへ移す。
   await page.waitForSelector('#dashRight', { timeout: 15000 });
-  await expect(page.locator('#dashRight')).toContainText('AIからの提案', { timeout: 15000 });
+  await expect(page.locator('#dashRight')).toContainText('AIアシスタント', { timeout: 15000 });
 }
 
 test.describe('ダッシュボード: 気にかけたい人', () => {

@@ -32,7 +32,7 @@ from utils import (
     night_minutes, validate_password, parse_settings, build_ics, parse_iso, normalize_iso,
     norm_hhmm, norm_dt_iso, add_days, build_staff_tendency, combine_dt_overnight,
     sanitize_login_code, LOGIN_CODE_MAX, validate_known_settings_values,
-    validate_numeric_field, validate_date_field,
+    validate_numeric_field, validate_date_field, operation_mode_of,
 )
 import shift_engine
 import ai
@@ -1027,12 +1027,19 @@ def me():
         # 代理閲覧中かどうかをフロントに伝える（警告バーとナビ切替に使う）。
         # require_auth が読んだ sessions 行を g.session で使い回し、再取得しない。
         acting = (getattr(g, "session", None) or {}).get("acting_shop_id")
-        shop = query_one("SELECT id, shop_name FROM shops WHERE id=?", (acting,)) if acting else None
+        shop = query_one("SELECT id, shop_name, settings FROM shops WHERE id=?", (acting,)) if acting else None
         result["impersonating"] = ({"shop_id": shop["id"], "shop_name": shop["shop_name"]}
                                    if shop else None)
+        # 代理閲覧中は店舗のナビを出す（フロントの effectiveRole()）ので、
+        # 店長が実際に見ている項目数を再現できるよう運用モードも返す。
+        if shop:
+            result["operation_mode"] = operation_mode_of(parse_settings(shop["settings"]))
     # shop ロールの場合は manager ロールかどうか、staff 情報も併せて返す
     # （UI で「店舗管理者」vs「旧仕様店主」を正確に区別するため）
     if role == "shop":
+        # 運用モードはナビの項目数を決めるので、/api/shop/settings を待たせず
+        # ここで返す（showApp() が renderNav() の前に待つのはこの1本だけにしたい）。
+        result["operation_mode"] = operation_mode_of(parse_settings(user.get("settings")))
         try:
             staff = _resolve_my_staff()
         except Exception:
