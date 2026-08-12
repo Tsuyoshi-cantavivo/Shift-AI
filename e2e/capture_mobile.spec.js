@@ -161,11 +161,11 @@ test.describe('スマホ版 操作説明書キャプチャ', () => {
     await login(page, SHOP.managerCode, SHOP.managerPassword);
     await shot(page, 'm01-dashboard');
 
+    // シフト画面は上部の工程バー（①希望→②AI生成→③調整→④確定）が要。
+    // 旧「AIシフト作成」画面は廃止したので、その枚数はここに寄せる。
     await goScreen(page, 'shifts');
+    await page.waitForSelector('#stepGrid', { timeout: 5000 }).catch(() => {});
     await shot(page, 'm02-shifts');
-
-    await goScreen(page, 'aiGenerate');
-    await shot(page, 'm03-ai-generate');
 
     await goScreen(page, 'staffs');
     await shot(page, 'm04-staffs');

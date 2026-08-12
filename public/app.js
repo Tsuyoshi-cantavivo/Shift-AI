@@ -10,7 +10,16 @@ let currentUser = null;
 let currentRole = null;
 let currentScreen = null;
 let chartInstances = {};
-const appState = { period: null, businessHours: null, patterns: null, printPayload: null }; // 全画面で共有する期間状態・営業時間・パターン・印刷内容
+// 全画面で共有する期間状態・営業時間・パターン・印刷内容・運用モード。
+// operationMode は 'staff'（既定）か 'manager_only'。/api/me が返す値をそのまま持つ。
+// スタッフがログインしない店舗では、スタッフの操作を前提にした画面
+// （マイシフト・希望、通知、変更申請、募集期間）を出さないために使う。
+const appState = { period: null, businessHours: null, patterns: null, printPayload: null, operationMode: 'staff' };
+
+/* 店長だけがアプリを使う運用か。effectiveRole() が 'shop' のときだけ意味を持つ。 */
+function isManagerOnly() {
+  return effectiveRole() === 'shop' && appState.operationMode === 'manager_only';
+}
 
 // ============================================================
 // グローバルエラー捕捉：同期エラー・Promise未捕捉rejectの両方を
@@ -363,22 +372,33 @@ function showLogin() {
   document.getElementById('appView')?.classList.add('d-none');
 }
 
-// 起動時・ログイン時に /api/me を叩いて正確な権限情報を取得
-async function refreshMyStaffInfo() {
-  if (!authToken) { window._myStaffInfo = null; return; }
-  try {
-    const d = await api('/me');
-    window._myStaffInfo = d.staff_info || null;
-    setActiveNav();
-  } catch { window._myStaffInfo = null; }
+/* /api/me のレスポンスをアプリ状態へ反映する。bootstrap() は既に /me を
+   取得済みなので、二度目を叩かずこれを直接呼べるよう分けてある。 */
+function applyMyInfo(d) {
+  window._myStaffInfo = d.staff_info || null;
+  // 未設定・未知の値は既定に倒す（サーバ側 operation_mode_of と同じ方針）。
+  // 代理閲覧中は admin ロールでも対象店舗のモードが返る。
+  appState.operationMode = d.operation_mode === 'manager_only' ? 'manager_only' : 'staff';
 }
 
-function showApp() {
+// 起動時・ログイン時に /api/me を叩いて正確な権限情報を取得
+async function refreshMyStaffInfo() {
+  if (!authToken) { window._myStaffInfo = null; appState.operationMode = 'staff'; return; }
+  try {
+    const d = await api('/me');
+    applyMyInfo(d);
+    setActiveNav();
+  } catch { window._myStaffInfo = null; appState.operationMode = 'staff'; }
+}
+
+async function showApp(me) {
   document.getElementById('loginView')?.classList.add('d-none');
   document.getElementById('appView')?.classList.remove('d-none');
+  // ナビの項目数は運用モードで変わる（isManagerOnly）。先に確定させないと
+  // 8項目のナビが一瞬出てから6項目に縮む。bootstrap() は /api/me を
+  // 取得済みなのでそれを渡してもらい、ログイン直後だけ1本待つ。
+  if (me) applyMyInfo(me); else await refreshMyStaffInfo();
   renderNav();
-  // 自分の権限情報を正確に取得（非同期・画面遷移は待たない）
-  refreshMyStaffInfo();
   // 店舗の場合（代理閲覧中も含む）は期間・営業時間を事前取得してから画面へ
   if (effectiveRole() === 'shop') {
     Promise.all([ensurePeriod(), ensureBusinessHours()]).then(() => navigateTo(defaultScreen()));
@@ -421,7 +441,9 @@ document.getElementById('loginBtn')?.addEventListener('click', async () => {
     window._shopChat = null;
     window._shiftCalCtrl = null;
     localStorage.setItem('shift_token', authToken);
-    showApp();
+    // /api/login は運用モードを返さないので showApp() の中で /api/me を1本待つ。
+    // ここで await しないと、ローディングが消えた後にナビが縮んで見える。
+    await showApp();
   } catch (e) { errEl.textContent = e.message; }
   finally { setLoading(false); }
 });
@@ -554,7 +576,8 @@ async function stopImpersonation() {
       window._miniChat = null;
       window._shopChat = null;
       window._shiftCalCtrl = null;
-      showApp();
+      // data は /api/me のレスポンスそのもの。showApp() に渡して二度目の往復を省く。
+      showApp(data);
     }
     catch { logoutLocal(); }
   }
@@ -655,15 +678,17 @@ function openNotifications() {
    Navigation
    ============================================================ */
 const NAV_DEFS = {
+  // 'AIシフト作成' はシフト画面の AI生成（runShiftGenInline）と同じ処理を
+  // ページで焼き直していただけなので廃止した。AIアシスタントはダッシュボードへ移した。
   shop: [
     { key: 'dashboard', icon: 'bi-grid-1x2', label: 'ダッシュボード', mobile: true },
     { key: 'shifts', icon: 'bi-calendar3', label: 'シフト', mobile: true },
-    { key: 'aiGenerate', icon: 'bi-stars', label: 'AIシフト作成', mobile: true, ai: true },
     { key: 'staffs', icon: 'bi-people', label: 'スタッフ管理', mobile: true },
-    { key: 'myshift', icon: 'bi-calendar2-check', label: 'マイシフト・希望' },
+    // 店長のみ運用では出さない（スタッフが自分で操作する前提の画面のため）
+    { key: 'myshift', icon: 'bi-calendar2-check', label: 'マイシフト・希望', staffMode: true },
     { key: 'requests', icon: 'bi-inbox', label: '希望表管理' },
     { key: 'analytics', icon: 'bi-graph-up-arrow', label: '人件費分析' },
-    { key: 'notifications', icon: 'bi-bell', label: '通知' },
+    { key: 'notifications', icon: 'bi-bell', label: '通知', staffMode: true },
     { key: 'settings', icon: 'bi-gear', label: '設定', mobile: true },
   ],
   staff: [
@@ -680,9 +705,19 @@ const NAV_DEFS = {
   ],
 };
 
-function renderNav() {
+/* 現在の権限と運用モードで実際に出すナビ項目。
+   店長のみ運用では、スタッフが自分で操作する前提の項目（staffMode 印）を落とす。
+   通知はナビから消えるが、ヘッダーのベル（#notifBtn）が refreshNotifBadge() で
+   常に表に出ているので、システム管理者からの一斉通知はそちらで読める。 */
+function navDefsFor() {
   // 代理閲覧中は店舗のナビを出す。管理者に戻るのは警告バーのボタンから。
   const defs = NAV_DEFS[effectiveRole()] || [];
+  if (!isManagerOnly()) return defs;
+  return defs.filter((d) => !d.staffMode);
+}
+
+function renderNav() {
+  const defs = navDefsFor();
   // Sidebar (PC)
   const side = document.getElementById('sideNav');
   side.innerHTML = `
@@ -704,15 +739,17 @@ function renderNav() {
   const bn = document.getElementById('bottomNav');
   bn.innerHTML = mobileDefs.map((it) => `
     <button class="bn-item" data-screen="${it.key}">
-      <i class="bi ${it.icon}"></i><span>${it.label.replace('AIシフト作成', 'AI作成').replace('ダッシュボード', 'ホーム')}</span>
+      <i class="bi ${it.icon}"></i><span>${it.label.replace('ダッシュボード', 'ホーム')}</span>
     </button>`).join('');
   bn.querySelectorAll('.bn-item').forEach((b) => b?.addEventListener('click', () => navigateTo(b.dataset.screen)));
 }
 
 function setActiveNav() {
   document.querySelectorAll('.side-item, .bn-item').forEach((b) => b.classList.toggle('active', b.dataset.screen === currentScreen));
-  // renderNav() と同じ effectiveRole() を使う（代理閲覧中は店舗画面のキーで画面タイトルを引く）
-  const defs = NAV_DEFS[effectiveRole()] || [];
+  // renderNav() と同じ定義を引く（代理閲覧中は店舗画面のキーで画面タイトルを引く）。
+  // 店長のみ運用で落とした項目に直接 navigateTo された場合はタイトルが
+  // 'ShiftAI' になるだけで、画面自体は開ける（導線が無いだけの扱い）。
+  const defs = navDefsFor();
   const label = defs.find((i) => i.key === currentScreen)?.label || 'ShiftAI';
   const titleEl = document.getElementById('headerTitle');
   if (titleEl) {
@@ -1897,14 +1934,18 @@ async function openChangeRequests() {
   finally { setLoading(false); }
 }
 
+/* 不足コマを box に描き、その要約を返す。
+   戻り値: { status: 'idle' | 'stale' | 'no-patterns' | 'ok' | 'error', gapCount?: number }
+   シフト画面の工程バー（③調整する）が同じ数字を再計算せずに使うため、
+   描くだけでなく結果も返す。 */
 async function loadShortage(box, start, end) {
-  if (!box || !box.isConnected) return;
-  if (!start || !end) { box.innerHTML = '<div class="text-muted small">期間を指定してください</div>'; return; }
+  if (!box || !box.isConnected) return { status: 'stale' };
+  if (!start || !end) { box.innerHTML = '<div class="text-muted small">期間を指定してください</div>'; return { status: 'idle' }; }
   const tok = navToken();
   try {
     // 時間帯単位の不足を計算（「夜(17:00)」のような区分単位ではなく）
     await ensureBusinessHours();
-    if (!isAlive(tok) || !box.isConnected) return;
+    if (!isAlive(tok) || !box.isConnected) return { status: 'stale' };
     // 時間帯（shift_patterns）が1件も無いと _computeHourlyGaps は常に空配列を
     // 返すため、以降の判定を素通りすると常に「不足なし」の表示になってしまう。
     // 新規店舗は時間帯もシフトもゼロ件で始まるため、店長が最初に見る画面が
@@ -1916,10 +1957,10 @@ async function loadShortage(box, start, end) {
         <button class="btn btn-sm btn-light mt-2" id="shortageGoSettings">設定を開く</button>
       </div>`;
       box.querySelector('#shortageGoSettings')?.addEventListener('click', () => navigateTo('settings'));
-      return;
+      return { status: 'no-patterns' };
     }
     const sd = await api(`/shop/shifts?start=${start}&end=${end}`);
-    if (!isAlive(tok) || !box.isConnected) return;
+    if (!isAlive(tok) || !box.isConnected) return { status: 'stale' };
     const allShifts = sd.shifts || [];
     const byDay = {};
     allShifts.forEach((s) => {
@@ -1957,15 +1998,17 @@ async function loadShortage(box, start, end) {
         });
       });
     }
-    if (!isAlive(tok) || !box.isConnected) return;
+    if (!isAlive(tok) || !box.isConnected) return { status: 'stale' };
     if (!chips.length) {
       box.innerHTML = '<div class="shortage-none"><i class="bi bi-check-circle"></i> 不足なし — 全時間帯充足</div>';
     } else {
       box.innerHTML = chips.join('');
     }
+    return { status: 'ok', gapCount: chips.length };
   } catch (e) {
-    if (!isAlive(tok) || !box.isConnected) return;
+    if (!isAlive(tok) || !box.isConnected) return { status: 'stale' };
     box.innerHTML = `<div class="text-danger small">${esc(e.message)}</div>`;
+    return { status: 'error' };
   }
 }
 
@@ -2072,10 +2115,14 @@ SCREENS.dashboard = async function (el) {
       options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { ticks: { color: cssVar('--ink-3'), callback: (v) => '¥' + (v / 1000) + 'K' }, grid: { color: cssVar('--rule') } }, x: { ticks: { color: cssVar('--ink-3'), maxTicksLimit: 8 }, grid: { display: false } } } }
     });
 
-    // Right: AI suggestion + notifications + quick actions
+    // Right: AIアシスタント + notifications + quick actions
     const rightBox = document.getElementById('dashRight');
-    let aiAdvice = 'シフトデータを分析中...';
-    try { const rev = await api('/shop/ai/review', { method: 'POST', body: JSON.stringify({ start: todayStr().slice(0, 8) + '01', end: todayStr().slice(0, 8) + '31' }) }); aiAdvice = rev.advice; } catch {}
+    // /shop/ai/review の助言はカードに読み物として出すのではなく、AIアシスタントの
+    // 1通目の発言として使う（開いた瞬間から中身のある話で始められる）。
+    // 取得に失敗したら seed 無しで描く。renderShopChat 側が代わりの入口を出すので、
+    // 以前のように「シフトデータを分析中...」の文字列で固まることはない。
+    let aiAdvice = '';
+    try { const rev = await api('/shop/ai/review', { method: 'POST', body: JSON.stringify({ start: todayStr().slice(0, 8) + '01', end: todayStr().slice(0, 8) + '31' }) }); aiAdvice = rev.advice || ''; } catch {}
     // 気にかけたい人（働き方の変化）。該当者がいるときだけカードを出す。
     // 毎回何か出ると見流されるので、出ること自体に意味を持たせる。
     let attention = [];
@@ -2084,28 +2131,33 @@ SCREENS.dashboard = async function (el) {
       attention = at.items || [];
     } catch { /* 取得できなくてもダッシュボードの他は出す */ }
     if (!isAlive(tok) || !el.isConnected) return;
+    // 変更申請はスタッフが出すものなので、店長のみ運用では導線ごと出さない。
+    const creqBtn = isManagerOnly() ? ''
+      : `<button class="btn btn-light w-full mt-2" id="qCreq"><i class="bi bi-clipboard-check"></i> 変更申請を確認 <span id="qCreqBadge"></span></button>`;
     if (rightBox) rightBox.innerHTML =
       _dashAttentionCard(attention) +
-      card(sectionTitle('bi-stars', 'AIからの提案', badge('AI', 'ai')) + `<div class="reason-text" style="font-size:.88rem;line-height:1.7;white-space:pre-wrap">${esc(aiAdvice)}</div>`) +
+      card(sectionTitle('bi-stars', 'AIアシスタント', badge('AI', 'ai')) + `<div id="dashChat"></div>`) +
       card(sectionTitle('bi-lightning', 'クイック操作') +
-        `<button class="btn btn-ai w-full mb-2" id="qGen"><i class="bi bi-stars"></i> AIでシフト作成</button>
-         <button class="btn btn-light w-full mb-2" id="qShifts"><i class="bi bi-calendar3"></i> シフト画面へ</button>
-         <button class="btn btn-light w-full" id="qCreq"><i class="bi bi-clipboard-check"></i> 変更申請を確認 <span id="qCreqBadge"></span></button>`) +
+        `<button class="btn btn-ai w-full" id="qShifts"><i class="bi bi-calendar3"></i> シフトを作る</button>${creqBtn}`) +
       card(sectionTitle('bi-bell', '最近の通知') + `<div id="dashNotif"><div class="text-secondary small">読み込み中...</div></div>`);
 
-    document.getElementById('qGen')?.addEventListener('click', () => navigateTo('aiGenerate'));
+    const chatBox = document.getElementById('dashChat');
+    if (chatBox) renderShopChat(chatBox, { seed: aiAdvice, compact: true });
+
     document.getElementById('qShifts')?.addEventListener('click', () => navigateTo('shifts'));
     document.getElementById('qCreq')?.addEventListener('click', () => openChangeRequests());
 
-    // 変更申請の保留件数バッジ
-    try {
-      const cr = await api('/shop/change-requests');
-      if (isAlive(tok) && el.isConnected) {
-        const pending = (cr.change_requests || []).filter((x) => x.status === 'pending').length;
-        const badgeEl = document.getElementById('qCreqBadge');
-        if (badgeEl && pending > 0) badgeEl.innerHTML = badge(`${pending}件保留`, 'warning');
-      }
-    } catch {}
+    // 変更申請の保留件数バッジ（店長のみ運用ではボタンごと無いので叩かない）
+    if (!isManagerOnly()) {
+      try {
+        const cr = await api('/shop/change-requests');
+        if (isAlive(tok) && el.isConnected) {
+          const pending = (cr.change_requests || []).filter((x) => x.status === 'pending').length;
+          const badgeEl = document.getElementById('qCreqBadge');
+          if (badgeEl && pending > 0) badgeEl.innerHTML = badge(`${pending}件保留`, 'warning');
+        }
+      } catch {}
+    }
 
     // Notifications
     try {
@@ -2120,92 +2172,75 @@ SCREENS.dashboard = async function (el) {
   }
 };
 
-/* ---------- AI Shift Generator + Chat (中心機能) ---------- */
-let aiTab = 'generate';
-SCREENS.aiGenerate = async function (el) {
-  const p = appState.period || await ensurePeriod();
-  el.innerHTML = pageHead('AI', 'bi-stars', 'シフト自動作成とAIアシスタント') +
-    `<div class="tabs no-print">
-      <button class="tab ${aiTab==='generate'?'active':''}" data-tab="generate"><i class="bi bi-magic"></i> シフト作成</button>
-      <button class="tab ${aiTab==='chat'?'active':''}" data-tab="chat"><i class="bi bi-chat-dots"></i> AIアシスタント</button>
-    </div>
-    <div id="aiTabBody"></div>`;
-  const renderAiTab = () => {
-    el.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === aiTab));
-    if (aiTab === 'generate') renderGenerateTab(el.querySelector('#aiTabBody'), p);
-    else renderShopChatTab(el.querySelector('#aiTabBody'));
-  };
-  el.querySelectorAll('.tab').forEach((t) => t?.addEventListener('click', () => { aiTab = t.dataset.tab; renderAiTab(); }));
-  renderAiTab();
-};
-
-function renderGenerateTab(body, p) {
-  body.innerHTML =
-    card(sectionTitle('bi-calendar-range', '作成期間') +
-      `<div class="row">
-        <div class="col-6"><label class="form-label" for="genStart">開始日</label><input type="date"  id="genStart" class="form-control" value="${esc(p.start_date)}"></div>
-        <div class="col-6"><label class="form-label" for="genEnd">終了日</label><input type="date"  id="genEnd" class="form-control" value="${esc(p.end_date)}"></div>
-      </div>`) +
-    `<div id="genConditions"></div>` +
-    card(`<div class="text-center" style="padding:8px 0">
-        <button class="btn btn-ai btn-lg" style="min-width:280px;font-size:1.1rem" id="genBtn">
-          <i class="bi bi-stars"></i> AIでシフト作成
-        </button>
-        <div class="small text-muted mt-2">希望休・勤務条件・必要人数を考慮して最適化します</div>
-      </div>`) +
-    `<div id="genResult"></div>`;
-
-  // Load conditions summary
-  api('/shop/staffs').then(async (staffsD) => {
-    const [patsD, settingsD] = await Promise.all([api('/shop/patterns'), api('/shop/settings')]);
-    const active = (staffsD.staffs || []).filter((s) => !s.is_resigned);
-    const s = settingsD.settings || {};
-    // s.xxx（下の gen-condition-value）は shops.settings 由来。サーバ側の型検証
-    // （utils.validate_known_settings_values）は新規保存にしか効かず、代理閲覧中は
-    // このコードが別テナントのデータを管理者のブラウザで描画し得るため、
-    // 描画側でも esc() を通す（保存型XSS対策の多層防御）。
-    // シフト時間設定から代表的な時間帯を表示（bulk_mode優先、無ければ月-金の平均）
-    let shiftHoursLabel = '未設定';
-    try {
-      const sh = await api('/shop/shift-hours');
-      if (sh.bulk_mode) {
-        const b = sh.bulk || {};
-        shiftHoursLabel = b.is_closed ? '定休（一括）' : `${b.start_time || '?'}-${b.end_time || '?'}`;
-      } else {
-        const mon = (sh.days || {})['1'] || {};
-        shiftHoursLabel = mon.is_closed ? '月曜定休' : `${mon.start_time || '?'}-${mon.end_time || '?'}`;
-      }
-    } catch {}
-    document.getElementById('genConditions').innerHTML =
-      card(sectionTitle('bi-clipboard-data', 'AIに考慮させる条件') +
-        `<div class="gen-condition"><span class="gen-condition-label">稼働スタッフ</span><span class="gen-condition-value">${active.length}名</span></div>
+/* ---------- AIが見ている条件 ----------
+   旧「AIシフト作成」画面（SCREENS.aiGenerate）にしか無かった情報。
+   同画面はシフト画面の AI生成（runShiftGenInline）と同じ処理をページで
+   焼き直していただけなので廃止したが、「AIが何を見て組んだか」は捨てずに
+   AI生成プレビューのモーダルへ折りたたみで移した。 */
+async function genConditionsHtml() {
+  const [staffsD, patsD, settingsD] = await Promise.all([
+    api('/shop/staffs'), api('/shop/patterns'), api('/shop/settings'),
+  ]);
+  const active = (staffsD.staffs || []).filter((s) => !s.is_resigned);
+  const s = settingsD.settings || {};
+  // s.xxx（下の gen-condition-value）は shops.settings 由来。サーバ側の型検証
+  // （utils.validate_known_settings_values）は新規保存にしか効かず、代理閲覧中は
+  // このコードが別テナントのデータを管理者のブラウザで描画し得るため、
+  // 描画側でも esc() を通す（保存型XSS対策の多層防御）。
+  // シフト時間設定から代表的な時間帯を表示（bulk_mode優先、無ければ月曜）
+  let shiftHoursLabel = '未設定';
+  try {
+    const sh = await api('/shop/shift-hours');
+    if (sh.bulk_mode) {
+      const b = sh.bulk || {};
+      shiftHoursLabel = b.is_closed ? '定休（一括）' : `${b.start_time || '?'}-${b.end_time || '?'}`;
+    } else {
+      const mon = (sh.days || {})['1'] || {};
+      shiftHoursLabel = mon.is_closed ? '月曜定休' : `${mon.start_time || '?'}-${mon.end_time || '?'}`;
+    }
+  } catch {}
+  return `<div class="gen-condition"><span class="gen-condition-label">稼働スタッフ</span><span class="gen-condition-value">${active.length}名</span></div>
          <div class="gen-condition"><span class="gen-condition-label">　社員 / アルバイト</span><span class="gen-condition-value">${active.filter((x) => x.role === 'employee').length}名 / ${active.filter((x) => x.role === 'part_time' || x.role === 'student').length}名</span></div>
          <div class="gen-condition"><span class="gen-condition-label">1日最低勤務時間</span><span class="gen-condition-value">${esc(String(s.min_daily_hours || 4))}時間</span></div>
          <div class="gen-condition"><span class="gen-condition-label">最大連勤（推奨）</span><span class="gen-condition-value">${esc(String(s.max_consecutive_days || 6))}日</span></div>
          <div class="gen-condition"><span class="gen-condition-label">深夜割増率</span><span class="gen-condition-value">${esc(String(s.night_premium_rate || 1.25))}倍</span></div>
          <div class="gen-condition"><span class="gen-condition-label">シフト時間（代表）</span><span class="gen-condition-value">${esc(shiftHoursLabel)}</span></div>
-         <div class="gen-condition"><span class="gen-condition-label">シフト時間帯</span><span class="gen-condition-value">${(patsD.patterns || []).length}枠</span></div>`);
-  }).catch(() => {});
-
-  document.getElementById('genBtn')?.addEventListener('click', () => runGenerate());
+         <div class="gen-condition"><span class="gen-condition-label">シフト時間帯</span><span class="gen-condition-value">${(patsD.patterns || []).length}枠</span></div>`;
 }
 
-/* ---------- 店舗用AIチャット画面 ---------- */
-function renderShopChatTab(body) {
+/* ---------- 店舗用AIチャット ----------
+   ダッシュボードの「AIアシスタント」カードに埋め込む。以前は専用画面
+   （SCREENS.aiGenerate のタブ）で、1通目が固定の挨拶文＝情報量ゼロだった。
+   いまは呼び出し側が seed（/shop/ai/review の助言）を渡し、開いた瞬間に
+   中身のある話から始まる。
+
+   container: 描画先の要素。中身は差し替える（card() は呼び出し側が用意する）
+   opts.seed: 会話が空のときに1通目の assistant 発言として置く文字列（任意）
+   opts.compact: true でダッシュボード用の低い高さにする */
+function renderShopChat(container, opts) {
+  const { seed = '', compact = false } = opts || {};
   if (!window._shopChat) window._shopChat = [];
-  body.innerHTML = card(
-    `<div class="chat-card">
+  // seed は会話が空のときだけ効く。画面を出入りしても会話が消えないよう、
+  // 既に発言があれば review の結果で上書きしない。
+  if (!window._shopChat.length && seed) {
+    window._shopChat.push({ role: 'assistant', content: seed });
+  }
+  container.innerHTML =
+    `<div class="chat-card${compact ? ' chat-card-compact' : ''}">
       <div class="chat-messages" id="shopChatMsgs"></div>
       <div class="chat-suggestions" id="shopChatSug"></div>
       <div class="chat-input-row">
         <textarea class="form-control chat-input" id="shopChatInput" rows="1" placeholder="シフトについて質問してください..."></textarea>
         <button class="btn btn-ai chat-send" id="shopChatSend"><i class="bi bi-send-fill"></i></button>
       </div>
-    </div>`);
+    </div>`;
   const renderMsgs = () => {
     const box = document.getElementById('shopChatMsgs');
+    if (!box) return;
     if (!window._shopChat.length) {
-      window._shopChat.push({ role: 'assistant', content: `${currentUser.shop_name}のシフト管理AIアシスタントです。\n不足状況・人件費・連勤・スタッフ配置など、何でもお気軽にどうぞ。` });
+      // seed が取れなかった場合（/shop/ai/review の失敗など）の最小の入口。
+      // 「分析中...」で固まらせず、質問はできる状態にしておく。
+      window._shopChat.push({ role: 'assistant', content: `${currentUser.shop_name}のシフトについて、不足状況・人件費・連勤・スタッフ配置など何でも聞いてください。` });
     }
     box.innerHTML = window._shopChat.map((m) => {
       if (m.content === '__thinking__') {
@@ -2217,19 +2252,28 @@ function renderShopChatTab(body) {
     }).join('');
     box.scrollTop = box.scrollHeight;
   };
+  // ダッシュボードのカードに同居するようになったので、送信中に別画面へ
+  // 移られても落ちないよう DOM 参照はすべて null ガードする。
   const renderSug = (suggestions) => {
+    const sugBox = document.getElementById('shopChatSug');
+    if (!sugBox) return;
     const items = suggestions || ['今月のシフト状況は？', '不足している時間帯は？', '人件費はいくら？', '連勤の偏りは？'];
-    document.getElementById('shopChatSug').innerHTML = items.map((s) => `<button class="chat-suggest-chip" data-sug="${esc(s)}">${esc(s)}</button>`).join('');
-    document.querySelectorAll('#shopChatSug [data-sug]').forEach((b) => b?.addEventListener('click', () => { document.getElementById('shopChatInput').value = b.dataset.sug; sendShopChat(); }));
+    sugBox.innerHTML = items.map((s) => `<button class="chat-suggest-chip" data-sug="${esc(s)}">${esc(s)}</button>`).join('');
+    sugBox.querySelectorAll('[data-sug]').forEach((b) => b?.addEventListener('click', () => {
+      const inp = document.getElementById('shopChatInput');
+      if (inp) { inp.value = b.dataset.sug; sendShopChat(); }
+    }));
   };
   async function sendShopChat() {
     const inp = document.getElementById('shopChatInput');
+    if (!inp) return;
     const msg = (inp.value || '').trim(); if (!msg) return;
     inp.value = ''; inp.style.height = 'auto';
     window._shopChat.push({ role: 'user', content: msg });
     window._shopChat.push({ role: 'assistant', content: '__thinking__' });
     renderMsgs();
-    document.getElementById('shopChatSug').innerHTML = '';
+    const sugBox = document.getElementById('shopChatSug');
+    if (sugBox) sugBox.innerHTML = '';
     try {
       const history = window._shopChat.filter((h) => h.content !== '__thinking__').slice(-11, -1);
       const d = await api('/shop/ai/chat', { method: 'POST', body: JSON.stringify({ message: msg, history }) });
@@ -2252,105 +2296,52 @@ function renderShopChatTab(body) {
   renderSug();
 }
 
-async function runGenerate() {
-  const start = document.getElementById('genStart').value;
-  const end = document.getElementById('genEnd').value;
-  if (!start || !end) { toast('期間を指定してください', 'error'); return; }
-  const resultBox = document.getElementById('genResult');
+/* ---------- Shifts (工程バー + Calendar + Summary) ----------
+   上部カードは「①希望を集める → ②AIで組む → ③調整する → ④確定する」の工程バー。
+   ③はこのカードの下にあるカレンダーそのものなので、工程バーは作業を隠さず
+   現在地と数字だけを示す（ウィザードにしてカレンダーを畳んだりしない）。
+   期間入力（#sStart / #sEnd）と #genResult は onPeriodChange とカレンダー同期が
+   依存しているため、IDごと据え置く。 */
+const SHIFT_STEPS = [
+  { no: 1, name: '希望を集める', btn: '<i class="bi bi-clipboard-plus"></i> 取り込む', btnId: 'stepImportBtn', btnCls: 'btn-light' },
+  { no: 2, name: 'AIで組む', btn: '<i class="bi bi-stars"></i> AI生成', btnId: 'autoGen', btnCls: 'btn-ai' },
+  { no: 3, name: '調整する', btn: '<i class="bi bi-plus-lg"></i> 手動追加', btnId: 'addShiftBtn', btnCls: 'btn-light' },
+  { no: 4, name: '確定する', btn: '<i class="bi bi-check2-circle"></i> 確定', btnId: 'finalizeDraftBtn', btnCls: 'btn-success' },
+];
 
-  // Step animation
-  const steps = [
-    { title: 'スタッフ希望を分析中', desc: '希望休・NG曜日・希望時間帯を確認', icon: 'bi-people' },
-    { title: '固定シフトを配置', desc: '契約済みの固定勤務を最優先で配置', icon: 'bi-calendar-check' },
-    { title: '希望シフトを組み込み', desc: '上限人数を守りながら希望を反映', icon: 'bi-pencil-square' },
-    { title: '社員で不足を補填', desc: '空き時間帯を社員が柔軟にカバー', icon: 'bi-robot' },
-    { title: '労務条件を最終チェック', desc: '連勤・月間上限・休憩を検証', icon: 'bi-shield-check' },
-  ];
-  resultBox.innerHTML = card(sectionTitle('bi-cpu', 'AI生成中') +
-    `<div class="gen-steps" id="genSteps">${steps.map((s, i) => `
-      <div class="gen-step" data-step="${i}" style="animation-delay:${i * 100}ms">
-        <div class="gen-step-icon"><i class="bi ${s.icon}"></i></div>
-        <div class="gen-step-text"><div class="gen-step-title">${s.title}</div><div class="gen-step-desc">${s.desc}</div></div>
-      </div>`).join('')}</div>
-      <div class="progress-bar mt-3"><div class="progress-bar-fill" id="genProgress" style="width:0%"></div></div>`);
-  // Animate steps
-  for (let i = 0; i < steps.length; i++) {
-    await new Promise((r) => setTimeout(r, 350));
-    const stepEl = document.querySelector(`.gen-step[data-step="${i}"]`);
-    if (stepEl) stepEl.classList.add('active');
-    document.getElementById('genProgress').style.width = `${((i + 1) / steps.length) * 80}%`;
-  }
-
-  // Run actual generation (dry run)
-  try {
-    const prev = await api('/shop/shifts/auto', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end, dry_run: true }) });
-    document.getElementById('genProgress').style.width = '100%';
-    // Mark all steps done
-    document.querySelectorAll('.gen-step').forEach((s) => { s.classList.remove('active'); s.classList.add('done'); });
-
-    // Show preview + explanations
-    const names = await api('/shop/staffs').then((sd) => { const m = {}; sd.staffs.forEach((s) => m[s.id] = s.name); return m; });
-    const mins = prev.minutes_by_staff || {};
-    const topList = Object.entries(mins).sort((a, b) => b[1] - a[1]).slice(0, 10)
-      .map(([id, m]) => `<div class="preview-pill">${esc(names[id] || ('#' + id))}<br><b class="num">${(m / 60).toFixed(1)}h</b></div>`).join('');
-
-    const explanations = (prev.explanations || []).map((e) => `
-      <div class="explanation-item">
-        <div class="ei-icon ${e.type}"><i class="bi ${e.icon}"></i></div>
-        <div class="ei-text"><strong>${esc(e.title)}</strong><br><span class="text-secondary">${esc(e.detail)}</span></div>
-      </div>`).join('');
-
-    resultBox.innerHTML = card(
-      sectionTitle('bi-eye', 'プレビュー', badge(`${prev.confirmed_count}件確定`, 'success')) +
-      `<div class="kpi-grid mb-3" style="grid-template-columns:repeat(3,1fr)">
-        <div class="kpi-card kpi-green"><div class="kpi-label">確定予定</div><div class="kpi-value num">${prev.confirmed_count}</div></div>
-        <div class="kpi-card kpi-amber"><div class="kpi-label">調整待ち</div><div class="kpi-value num">${prev.pending_count}</div></div>
-        <div class="kpi-card kpi-red"><div class="kpi-label">不足枠</div><div class="kpi-value num">${prev.shortage_unique_count != null ? prev.shortage_unique_count : (prev.shortage || []).length}</div></div>
-      </div>`) +
-    card(sectionTitle('bi-lightbulb', 'AIの判断理由', badge('Explainable AI', 'ai')) +
-      `<div class="explanation-list">${explanations}</div>`) +
-    card(sectionTitle('bi-people', 'スタッフ別 想定労働時間') + `<div class="preview-grid">${topList || '<span class="small text-secondary">なし</span>'}</div>`) +
-    card(
-      `<div class="gen-actions">
-        <button class="btn btn-primary btn-lg" style="min-width:260px" id="saveDraftBtn"><i class="bi bi-pencil-square"></i> ドラフト保存（後で調整）</button>
-        <div class="small text-secondary mt-2 mb-3">ドラフト保存後、シフト画面で調整 → 「確定」ボタンでスタッフに通知</div>
-      </div>`);
-
-    // ドラフト保存（推奨・デフォルト）
-    document.getElementById('saveDraftBtn')?.addEventListener('click', async () => {
-      setLoading(true, 'ドラフト保存中...');
-      try {
-        const d = await api('/shop/shifts/auto', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end, draft: true }) });
-        setLoading(false);
-        toast(`${d.confirmed_count}件をドラフト保存しました（確定前）`, 'success');
-        navigateTo('shifts');
-      } catch (e) { setLoading(false); toast(e.message, 'error'); }
-    });
-  } catch (e) {
-    resultBox.innerHTML = card(`<div class="text-danger">${esc(e.message)}</div>`);
-  }
+function _shiftStepBarHtml() {
+  return `<div class="step-grid" id="stepGrid">${SHIFT_STEPS.map((s) => `
+    <div class="step-cell" data-step="${s.no}">
+      <div class="step-no">STEP ${s.no}</div>
+      <div class="step-name">${s.name}</div>
+      <div class="step-stat" id="stepStat${s.no}"><span class="text-secondary">読み込み中...</span></div>
+      <button class="btn btn-sm ${s.btnCls} step-btn" id="${s.btnId}">${s.btn}</button>
+    </div>`).join('')}</div>`;
 }
 
-/* ---------- Shifts (Calendar + Summary) ---------- */
 SCREENS.shifts = function (el) {
   const p = appState.period || { start_date: '', end_date: '' };
+  // 変更申請はスタッフが出すものなので、店長のみ運用では導線ごと出さない。
+  const creqBtn = isManagerOnly() ? ''
+    : `<button class="btn btn-light w-full mt-2" id="openCreq2"><i class="bi bi-clipboard-check"></i> 変更申請を承認/却下</button>`;
   el.innerHTML = pageHead('シフト管理', 'bi-calendar3') +
-    card(sectionTitle('bi-magic', '自動作成・手動操作') +
-      `<div class="row mb-2">
-        <div class="col-6 col-sm-5"><label class="form-label" for="sStart">開始</label><input type="date" id="sStart" class="form-control" value="${esc(p.start_date)}"></div>
-        <div class="col-6 col-sm-5"><label class="form-label" for="sEnd">終了</label><input type="date" id="sEnd" class="form-control" value="${esc(p.end_date)}"></div>
-        <div class="col-12 col-sm-2 mt-2 mt-sm-0"><label class="form-label d-none d-sm-block">&nbsp;</label><button class="btn btn-ai w-full" id="autoGen" title="AI自動作成"><i class="bi bi-stars"></i> AI生成</button></div>
+    card(sectionTitle('bi-signpost-split', 'シフトを作る') +
+      `<div class="row mb-3">
+        <div class="col-6"><label class="form-label" for="sStart">開始</label><input type="date" id="sStart" class="form-control" value="${esc(p.start_date)}"></div>
+        <div class="col-6"><label class="form-label" for="sEnd">終了</label><input type="date" id="sEnd" class="form-control" value="${esc(p.end_date)}"></div>
       </div>
-      <div class="flex gap-2 flex-wrap">
-        <button class="btn btn-light flex-grow" id="addShiftBtn"><i class="bi bi-plus-lg"></i> 手動追加</button>
-        <button class="btn btn-light flex-grow" id="copyBtn"><i class="bi bi-files"></i> コピー</button>
-        <button class="btn btn-light" id="printBtn" title="印刷"><i class="bi bi-printer"></i> 印刷</button>
-        <button class="btn btn-light" id="printOrientBtn" title="用紙の向きを切り替える"><i class="bi bi-arrow-repeat"></i> <span id="printOrientLabel">横</span></button>
-        <button class="btn btn-success flex-grow" id="finalizeDraftBtn" title="AIドラフト保存中のシフトを一括確定して通知"><i class="bi bi-megaphone"></i> ドラフトを確定・通知</button>
-      </div>
+      ${_shiftStepBarHtml()}
+      <details class="step-more">
+        <summary>その他の操作</summary>
+        <div class="flex gap-2 flex-wrap mt-2">
+          <button class="btn btn-light flex-grow" id="copyBtn"><i class="bi bi-files"></i> 前回シフトをコピー</button>
+          <button class="btn btn-light" id="printBtn" title="印刷"><i class="bi bi-printer"></i> 印刷</button>
+          <button class="btn btn-light" id="printOrientBtn" title="用紙の向きを切り替える"><i class="bi bi-arrow-repeat"></i> 用紙 <span id="printOrientLabel">横</span></button>
+        </div>
+      </details>
       <div id="genResult" class="mt-2"></div>`) +
     card(sectionTitle('bi-calendar3', '確定シフトカレンダー') + `<div id="calMount"></div>`) +
-    card(sectionTitle('bi-exclamation-octagon', '不足コマ') + `<div id="shortageBox"><div class="text-secondary small">読み込み中...</div></div><button class="btn btn-light w-full mt-2" id="openCreq2"><i class="bi bi-clipboard-check"></i> 変更申請を承認/却下</button>`) +
+    card(sectionTitle('bi-exclamation-octagon', '不足コマ') + `<div id="shortageBox"><div class="text-secondary small">読み込み中...</div></div>${creqBtn}`) +
     card(sectionTitle('bi-bar-chart', '労働時間・給与集計') + `<div id="summaryBox"><div class="text-secondary small">読み込み中...</div></div>`);
 
   const sStartEl = document.getElementById('sStart');
@@ -2378,16 +2369,94 @@ SCREENS.shifts = function (el) {
   async function refreshShortage() {
     const { start, end } = cur();
     const box = document.getElementById('shortageBox');
-    if (!start || !end) { box.innerHTML = '<div class="text-muted small">期間を指定してください</div>'; return; }
-    await loadShortage(box, start, end);
+    if (!box) return { status: 'stale' };
+    if (!start || !end) { box.innerHTML = '<div class="text-muted small">期間を指定してください</div>'; return { status: 'idle' }; }
+    return loadShortage(box, start, end);
   }
-  loadSummary();
-  refreshShortage();
+
+  /* 工程バーの現在地と数字を読み直す。
+     ③の不足コマ数は loadShortage() が計算済みのものを受け取り、再計算しない。
+     各セルは独立して失敗しうるので、取れなかった数字は「—」にしてボタンは
+     押せるままにする（数字が出ないだけで作業は止めない）。 */
+  async function loadStepBar(shortage) {
+    const grid = document.getElementById('stepGrid');
+    if (!grid) return;
+    const { start, end } = cur();
+    const set = (no, html) => { const e2 = document.getElementById('stepStat' + no); if (e2) e2.innerHTML = html; };
+    if (!start || !end) {
+      [1, 2, 3, 4].forEach((n) => set(n, '<span class="text-secondary">期間を指定してください</span>'));
+      return;
+    }
+    const tok = navToken();
+    const [wishesR, shiftsR] = await Promise.allSettled([
+      api(`/shop/wishes?start=${start}&end=${end}`),
+      api(`/shop/shifts?start=${start}&end=${end}`),
+    ]);
+    if (!isAlive(tok) || !grid.isConnected) return;
+
+    // ① 希望。/shop/wishes は LIMIT 500 なので、到達したら「以上」を付けて
+    //    実際より少ない件数を確定値のように見せない。
+    let wishCount = null, wishStaff = 0, wishCapped = false;
+    if (wishesR.status === 'fulfilled') {
+      const ws = wishesR.value.wishes || [];
+      wishCount = ws.length;
+      wishCapped = ws.length >= 500;
+      wishStaff = new Set(ws.map((w) => w.staff_id)).size;
+    }
+    set(1, wishCount === null ? '<span class="text-secondary">—</span>'
+      : wishCount === 0 ? '<span class="text-secondary">まだありません</span>'
+      : `<b>${wishCount}${wishCapped ? '件以上' : '件'}</b>・${wishStaff}名分`);
+
+    // ②④ ドラフトと確定。判定は既存の描画と同じ（AIドラフト = requested かつ
+    //     reason が 'AIドラフト' 始まり）。
+    let draftCount = null, confirmedCount = null;
+    if (shiftsR.status === 'fulfilled') {
+      const ss = shiftsR.value.shifts || [];
+      draftCount = ss.filter((s) => s.status === 'requested' && (s.reason || '').startsWith('AIドラフト')).length;
+      confirmedCount = ss.filter((s) => s.status === 'confirmed').length;
+    }
+    set(2, draftCount === null ? '<span class="text-secondary">—</span>'
+      : draftCount > 0 ? `ドラフト <b>${draftCount}件</b>`
+      : confirmedCount ? '<span class="text-secondary">作成済み</span>'
+      : '<span class="text-secondary">まだ生成していません</span>');
+    set(4, draftCount === null || confirmedCount === null ? '<span class="text-secondary">—</span>'
+      : draftCount > 0 ? `<b>${draftCount}件</b>が未確定`
+      : confirmedCount > 0 ? `確定 <b>${confirmedCount}件</b>`
+      : '<span class="text-secondary">未確定</span>');
+
+    // ③ 不足コマ。loadShortage() の結果をそのまま言い換える。
+    const sh = shortage || {};
+    set(3, sh.status === 'no-patterns' ? '<span class="text-warning">時間帯が未設定</span>'
+      : sh.status === 'ok' ? (sh.gapCount ? `不足 <b>${sh.gapCount}コマ</b>` : '<span class="text-secondary">不足なし</span>')
+      : '<span class="text-secondary">—</span>');
+
+    // 現在地。上から順に最初に当たった1つだけを光らせる（同時に2つ光らせない）。
+    let now = 3;
+    if (wishCount === 0) now = 1;
+    else if (draftCount > 0) now = 4;
+    else if (confirmedCount === 0) now = 2;
+    const done = new Set();
+    if (wishCount > 0) done.add(1);
+    if (draftCount > 0 || confirmedCount > 0) done.add(2);
+    if (confirmedCount > 0 && draftCount === 0) done.add(4);
+    grid.querySelectorAll('.step-cell').forEach((c) => {
+      const n = +c.dataset.step;
+      c.classList.toggle('now', n === now);
+      c.classList.toggle('done', done.has(n) && n !== now);
+    });
+  }
+
+  /* 不足コマ → 工程バーの順で読み直す（③の数字を使い回すため）。 */
+  async function refreshAll() {
+    loadSummary();
+    const sh = await refreshShortage();
+    await loadStepBar(sh);
+  }
+  refreshAll();
 
   // 期間変更で自動再描画（カレンダーも同期）
   const onPeriodChange = () => {
-    loadSummary();
-    refreshShortage();
+    refreshAll();
     // カレンダー表示月も sStart に合わせる
     const s = sStartEl ? sStartEl.value : '';
     if (s && window._shiftCalCtrl && window._shiftCalCtrl.goToMonth) {
@@ -2400,9 +2469,17 @@ SCREENS.shifts = function (el) {
   sStartEl?.addEventListener('change', onPeriodChange);
   sEndEl?.addEventListener('change', onPeriodChange);
 
-  // AI生成ボタン: 入力期間で直接プレビュー→確定（遷移しない）
+  // STEP1: 希望の取り込み。以前は希望表管理からしか呼べなかったが、
+  // 店長が代理入力する運用ではシフトを組む直前に使うので、ここに置く。
+  // 希望表管理側のコールバックは「一覧のフィルタを広げる」もので用途が違うため、
+  // シフト画面からは工程バーとカレンダーの読み直しだけを渡す。
+  document.getElementById('stepImportBtn')?.addEventListener('click', () => openWishImportModal(() => {
+    refreshAll();
+    try { window._shiftCalCtrl?.refresh?.(); } catch {}
+  }));
+  // STEP2 AI生成ボタン: 入力期間で直接プレビュー→ドラフト保存（遷移しない）
   // ※ 各ボタンは ?. で保護（HTML描画不良時にアプリ全体が停止するのを防ぐ）
-  document.getElementById('autoGen')?.addEventListener('click', () => runShiftGenInline(cur, loadSummary, refreshShortage));
+  document.getElementById('autoGen')?.addEventListener('click', () => runShiftGenInline(cur, refreshAll));
   document.getElementById('addShiftBtn')?.addEventListener('click', () => openAddShiftModal());
   document.getElementById('copyBtn')?.addEventListener('click', () => {
     api('/shop/periods').then((d) => {
@@ -2445,19 +2522,25 @@ SCREENS.shifts = function (el) {
   applyPrintOrientation();
   document.getElementById('openCreq2')?.addEventListener('click', () => openChangeRequests());
 
-  // ドラフト保存中のシフトを一括確定して通知
+  // STEP4: ドラフト保存中のシフトを一括確定（スタッフ運用ではあわせて通知）。
+  // 店長のみ運用では読む人がいないので文言から通知の話を落とす。
+  // サーバの挙動（notifications 行を作る）は変えていない——ここを変えると
+  // /shop/shifts/finalize の既存テストに波及するため、表示だけを実態に合わせる。
   document.getElementById('finalizeDraftBtn')?.addEventListener('click', async () => {
     const { start, end } = cur();
     if (!start || !end) { toast('期間を指定してください', 'error'); return; }
-    if (!confirm(`${start} 〜 ${end} のドラフト保存シフトを確定し、全スタッフに通知しますか？\n\n・シフトが「確定」状態になります\n・スタッフに「シフト確定」通知が届きます`)) return;
-    setLoading(true, '確定・通知中...');
+    const msg = isManagerOnly()
+      ? `${start} 〜 ${end} のドラフト保存シフトを確定しますか？\n\n・シフトが「確定」状態になります`
+      : `${start} 〜 ${end} のドラフト保存シフトを確定し、全スタッフに通知しますか？\n\n・シフトが「確定」状態になります\n・スタッフに「シフト確定」通知が届きます`;
+    if (!confirm(msg)) return;
+    setLoading(true, isManagerOnly() ? '確定中...' : '確定・通知中...');
     try {
       const r = await api('/shop/shifts/finalize', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end }) });
       setLoading(false);
       const extra = r.over_cap ? `（必要人数超過 ${r.over_cap} 件。⚠️のシフトを確認してください）` : '';
       toast((r.message || `${r.finalized}件を確定しました`) + extra, r.over_cap ? 'warning' : 'success');
-      loadSummary();
-      refreshShortage();
+      refreshAll();
+      try { window._shiftCalCtrl?.refresh?.(); } catch {}
     } catch (e) { setLoading(false); toast(e.message, 'error'); }
   });
 
@@ -2481,14 +2564,20 @@ SCREENS.shifts = function (el) {
   }, 200);
 };
 
-/* AI生成: シフト画面内で直接プレビュー→ドラフト保存（遷移しない） */
-async function runShiftGenInline(cur, loadSummary, refreshShortage) {
+/* AI生成: シフト画面内で直接プレビュー→ドラフト保存（遷移しない）。
+   refreshAll は工程バー・不足コマ・集計をまとめて読み直すコールバック。 */
+async function runShiftGenInline(cur, refreshAll) {
   const { start, end } = cur();
   if (!start || !end) { toast('期間を指定してください', 'error'); return; }
   setLoading(true, 'AI がシフトを生成中...');
   const genResult = document.getElementById('genResult');
   try {
-    const prev = await api('/shop/shifts/auto', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end, dry_run: true }) });
+    // 「AIが見ている条件」は生成と並列に取る。取れなくてもプレビューは出す
+    // （条件の折りたたみが省かれるだけ）。
+    const [prev, condHtml] = await Promise.all([
+      api('/shop/shifts/auto', { method: 'POST', body: JSON.stringify({ start_date: start, end_date: end, dry_run: true }) }),
+      genConditionsHtml().catch(() => null),
+    ]);
     setLoading(false);
     const explanations = (prev.explanations || []).map((e) => `
       <div class="explanation-item">
@@ -2505,7 +2594,10 @@ async function runShiftGenInline(cur, loadSummary, refreshShortage) {
           <div class="col-4"><div class="kpi-card kpi-red" style="margin:0;padding:12px"><div class="kpi-label">不足枠</div><div class="kpi-value num">${prev.shortage_unique_count != null ? prev.shortage_unique_count : (prev.shortage || []).length}</div></div></div>
        </div>
        ${explanations ? `<div class="small fw-bold text-muted mb-2"><i class="bi bi-lightbulb"></i> AIの判断理由</div><div class="explanation-list mb-3">${explanations}</div>` : ''}
-       <div class="small text-muted">※ドラフトとして保存後、日別シフト表で時間を調整できます。スタッフへの通知は「ドラフトを確定・通知」を押すまで送信されません。</div>`,
+       ${condHtml ? `<details class="gen-conditions mb-3"><summary><i class="bi bi-clipboard-data"></i> AIが見た条件</summary><div class="mt-2">${condHtml}</div></details>` : ''}
+       <div class="small text-muted">${isManagerOnly()
+         ? '※ドラフトとして保存後、日別シフト表で時間を調整できます。「確定」を押すまでシフトは確定しません。'
+         : '※ドラフトとして保存後、日別シフト表で時間を調整できます。スタッフへの通知は「確定」を押すまで送信されません。'}</div>`,
       async (w2, close) => {
         setLoading(true, 'ドラフトを保存中...');
         try {
@@ -2515,7 +2607,7 @@ async function runShiftGenInline(cur, loadSummary, refreshShortage) {
           toast(`${d.confirmed_count}件をドラフト保存しました。日別シフト表で調整できます。`, 'success');
           // カレンダーを作成月へジャンプ
           try { const d0 = new Date(start + 'T00:00:00'); if (window._shiftCalCtrl) window._shiftCalCtrl.goToMonth(d0.getFullYear(), d0.getMonth()); } catch {}
-          loadSummary(); refreshShortage(); refreshNotifBadge();
+          refreshAll(); refreshNotifBadge();
         } catch (e) { setLoading(false); toast(e.message, 'error'); }
       });
     w.querySelector('[data-save]').textContent = 'ドラフトとして保存して調整';
@@ -4389,12 +4481,16 @@ SCREENS.notifications = async function (el) {
 /* ---------- Settings ---------- */
 let settingsTab = 'shift';
 SCREENS.settings = function (el) {
+  // 募集期間はスタッフが希望を提出する窓口の設定なので、店長のみ運用では出さない。
+  // 直前に開いていたタブが消える場合は店舗情報へ寄せる（空白のタブ本体を防ぐ）。
+  const hidePeriods = isManagerOnly();
+  if (hidePeriods && settingsTab === 'periods') settingsTab = 'shop';
   el.innerHTML = pageHead('設定', 'bi-gear') +
     `<div class="tabs no-print">
       <button class="tab ${settingsTab==='shift'?'active':''}" data-tab="shift">シフト設定</button>
       <button class="tab ${settingsTab==='shifthours'?'active':''}" data-tab="shifthours">シフト時間設定</button>
       <button class="tab ${settingsTab==='shop'?'active':''}" data-tab="shop">店舗情報</button>
-      <button class="tab ${settingsTab==='periods'?'active':''}" data-tab="periods">募集期間</button>
+      ${hidePeriods ? '' : `<button class="tab ${settingsTab==='periods'?'active':''}" data-tab="periods">募集期間</button>`}
       <button class="tab ${settingsTab==='password'?'active':''}" data-tab="password">パスワード</button>
     </div><div id="settingsBody"></div>`;
   el.querySelectorAll('.tab').forEach((t) => t?.addEventListener('click', () => { settingsTab = t.dataset.tab; el.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x === t)); renderSettingsTab(el.querySelector('#settingsBody')); }));
@@ -5400,9 +5496,22 @@ function renderShopTab(body) {
          <div class="col-12"><label class="form-label">シフト時間設定</label><div class="info-box"><i class="bi bi-info-circle"></i> シフト作成可能な時間帯は <strong>「シフト時間設定」タブ</strong> で管理しています（曜日別・祝日対応）。</div></div>
          <div class="col-6"><label class="form-label" for="setPeriodMode">デフォルト期間</label><select id="setPeriodMode" class="form-select"><option value="half" ${(s.period_mode || 'half') === 'half' ? 'selected' : ''}>半月ごと</option><option value="month" ${s.period_mode === 'month' ? 'selected' : ''}>1ヶ月ごと</option></select></div>
        </div>
+       <hr style="border-color:var(--rule);margin:16px 0">
+       ${sectionTitle('bi-people', '誰がこのアプリを使うか')}
+       <div class="op-mode-choices">
+         <label class="op-mode-choice">
+           <input type="radio" name="opMode" value="staff" ${s.operation_mode === 'manager_only' ? '' : 'checked'}>
+           <span><b>スタッフも使う</b><br><span class="text-secondary small">スタッフがログインして自分で希望を出します。</span></span>
+         </label>
+         <label class="op-mode-choice">
+           <input type="radio" name="opMode" value="manager_only" ${s.operation_mode === 'manager_only' ? 'checked' : ''}>
+           <span><b>店長だけで使う</b><br><span class="text-secondary small">紙やLINEで集めた希望を店長が代理入力します。「マイシフト・希望」「通知」「募集期間」「変更申請」が画面から消えます。スタッフのデータは消えません。</span></span>
+         </label>
+       </div>
        <button class="btn btn-primary btn-lg w-full mt-3" id="saveSettings">保存</button>
        <div id="setMsg" class="mt-2 small"></div>`);
     body.querySelector('#saveSettings')?.addEventListener('click', async () => {
+      const opMode = body.querySelector('input[name="opMode"]:checked')?.value === 'manager_only' ? 'manager_only' : 'staff';
       try {
         await api('/shop/settings', { method: 'PUT', body: JSON.stringify({
           shop_name: body.querySelector('#setShopName').value,
@@ -5410,8 +5519,15 @@ function renderShopTab(body) {
             default_hourly_wage: +body.querySelector('#setWage').value, min_daily_hours: +body.querySelector('#setMinDaily').value,
             max_daily_hours: +body.querySelector('#setMaxDaily').value, max_consecutive_days: +body.querySelector('#setMaxConsec').value,
             night_premium_rate: +body.querySelector('#setNightRate').value, transport_per_day: +body.querySelector('#setTransport').value,
-            period_mode: body.querySelector('#setPeriodMode').value } }) });
+            period_mode: body.querySelector('#setPeriodMode').value, operation_mode: opMode } }) });
         toast('保存しました', 'success'); currentUser.shop_name = body.querySelector('#setShopName').value;
+        // 運用モードを変えたらナビの項目数が変わる。保存直後に反映する
+        // （再ログインしないと切り替わらない、という分かりにくさを避ける）。
+        if (appState.operationMode !== opMode) {
+          appState.operationMode = opMode;
+          renderNav();
+          setActiveNav();
+        }
       } catch (e) { toast(e.message, 'error'); }
     });
   });

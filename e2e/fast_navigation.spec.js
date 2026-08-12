@@ -50,7 +50,7 @@ test.describe('高速遷移テスト', () => {
       password: SHOP.managerPassword,
     });
     // サイドメニューの各項目を高速クリック
-    const items = ['dashboard', 'shifts', 'aiGenerate', 'staffs', 'requests', 'analytics', 'notifications', 'settings'];
+    const items = ['dashboard', 'shifts', 'staffs', 'myshift', 'requests', 'analytics', 'notifications', 'settings'];
     for (const key of items) {
       await page.locator(`button[data-screen="${key}"]`).first().click({ timeout: 3000 }).catch(() => {});
     }
