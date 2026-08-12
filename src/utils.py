@@ -423,7 +423,7 @@ def parse_settings(s):
 SETTINGS_KEYS = frozenset({
     "business_hours", "default_hourly_wage", "max_consecutive_days", "max_daily_hours",
     "max_employee_daily_hours", "min_daily_hours", "night_premium_rate",
-    "period_mode", "shift_hours", "transport_per_day",
+    "operation_mode", "period_mode", "shift_hours", "transport_per_day",
 })
 
 _SETTINGS_NUMERIC_KEYS = frozenset({
@@ -433,6 +433,26 @@ _SETTINGS_NUMERIC_KEYS = frozenset({
 })
 
 _SETTINGS_PERIOD_MODES = frozenset({"half", "month"})
+
+# 運用モード。"staff" はスタッフもログインして自分で希望を出す通常運用、
+# "manager_only" は店長だけがアプリを使い、紙やLINEで集めた希望を代理入力する運用。
+# 画面の出し分けにしか使わない（サーバ側の権限・通知の挙動は変えない）。
+# 未設定の店舗は "staff" 扱い（DEFAULT_OPERATION_MODE）。
+_SETTINGS_OPERATION_MODES = frozenset({"staff", "manager_only"})
+DEFAULT_OPERATION_MODE = "staff"
+
+
+def operation_mode_of(settings):
+    """shops.settings（parse 済み dict）から運用モードを取り出す。
+
+    未設定・不正値は既定の "staff" に倒す。値の検証は保存時
+    （validate_known_settings_values）に効くが、この関数が読むのは
+    検証が入る前に保存された古い行でもありうるため、読み出し側でも丸める。
+    """
+    if not isinstance(settings, dict):
+        return DEFAULT_OPERATION_MODE
+    mode = settings.get("operation_mode")
+    return mode if mode in _SETTINGS_OPERATION_MODES else DEFAULT_OPERATION_MODE
 
 # "HH:MM-HH:MM" 形式（旧 business_hours 設定）。日またぎ営業を表すため時は0-47まで許可
 # （src/app.py の _validate_hhmm / shift_hours の扱いと同じ範囲に揃えている）。
@@ -540,8 +560,14 @@ def validate_known_settings_values(patch):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError(f"{key} は数値で指定してください")
         elif key == "period_mode":
-            if value not in _SETTINGS_PERIOD_MODES:
+            # isinstance(str) を先に見るのは、list/dict を `in frozenset` に渡すと
+            # unhashable で TypeError になり、@errorhandler(ValueError) に拾われず
+            # 400 のはずが 500 になるため（{"period_mode": []} で再現した）。
+            if not isinstance(value, str) or value not in _SETTINGS_PERIOD_MODES:
                 raise ValueError("period_mode は half か month で指定してください")
+        elif key == "operation_mode":
+            if not isinstance(value, str) or value not in _SETTINGS_OPERATION_MODES:
+                raise ValueError("operation_mode は staff か manager_only で指定してください")
         elif key == "business_hours":
             if not isinstance(value, str) or not _BUSINESS_HOURS_RE.match(value):
                 raise ValueError("business_hours の形式が不正です（例: 09:00-22:00）")
